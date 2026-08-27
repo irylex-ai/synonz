@@ -1,0 +1,37 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/synonz",
+    "crates/synonz-derive",
+    "crates/synonz-openai",
+    "crates/synonz-anthropic",
+    "crates/synonz-mcp",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "Apache-2.0"
+
+# Version catalog: referenced by member crates as `foo.workspace = true`.
+# Entries are declarations only until a crate opts in.
+[workspace.dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+tokio = { version = "1", features = ["macros", "rt", "sync", "time"] }
+tokio-util = "0.7"
+futures-core = "0.3"
+reqwest = { version = "0.12", default-features = false, features = ["json", "stream"] }
+schemars = "1.2"
+rmcp = "3.1"
+syn = "2"
+quote = "1"
+proc-macro2 = "1"
+
+[workspace.lints.rust]
+unsafe_code = "deny"
+missing_docs = "warn"
+
+[workspace.lints.clippy]
+all = "warn"

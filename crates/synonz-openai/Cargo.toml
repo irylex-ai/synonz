@@ -1,0 +1,9 @@
+[package]
+name = "synonz-openai"
+description = "OpenAI-compatible model adapter for the Synonz agent framework"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lints]
+workspace = true
