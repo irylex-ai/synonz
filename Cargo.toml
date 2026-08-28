@@ -25,7 +25,7 @@ tokio-util = "0.7"
 futures = "0.3"
 reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "rustls-tls"] }
 schemars = { version = "1.2", features = ["derive"] }
-rmcp = "3.1"
+rmcp = { version = "3.1", default-features = false }
 syn = "2"
 quote = "1"
 proc-macro2 = "1"

@@ -7,3 +7,16 @@ license.workspace = true
 
 [lints]
 workspace = true
+
+[dependencies]
+rmcp = { workspace = true, features = ["client", "transport-child-process"] }
+serde_json.workspace = true
+synonz.workspace = true
+thiserror.workspace = true
+tokio = { workspace = true, features = ["process"] }
+
+[dev-dependencies]
+rmcp = { workspace = true, features = ["server", "macros", "transport-io"] }
+schemars.workspace = true
+serde.workspace = true
+tokio = { workspace = true, features = ["io-util", "process"] }
