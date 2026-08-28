@@ -83,7 +83,8 @@ impl ModelRequest {
 /// One item of a model response stream.
 ///
 /// A well-formed stream yields any number of [`ModelStreamItem::Delta`] and
-/// then exactly one [`ModelStreamItem::Finish`] (the terminal item).
+/// then exactly one [`ModelStreamItem::Finish`] (the terminal item), or a
+/// terminal [`ModelStreamItem::Failed`] on mid-stream failure.
 /// Non-streaming backends yield only the finish item.
 #[non_exhaustive]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -97,6 +98,11 @@ pub enum ModelStreamItem {
         /// Token accounting for this call.
         usage: TokenUsage,
     },
+    /// Mid-stream failure (transport or provider protocol); terminal for
+    /// the call. Added after the initial two-variant contract: streams can
+    /// fail mid-flight, and failing explicitly beats masking the error as
+    /// content.
+    Failed(ModelError),
 }
 
 /// The model contract: perform one inference call.
@@ -135,6 +141,7 @@ pub async fn complete(
     loop {
         match std::future::poll_fn(|cx| stream.as_mut().poll_next(cx)).await {
             Some(ModelStreamItem::Delta(_)) => continue,
+            Some(ModelStreamItem::Failed(error)) => return Err(error),
             Some(ModelStreamItem::Finish { message, usage }) => return Ok((message, usage)),
             None => {
                 return Err(ModelError::Api {

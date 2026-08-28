@@ -371,6 +371,12 @@ impl LoopTask {
                             emit!(AgentEvent::Model(ModelEvent::StreamDelta { delta }));
                             continue;
                         }
+                        Some(ModelStreamItem::Failed(error)) => {
+                            emit!(AgentEvent::Lifecycle(LifecycleEvent::Failed {
+                                error: AgentError::Model(error),
+                            }));
+                            return;
+                        }
                         Some(ModelStreamItem::Finish { message, usage }) => (message, usage),
                         None => {
                             emit!(AgentEvent::Lifecycle(LifecycleEvent::Failed {
