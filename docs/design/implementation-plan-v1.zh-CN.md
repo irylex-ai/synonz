@@ -196,3 +196,4 @@ DRAFT →（人工评审）→ APPROVED →（M0 启动）→ IMPLEMENTING
 | M1 | ✅ 完成 | 2026-08-28 | canonical Message + 事件体系 + 错误分类 + io 边界类型；20 测试全绿（不变量 6 / round-trip + 快照 9 / doctest 1）；serde 双 tag 格式锁定 |
 | M2 | ✅ 完成 | 2026-08-28 | Tool/Model trait（dyn 兼容验证）+ ToolContext/ToolSpec/ToolError + ModelRequest/Params/StreamItem + complete() + 取消引擎（drop/token/timeout 三入口汇一，mock future 协作式中断测试）；依赖定案：futures 门面 |
 | M3 | ✅ 完成 | 2026-08-28 | Agent/Builder/RunStream + 推理-行动-观察循环 + 事件投影 + 并行工具（CallId 配对、完成序事件、确定性会话序）+ MockModel（test-util feature）；14 场景集成套件全绿（含三入口取消、协作式中断哨兵验证、录制回放）；取消引擎重构为 Core/Handle 权属拆分 |
+| M4 | ✅ 完成 | 2026-08-28 | schemars 1.2 spike 定案（doc→description、Option 可选、根含 $schema/title，已锁回归测试）；`#[derive(Tool)]`（snake_case 命名/doc 描述/schema 缓存/类型化反序列化）；synonz 重导出 schema_for/JsonSchema/Deserialize/serde_json + BoxFuture 别名——下游实现工具仅需 synonz 一个依赖；等价性对照测试 6 项 |

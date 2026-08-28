@@ -18,7 +18,7 @@
 //! Retry policy belongs to the caller. The framework performs no automatic
 //! retries; hidden retries would hide latency and cost.
 
-use futures::future::BoxFuture;
+use crate::BoxFuture;
 use futures::stream::BoxStream;
 use serde::{Deserialize, Serialize};
 

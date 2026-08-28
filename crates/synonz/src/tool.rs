@@ -20,12 +20,12 @@
 //! next await point) apply; implementations should document their
 //! cancellation safety class.
 
-use futures::future::BoxFuture;
 use serde::Deserialize;
 use serde::Serialize;
 use serde_json::Value;
 use thiserror::Error;
 
+use crate::BoxFuture;
 use crate::message::ToolResult;
 
 /// The context passed to every tool invocation.
@@ -53,6 +53,39 @@ impl ToolContext {
 /// for the typed form. The contract is dyn-compatible so an agent can hold
 /// a heterogeneous set of tools (in-process and bridged) behind
 /// `Arc<dyn Tool>`.
+///
+/// # Typed form via `#[derive(Tool)]`
+///
+/// ```
+/// use synonz::{Deserialize, JsonSchema, Tool, ToolContent, ToolError, ToolResult};
+///
+/// /// 查询城市天气
+/// #[derive(Tool, Deserialize, JsonSchema)]
+/// struct Weather {
+///     /// 城市名
+///     city: String,
+/// }
+///
+/// impl Weather {
+///     async fn run(&self) -> Result<ToolResult, ToolError> {
+///         Ok(ToolResult::Ok {
+///             content: ToolContent::Text {
+///                 text: format!("{}: sunny", self.city),
+///             },
+///         })
+///     }
+/// }
+///
+/// # async fn demo(ctx: synonz::ToolContext) {
+/// let weather = Weather { city: "beijing".into() };
+/// assert_eq!(weather.name(), "weather");
+/// let result = weather
+///     .execute(serde_json::json!({"city": "beijing"}), ctx)
+///     .await
+///     .unwrap();
+/// assert!(matches!(result, ToolResult::Ok { .. }));
+/// # }
+/// ```
 pub trait Tool: Send + Sync {
     /// The tool's name as the model addresses it.
     fn name(&self) -> &str;

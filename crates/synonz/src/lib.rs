@@ -49,3 +49,32 @@ pub use tool::{Tool, ToolContext, ToolError, ToolSpec};
 
 #[cfg(feature = "test-util")]
 pub use mock::MockModel;
+
+// ── Derive macro and companion re-exports ──
+//
+// `#[derive(Tool)]` generates code referencing these paths, so downstream
+// crates implement tools with `synonz` as their only dependency.
+
+/// The derive macro behind `#[derive(Tool)]`.
+///
+/// Generates the [`Tool`] implementation for a struct whose fields are the
+/// tool's arguments. See the macro's documentation for the contract.
+pub use synonz_derive::Tool;
+
+/// Boxed future used by the [`Tool`] and [`Model`] contracts.
+///
+/// A stable alias so downstream implementors do not need to depend on
+/// `futures` directly.
+pub type BoxFuture<'a, T> = futures::future::BoxFuture<'a, T>;
+
+/// JSON Schema generation (re-exported for `#[derive(Tool)]` companions).
+pub use schemars::schema_for;
+
+/// The `JsonSchema` derive (re-exported for `#[derive(Tool)]` companions).
+pub use schemars::JsonSchema;
+
+/// Serialization derives (re-exported for `#[derive(Tool)]` companions).
+pub use serde::{Deserialize, Serialize};
+
+/// JSON serialization (re-exported; generated tool code references it).
+pub use serde_json;
