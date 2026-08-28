@@ -3,6 +3,7 @@
 //!
 //! # Layout
 //!
+//! - [`agent`] — the agent, its builder, and the run event stream.
 //! - [`message`] — the canonical conversation form and its invariants.
 //! - [`event`] — the run event model (the single ordered narrative of a
 //!   run).
@@ -10,6 +11,7 @@
 //! - [`io`] — run boundary types (input and final output).
 //! - [`tool`] — the tool contract (capabilities).
 //! - [`model`] — the model contract (LLM inference).
+//! - [`mock`] — deterministic test doubles (feature `test-util`).
 //!
 //! Cancellation adopts the ecosystem primitive:
 //! [`CancellationToken`] is re-exported here as the framework's cancellation
@@ -17,6 +19,7 @@
 //!
 //! All commonly used types are re-exported at the crate root.
 
+pub mod agent;
 pub mod error;
 pub mod event;
 pub mod io;
@@ -26,6 +29,10 @@ pub mod tool;
 
 mod cancel;
 
+#[cfg(feature = "test-util")]
+pub mod mock;
+
+pub use agent::{Agent, AgentBuilder, DEFAULT_MAX_ROUNDS, RunStream};
 pub use error::{AgentError, ModelError};
 pub use event::{
     AgentEvent, CallPurpose, CancelReason, LifecycleEvent, ModelDelta, ModelEvent, TokenUsage,
@@ -39,3 +46,6 @@ pub use message::{
 pub use model::{Model, ModelParams, ModelRequest, ModelStream, ModelStreamItem, complete};
 pub use tokio_util::sync::CancellationToken;
 pub use tool::{Tool, ToolContext, ToolError, ToolSpec};
+
+#[cfg(feature = "test-util")]
+pub use mock::MockModel;

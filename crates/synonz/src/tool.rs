@@ -76,6 +76,25 @@ pub trait Tool: Send + Sync {
     ) -> BoxFuture<'a, Result<ToolResult, ToolError>>;
 }
 
+impl<T: Tool + ?Sized> Tool for std::sync::Arc<T> {
+    fn name(&self) -> &str {
+        (**self).name()
+    }
+    fn description(&self) -> &str {
+        (**self).description()
+    }
+    fn parameters_schema(&self) -> &Value {
+        (**self).parameters_schema()
+    }
+    fn execute<'a>(
+        &'a self,
+        args: Value,
+        ctx: ToolContext,
+    ) -> BoxFuture<'a, Result<ToolResult, ToolError>> {
+        (**self).execute(args, ctx)
+    }
+}
+
 /// Failure of a tool invocation's machinery.
 ///
 /// Always soft: converted by the loop into [`ToolResult::Err`] for the

@@ -4,16 +4,21 @@
 //! ([`CancellationToken`]) and converges all cancellation entries onto a
 //! single internal token:
 //!
-//! - **drop**: the run stream owns a drop guard; dropping it cancels;
+//! - **drop**: the run stream owns a [`CancelHandle`] whose drop guard
+//!   cancels the token when the consumer walks away;
 //! - **token**: an external token is linked as the *parent* of the internal
 //!   token, so its cancellation propagates;
 //! - **timeout**: an armed sleeper cancels the token and marks the outcome
 //!   as [`CancelOutcome::Timeout`].
 //!
-//! Awaiting every suspension point on `cancelled()` (via `select!`) is the
-//! loop's responsibility; this module only owns the signal and the reason.
+//! Ownership is split: the [`CancelCore`] (signal + reason) is shared with
+//! the loop; the [`CancelHandle`] (drop guard + arming) stays with the run
+//! stream. Awaiting every suspension point on `cancelled()` (via `select!`)
+//! is the loop's responsibility; this module only owns the signal and the
+//! reason.
 
 use std::sync::Arc;
+use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
@@ -21,8 +26,6 @@ use tokio::task::JoinHandle;
 use tokio_util::sync::{CancellationToken, DropGuard};
 
 /// What triggered the internal cancellation signal.
-// Wired by the run loop (M3); the engine and its tests land in M2 per plan.
-#[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum CancelOutcome {
     /// The time budget armed on this run elapsed.
@@ -31,37 +34,36 @@ pub(crate) enum CancelOutcome {
     Signal,
 }
 
-/// The run's internal cancellation signal.
-#[allow(dead_code)]
-pub(crate) struct CancelEngine {
+/// The shared cancellation signal and reason tracking.
+pub(crate) struct CancelCore {
     token: CancellationToken,
     timeout_fired: Arc<AtomicBool>,
-    timeout_task: Option<JoinHandle<()>>,
-    // Cancels the token when the engine (and therefore the run stream) is
-    // dropped. Drops after `Drop::drop`, so explicit cleanup runs first.
-    _drop_guard: DropGuard,
+    // Poisoning is tolerated (`unwrap_or_else(into_inner)`): the guarded
+    // section only swaps a task handle, so recovery is always sound.
+    timeout_task: Mutex<Option<JoinHandle<()>>>,
 }
 
-// Wired by the run loop (M3); the engine and its tests land in M2 per plan.
+// `is_cancelled`/`core` are part of the engine's contract for downstream
+// milestones (S2/S3 consumers); the loop itself currently reads the signal
+// only through `cancelled()`.
 #[allow(dead_code)]
-impl CancelEngine {
-    /// Creates an engine for a run without an external token.
-    pub(crate) fn new() -> Self {
+impl CancelCore {
+    /// Creates a core for a run without an external token.
+    pub(crate) fn new() -> Arc<Self> {
         Self::from_token(CancellationToken::new())
     }
 
-    /// Creates an engine whose signal fires whenever the parent token fires.
-    pub(crate) fn child_of(parent: &CancellationToken) -> Self {
+    /// Creates a core whose signal fires whenever the parent token fires.
+    pub(crate) fn child_of(parent: &CancellationToken) -> Arc<Self> {
         Self::from_token(parent.child_token())
     }
 
-    fn from_token(token: CancellationToken) -> Self {
-        Self {
-            _drop_guard: token.clone().drop_guard(),
+    fn from_token(token: CancellationToken) -> Arc<Self> {
+        Arc::new(Self {
             timeout_fired: Arc::new(AtomicBool::new(false)),
-            timeout_task: None,
+            timeout_task: Mutex::new(None),
             token,
-        }
+        })
     }
 
     /// The internal signal; suspension points select on its cancellation.
@@ -69,12 +71,16 @@ impl CancelEngine {
         &self.token
     }
 
-    /// Arms the time budget. Fires the signal with
+    /// Arms the time budget (once per run). Fires the signal with
     /// [`CancelOutcome::Timeout`] when `duration` elapses first.
-    pub(crate) fn arm_timeout(&mut self, duration: Duration) {
+    pub(crate) fn arm_timeout(self: &Arc<Self>, duration: Duration) {
+        let mut task = self.timeout_task.lock().unwrap_or_else(|p| p.into_inner());
+        if task.is_some() {
+            return; // armed once; later calls are no-ops
+        }
         let token = self.token.clone();
         let fired = Arc::clone(&self.timeout_fired);
-        self.timeout_task = Some(tokio::spawn(async move {
+        *task = Some(tokio::spawn(async move {
             tokio::select! {
                 _ = token.cancelled() => {
                     // Cancelled by another entry before the budget elapsed.
@@ -103,11 +109,46 @@ impl CancelEngine {
     }
 }
 
-impl Drop for CancelEngine {
+impl Drop for CancelCore {
     fn drop(&mut self) {
-        if let Some(task) = self.timeout_task.take() {
+        if let Some(task) = self
+            .timeout_task
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .take()
+        {
             task.abort();
         }
+    }
+}
+
+/// The consumer-side cancellation handle: owns the drop entry.
+///
+/// Dropping the handle cancels the signal — this is how dropping a run
+/// stream cancels the run. The handle also arms the time budget.
+pub(crate) struct CancelHandle {
+    core: Arc<CancelCore>,
+    _drop_guard: DropGuard,
+}
+
+#[allow(dead_code)]
+impl CancelHandle {
+    /// Wraps a core with a drop guard.
+    pub(crate) fn new(core: Arc<CancelCore>) -> Self {
+        Self {
+            _drop_guard: core.token.clone().drop_guard(),
+            core,
+        }
+    }
+
+    /// The shared signal core (used by the loop before the first yield).
+    pub(crate) fn core(&self) -> &CancelCore {
+        &self.core
+    }
+
+    /// Arms the time budget.
+    pub(crate) fn arm_timeout(&self, duration: Duration) {
+        self.core.arm_timeout(duration);
     }
 }
 
@@ -116,11 +157,11 @@ mod tests {
     use super::*;
 
     #[tokio::test]
-    async fn drop_of_engine_cancels_signal() {
-        let engine = CancelEngine::new();
-        let token = engine.token().clone();
+    async fn drop_of_handle_cancels_signal() {
+        let handle = CancelHandle::new(CancelCore::new());
+        let token = handle.core().token().clone();
         assert!(!token.is_cancelled());
-        drop(engine);
+        drop(handle);
         token.cancelled().await;
         assert!(token.is_cancelled());
     }
@@ -128,16 +169,16 @@ mod tests {
     #[tokio::test]
     async fn parent_token_propagates() {
         let parent = CancellationToken::new();
-        let engine = CancelEngine::child_of(&parent);
+        let handle = CancelHandle::new(CancelCore::child_of(&parent));
         parent.cancel();
-        assert_eq!(engine.cancelled().await, CancelOutcome::Signal);
+        assert_eq!(handle.core().cancelled().await, CancelOutcome::Signal);
     }
 
     #[tokio::test]
     async fn timeout_fires_with_timeout_outcome() {
-        let mut engine = CancelEngine::new();
-        engine.arm_timeout(Duration::from_millis(20));
-        assert_eq!(engine.cancelled().await, CancelOutcome::Timeout);
+        let handle = CancelHandle::new(CancelCore::new());
+        handle.arm_timeout(Duration::from_millis(20));
+        assert_eq!(handle.core().cancelled().await, CancelOutcome::Timeout);
     }
 
     #[tokio::test]
@@ -151,8 +192,8 @@ mod tests {
             }
         }
 
-        let engine = CancelEngine::new();
-        let token = engine.token().clone();
+        let handle = CancelHandle::new(CancelCore::new());
+        let token = handle.core().token().clone();
         let dropped = Arc::new(AtomicBool::new(false));
         let sentinel = Sentinel(Arc::clone(&dropped));
 
@@ -167,7 +208,7 @@ mod tests {
         };
 
         tokio::select! {
-            outcome = engine.cancelled() => {
+            outcome = handle.core().cancelled() => {
                 assert_eq!(outcome, CancelOutcome::Signal);
             }
             _ = inflight => unreachable!("pending future must not resolve"),

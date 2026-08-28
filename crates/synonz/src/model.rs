@@ -113,6 +113,12 @@ pub trait Model: Send + Sync {
     fn stream(&self, request: ModelRequest) -> BoxFuture<'_, Result<ModelStream, ModelError>>;
 }
 
+impl<M: Model + ?Sized> Model for std::sync::Arc<M> {
+    fn stream(&self, request: ModelRequest) -> BoxFuture<'_, Result<ModelStream, ModelError>> {
+        (**self).stream(request)
+    }
+}
+
 /// Convenience: non-streaming completion.
 ///
 /// Folds the model's stream until its terminal [`ModelStreamItem::Finish`],
