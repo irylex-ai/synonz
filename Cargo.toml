@@ -6,6 +6,7 @@ members = [
     "crates/synonz-openai",
     "crates/synonz-anthropic",
     "crates/synonz-mcp",
+    "examples",
 ]
 
 [workspace.package]
@@ -31,6 +32,9 @@ quote = "1"
 proc-macro2 = "1"
 synonz = { path = "crates/synonz", version = "0.1.0" }
 synonz-derive = { path = "crates/synonz-derive", version = "0.1.0" }
+synonz-openai = { path = "crates/synonz-openai", version = "0.1.0" }
+synonz-anthropic = { path = "crates/synonz-anthropic", version = "0.1.0" }
+synonz-mcp = { path = "crates/synonz-mcp", version = "0.1.0" }
 
 [workspace.lints.rust]
 unsafe_code = "deny"

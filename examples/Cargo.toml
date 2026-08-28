@@ -1,0 +1,46 @@
+[package]
+name = "synonz-examples"
+description = "Runnable examples for the Synonz agent framework"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+[dependencies]
+futures.workspace = true
+rmcp = { workspace = true, features = ["server", "macros", "transport-io"] }
+schemars.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+synonz = { workspace = true, features = ["test-util"] }
+synonz-anthropic.workspace = true
+synonz-mcp.workspace = true
+synonz-openai.workspace = true
+tokio = { workspace = true, features = ["full"] }
+
+[[bin]]
+name = "custom_tool"
+path = "custom_tool.rs"
+
+[[bin]]
+name = "events"
+path = "events.rs"
+
+[[bin]]
+name = "cancellation"
+path = "cancellation.rs"
+
+[[bin]]
+name = "mcp_tools"
+path = "mcp_tools.rs"
+
+[[bin]]
+name = "openai_chat"
+path = "openai_chat.rs"
+
+[[bin]]
+name = "anthropic_chat"
+path = "anthropic_chat.rs"

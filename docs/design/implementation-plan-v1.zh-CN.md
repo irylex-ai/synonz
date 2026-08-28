@@ -1,6 +1,6 @@
 # Synonz v1 实现计划
 
-- 状态: IMPLEMENTING（2026-08-28 评审通过；M0 启动）
+- 状态: VERIFIED（2026-08-28 全部里程碑 M0-M8 完成；实现与文档一致性核对通过）
 - 日期: 2026-08-28
 - 依据: ADR-0001 ~ ADR-0009（均 APPROVED）、架构设计文档 v1（APPROVED）
 - 性质: 开发文档（中文优先）——实现阶段的执行次序、验收基准与工程基线；
@@ -200,3 +200,4 @@ DRAFT →（人工评审）→ APPROVED →（M0 启动）→ IMPLEMENTING
 | M5 | ✅ 完成 | 2026-08-28 | synonz-openai：canonical↔OpenAI 翻译层（system/user/assistant+tool_calls/role:tool/arguments 字符串化/tool error 文本前缀）+ 手写 SSE 增量解析器 + reqwest client + SSE→ModelStream 状态机 unfold；wiremock 端到端流式测试 + env-key 门控冒烟（SYNONZ_OPENAI_API_KEY）；新增 ModelStreamItem::Failed 变体（流中途失败显式化）；futures/futures-core 合并为 futures 门面 |
 | M6 | ✅ 完成 | 2026-08-28 | synonz-anthropic：翻译层（system 顶层参数、块数组内容、tool_use input 对象、tool_result 并入 user 消息 + 原生 is_error）+ block-indexed 流式累加器（text_delta/input_json_delta 合并、usage 双事件提取、stop_reason/message_stop 终态）+ x-api-key/anthropic-version 头；wiremock 端到端 + env-key 冒烟（SYNONZ_ANTHROPIC_API_KEY）；SSE 解析器刻意复制（~60 行不立共享 crate，第三个适配器出现时晋升） |
 | M7 | ✅ 完成 | 2026-08-28 | synonz-mcp：rmcp 3.1 官方 SDK 桥接（锁 minor；client+transport-child-process features）；McpBridge（通用 connect(transport) + connect_stdio 便捷 + from_running 发现）+ McpTool（元数据→ToolSpec、call 转发）；双测试：tokio duplex 内存传输（发现/往返/软失败映射/非对象参数拒绝）+ re-exec 自身二进制真 stdio 子进程往返（--ignored 辅助测试）；MCP JSON-RPC 工具错误→ToolResult::Err 软失败 |
+| M8 | ✅ 完成 | 2026-08-28 | examples 包（6 bin：custom_tool/events/cancellation/mcp_tools 离线 + openai_chat/anthropic_chat env-key 门控）；四个离线示例真实运行验证（工具循环/事件叙事/三取消入口/MCP 桥接）；最小 README；cargo doc 零警告（rustdoc 完整性）；workspace 成员 6 crates 全部 lint/format/test 绿 |

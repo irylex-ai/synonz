@@ -2,7 +2,7 @@
 //!
 //! # `#[derive(Tool)]`
 //!
-//! Turns a struct into a [`Tool`][synonz::Tool] whose fields are the tool's
+//! Turns a struct into a `Tool` implementation whose fields are the tool's
 //! arguments. The struct must also derive `Deserialize` and `JsonSchema`
 //! (both re-exported by `synonz`) and define
 //! `async fn run(&self) -> Result<ToolResult, ToolError>`:
@@ -36,7 +36,7 @@
 //! - `name`: the struct name in `snake_case`;
 //! - `description`: the struct's doc comment (trimmed);
 //! - `parameters_schema`: the JSON Schema of the struct, generated via
-//!   [`schema_for`][synonz::schema_for] and cached — doc comments on fields
+//!   `schema_for!` and cached — doc comments on fields
 //!   become property descriptions;
 //! - `execute`: deserializes the call arguments into a fresh `Self` and
 //!   awaits `Self::run(&self)`.
@@ -53,13 +53,13 @@
 //! Per-call state comes from the deserialized arguments; the registered
 //! instance's own field values are *not* carried into calls (the type
 //! doubles as its own argument schema). Tools that need genuine internal
-//! state should implement [`Tool`][synonz::Tool] directly.
+//! state should implement `Tool` directly.
 
 use proc_macro::TokenStream;
 use quote::quote;
 use syn::{Data, DeriveInput, Fields, Meta};
 
-/// Derives the [`Tool`][synonz::Tool] implementation. See the crate
+/// Derives the `Tool` implementation. See the crate
 /// documentation for usage and requirements.
 #[proc_macro_derive(Tool)]
 pub fn derive_tool(input: TokenStream) -> TokenStream {

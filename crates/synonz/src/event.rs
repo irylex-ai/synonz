@@ -32,7 +32,7 @@
 //!   characterize the working phase; the working phase itself is not an
 //!   event.
 //! - A "round" spans from one
-//!   [`ModelEvent::Requested`][ModelEvent::Requested] with
+//!   [`ModelEvent::Requested`] with
 //!   [`CallPurpose::Reasoning`] to the next; rounds are derived by consumers,
 //!   not stored.
 
