@@ -1,3 +1,6 @@
 /target
 .opencode/*
 !.opencode/rules/
+
+# JetBrains / RustRover IDE configuration (regenerated per machine)
+.idea/
