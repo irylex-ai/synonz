@@ -1070,6 +1070,15 @@ dependencies = [
 [[package]]
 name = "synonz-anthropic"
 version = "0.1.0"
+dependencies = [
+ "futures",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "synonz",
+ "tokio",
+ "wiremock",
+]
 
 [[package]]
 name = "synonz-derive"
