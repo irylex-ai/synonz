@@ -1,6 +1,6 @@
 # ADR-0010: High Level API 优先原则
 
-- 状态: DRAFT
+- 状态: APPROVED（2026-08-29，irylex 人工评审通过）
 - 日期: 2026-08-29
 - 决策者: irylex（人类确认）
 
