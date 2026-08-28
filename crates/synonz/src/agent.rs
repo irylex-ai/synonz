@@ -72,6 +72,21 @@ use crate::tool::{Tool, ToolContext, ToolSpec};
 /// [`AgentBuilder::max_rounds`].
 pub const DEFAULT_MAX_ROUNDS: u32 = 16;
 
+/// Round budget recommended for the research pattern (multi-round search,
+/// read, and synthesis). Documented, not enforced; overridable via
+/// [`AgentBuilder::max_rounds`].
+const RESEARCH_MAX_ROUNDS: u32 = 32;
+
+/// The research pattern's system prompt (private: shown in the
+/// [`Agent::research`] docs; compose further instructions via
+/// [`AgentBuilder::extend_system_prompt`] instead of referencing this).
+const RESEARCH_SYSTEM_PROMPT: &str = "You are a research agent. Investigate the user's question thoroughly using the available tools: search broadly first, then read the most promising sources. Verify important claims across independent sources before relying on them. Synthesize a complete, clearly structured answer and cite sources for factual claims. State uncertainty explicitly when evidence is thin or conflicting.";
+
+/// The reflection pattern's system prompt (private: shown in the
+/// [`Agent::reflection`] docs; compose further instructions via
+/// [`AgentBuilder::extend_system_prompt`] instead of referencing this).
+const REFLECTION_SYSTEM_PROMPT: &str = "You are a reflective agent. Work in three passes for every task: (1) draft — produce a first answer; (2) critique — examine your draft for errors, gaps, and unsupported claims; (3) revise — produce the improved final answer. Deliver only the final answer unless the user asks to see the intermediate passes.";
+
 /// Builder for [`Agent`].
 ///
 /// All configuration is explicit; nothing is defaulted silently except the
@@ -101,9 +116,31 @@ impl AgentBuilder {
     ///
     /// When set, every run of this agent starts with this message as its
     /// first system message. When unset, no system message is sent — there
-    /// is no hidden default prompt.
+    /// is no hidden default prompt. Replaces any prompt set earlier; to
+    /// compose additional instructions on top of an existing prompt (for
+    /// example a preset's), use
+    /// [`extend_system_prompt`][AgentBuilder::extend_system_prompt].
     pub fn system_prompt(mut self, text: impl Into<String>) -> Self {
         self.system_prompt = Some(text.into());
+        self
+    }
+
+    /// Appends instructions to the current system prompt, creating it when
+    /// absent.
+    ///
+    /// The natural partner of the pattern presets
+    /// ([`Agent::research`], [`Agent::reflection`]): extend the preset
+    /// prompt with domain instructions without replacing it. The appended
+    /// text is separated from the existing prompt by a blank line.
+    pub fn extend_system_prompt(mut self, text: impl Into<String>) -> Self {
+        let text = text.into();
+        match &mut self.system_prompt {
+            Some(existing) => {
+                existing.push_str("\n\n");
+                existing.push_str(&text);
+            }
+            None => self.system_prompt = Some(text),
+        }
         self
     }
 
@@ -165,6 +202,78 @@ impl Agent {
     /// Starts building an agent.
     pub fn builder() -> AgentBuilder {
         AgentBuilder::new()
+    }
+
+    /// The ReAct pattern as a named preset: the default reasoning loop,
+    /// named for explicit intent.
+    ///
+    /// Injects nothing — the default loop *is* the reasoning-acting loop,
+    /// and this constructor exists so developers state the pattern
+    /// explicitly. Register tools via the returned builder as usual.
+    pub fn react<M, I, T>(model: M, tools: I) -> AgentBuilder
+    where
+        M: Model + 'static,
+        I: IntoIterator<Item = T>,
+        T: Tool + 'static,
+    {
+        AgentBuilder::new().model(model).tools(tools)
+    }
+
+    /// The research pattern as a preset: multi-round search, verification,
+    /// and synthesis.
+    ///
+    /// The preset sets a system prompt instructing broad search, source
+    /// verification, and cited synthesis, and recommends a round budget of
+    /// 32. Both are overridable on the returned
+    /// builder ([`AgentBuilder::system_prompt`],
+    /// [`AgentBuilder::max_rounds`]); compose domain instructions with
+    /// [`AgentBuilder::extend_system_prompt`].
+    ///
+    /// Default system prompt (verbatim):
+    ///
+    /// ```text
+    /// You are a research agent. Investigate the user's question thoroughly
+    /// using the available tools: search broadly first, then read the most
+    /// promising sources. Verify important claims across independent sources
+    /// before relying on them. Synthesize a complete, clearly structured
+    /// answer and cite sources for factual claims. State uncertainty
+    /// explicitly when evidence is thin or conflicting.
+    /// ```
+    pub fn research<M, I, T>(model: M, tools: I) -> AgentBuilder
+    where
+        M: Model + 'static,
+        I: IntoIterator<Item = T>,
+        T: Tool + 'static,
+    {
+        AgentBuilder::new()
+            .model(model)
+            .tools(tools)
+            .system_prompt(RESEARCH_SYSTEM_PROMPT)
+            .max_rounds(RESEARCH_MAX_ROUNDS)
+    }
+
+    /// The reflection pattern as a preset: draft, critique, revise.
+    ///
+    /// The preset sets a system prompt instructing the three-pass
+    /// draft-critique-revise discipline. Tools are optional for this
+    /// pattern (self-critique needs none) — register them on the returned
+    /// builder when wanted. The prompt is overridable via
+    /// [`AgentBuilder::system_prompt`]; compose domain instructions with
+    /// [`AgentBuilder::extend_system_prompt`].
+    ///
+    /// Default system prompt (verbatim):
+    ///
+    /// ```text
+    /// You are a reflective agent. Work in three passes for every task:
+    /// (1) draft — produce a first answer; (2) critique — examine your
+    /// draft for errors, gaps, and unsupported claims; (3) revise —
+    /// produce the improved final answer. Deliver only the final answer
+    /// unless the user asks to see the intermediate passes.
+    /// ```
+    pub fn reflection<M: Model + 'static>(model: M) -> AgentBuilder {
+        AgentBuilder::new()
+            .model(model)
+            .system_prompt(REFLECTION_SYSTEM_PROMPT)
     }
 
     /// Runs the agent and returns the event stream.
@@ -553,4 +662,121 @@ fn cancelled_event(outcome: CancelOutcome) -> AgentEvent {
         CancelOutcome::Signal => CancelReason::UserRequested,
     };
     AgentEvent::Lifecycle(LifecycleEvent::Cancelled { reason })
+}
+
+#[cfg(test)]
+mod preset_tests {
+    use super::*;
+    use crate::model::ModelStream;
+    use crate::tool::ToolError;
+
+    struct DummyModel;
+
+    impl Model for DummyModel {
+        fn stream(
+            &self,
+            _request: ModelRequest,
+        ) -> futures::future::BoxFuture<'_, Result<ModelStream, ModelError>> {
+            Box::pin(async { Ok(futures::stream::empty().boxed()) })
+        }
+    }
+
+    fn dummy_tools() -> [StubTool; 2] {
+        [StubTool, StubTool]
+    }
+
+    struct StubTool;
+
+    impl Tool for StubTool {
+        fn name(&self) -> &str {
+            "stub"
+        }
+        fn description(&self) -> &str {
+            "stub tool"
+        }
+        fn parameters_schema(&self) -> &serde_json::Value {
+            static SCHEMA: std::sync::OnceLock<serde_json::Value> = std::sync::OnceLock::new();
+            SCHEMA.get_or_init(|| serde_json::json!({"type": "object"}))
+        }
+        fn execute<'a>(
+            &'a self,
+            _args: serde_json::Value,
+            _ctx: ToolContext,
+        ) -> futures::future::BoxFuture<'a, Result<ToolResult, ToolError>> {
+            Box::pin(async {
+                Ok(ToolResult::Ok {
+                    content: crate::message::ToolContent::Text {
+                        text: "stub".into(),
+                    },
+                })
+            })
+        }
+    }
+
+    #[test]
+    fn react_is_the_bare_default() {
+        let builder = Agent::react(DummyModel, dummy_tools());
+        assert_eq!(builder.system_prompt, None);
+        assert_eq!(builder.max_rounds, None);
+        assert_eq!(builder.tools.len(), 2);
+    }
+
+    #[test]
+    fn research_sets_prompt_and_round_budget() {
+        let builder = Agent::research(DummyModel, dummy_tools());
+        assert_eq!(
+            builder.system_prompt.as_deref(),
+            Some(RESEARCH_SYSTEM_PROMPT)
+        );
+        assert_eq!(builder.max_rounds, Some(RESEARCH_MAX_ROUNDS));
+        assert_eq!(builder.tools.len(), 2);
+    }
+
+    #[test]
+    fn reflection_sets_prompt_without_tools() {
+        let builder = Agent::reflection(DummyModel);
+        assert_eq!(
+            builder.system_prompt.as_deref(),
+            Some(REFLECTION_SYSTEM_PROMPT)
+        );
+        assert_eq!(builder.max_rounds, None);
+        assert!(builder.tools.is_empty());
+    }
+
+    #[test]
+    fn extend_system_prompt_composes_and_creates() {
+        let builder = AgentBuilder::new().extend_system_prompt("first");
+        assert_eq!(builder.system_prompt.as_deref(), Some("first"));
+        let builder = builder.extend_system_prompt("second");
+        assert_eq!(builder.system_prompt.as_deref(), Some("first\n\nsecond"));
+    }
+
+    #[test]
+    fn extend_works_on_top_of_presets() {
+        let builder = Agent::research(DummyModel, dummy_tools())
+            .extend_system_prompt("prefer chinese sources");
+        assert_eq!(
+            builder.system_prompt.as_deref(),
+            Some(&format!("{RESEARCH_SYSTEM_PROMPT}\n\nprefer chinese sources")[..])
+        );
+    }
+
+    #[test]
+    fn system_prompt_overrides_presets() {
+        let builder = Agent::research(DummyModel, dummy_tools()).system_prompt("custom");
+        assert_eq!(builder.system_prompt.as_deref(), Some("custom"));
+    }
+
+    #[cfg(feature = "test-util")]
+    #[tokio::test]
+    async fn research_preset_drives_a_full_run() {
+        use crate::mock::MockModel;
+        let model = MockModel::new(vec![vec![ModelStreamItem::Finish {
+            message: Message::assistant_text("found the answer"),
+            usage: TokenUsage::new(1, 1),
+        }]]);
+        let agent = Agent::research(model, dummy_tools()).build().unwrap();
+        let output = agent.ask("research x").await.unwrap();
+        assert_eq!(output.text(), Some("found the answer"));
+    }
 }
