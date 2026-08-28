@@ -193,3 +193,4 @@ DRAFT →（人工评审）→ APPROVED →（M0 启动）→ IMPLEMENTING
 | 里程碑 | 状态 | 完成日期 | 备注 |
 |---|---|---|---|
 | M0 | ✅ 完成 | 2026-08-28 | 工具链 rustup 1.98.0 安装；fmt/check/clippy/test 全绿；git main 双提交（docs + skeleton） |
+| M1 | ✅ 完成 | 2026-08-28 | canonical Message + 事件体系 + 错误分类 + io 边界类型；20 测试全绿（不变量 6 / round-trip + 快照 9 / doctest 1）；serde 双 tag 格式锁定 |
