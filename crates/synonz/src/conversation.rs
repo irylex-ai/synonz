@@ -17,11 +17,54 @@ use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use serde::{Deserialize, Serialize};
+use thiserror::Error;
 
 use crate::io::{AgentInput, AgentOutput};
 use crate::message::Message;
+use crate::runtime::SynonzRuntime;
+use crate::subject::Subject;
 
 static CONVERSATION_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+/// Conversation persistence failures.
+#[non_exhaustive]
+#[derive(Debug, Clone, PartialEq, Error)]
+pub enum ConversationStoreError {
+    /// No conversation exists under this id (for this subject).
+    #[error("conversation not found: {0}")]
+    NotFound(String),
+    /// The backing storage failed.
+    #[error("conversation storage failure: {0}")]
+    Storage(String),
+}
+
+/// The serializable state of a conversation (what stores persist).
+#[non_exhaustive]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ConversationState {
+    /// The owning subject's full identity (`(type, id)`).
+    pub subject_id: String,
+    /// The conversation id.
+    pub id: String,
+    /// The recorded turns, in order.
+    pub turns: Vec<Turn>,
+}
+
+/// The conversation persistence contract (ADR-0012 决策七, sibling of
+/// [`crate::memory::MemoryStore`]). Implementations own storage; the
+/// framework owns when saves happen (auto-save on turn completion,
+/// High Level).
+pub trait ConversationStore: Send + Sync + 'static {
+    /// Loads a conversation's state by id, for a subject.
+    fn load(
+        &self,
+        subject: &Subject,
+        id: &str,
+    ) -> Result<ConversationState, ConversationStoreError>;
+
+    /// Saves (upserts) a conversation's state.
+    fn save(&self, state: ConversationState) -> Result<(), ConversationStoreError>;
+}
 
 /// One completed question-answer round of a conversation.
 #[non_exhaustive]
@@ -58,6 +101,8 @@ impl Turn {
 /// input borrows the conversation mutably for the duration of the turn.
 pub struct Conversation {
     id: String,
+    subject: Subject,
+    store: Arc<dyn ConversationStore>,
     turns: Arc<Mutex<Vec<Turn>>>,
 }
 
@@ -69,32 +114,63 @@ impl Clone for Conversation {
     fn clone(&self) -> Self {
         Self {
             id: self.id.clone(),
+            subject: self.subject.clone(),
+            store: Arc::clone(&self.store),
             turns: Arc::clone(&self.turns),
         }
     }
 }
 
 impl Conversation {
-    /// Starts a new conversation with a generated id.
+    /// Creates a new conversation for a subject on an explicit runtime.
     ///
     /// The generated id is `conv-<timestamp>-<counter>`: unique within a
-    /// process for practical purposes, not cryptographic.
-    pub fn new() -> Self {
+    /// process for practical purposes, not cryptographic. The
+    /// conversation's environment is the given runtime — the explicit
+    /// same-source guarantee (ADR-0012).
+    pub fn new(runtime: &SynonzRuntime, subject: &Subject) -> Self {
         let nanos = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|duration| duration.as_nanos())
             .unwrap_or(0);
         let counter = CONVERSATION_COUNTER.fetch_add(1, Ordering::Relaxed);
-        Self::with_id(format!("conv-{nanos:x}-{counter:x}"))
+        Self::with_id(runtime, subject, format!("conv-{nanos:x}-{counter:x}"))
     }
 
-    /// Starts a conversation with an application-supplied id (ticket
+    /// Creates a new conversation with an application-supplied id (ticket
     /// numbers, user session keys, ...).
-    pub fn with_id(id: impl Into<String>) -> Self {
+    pub fn with_id(runtime: &SynonzRuntime, subject: &Subject, id: impl Into<String>) -> Self {
         Self {
             id: id.into(),
+            subject: subject.clone(),
+            store: runtime.conversation_store(),
             turns: Arc::new(Mutex::new(Vec::new())),
         }
+    }
+
+    /// Restores an existing conversation by id from the runtime's store.
+    ///
+    /// `of` = restore (never create): fails with
+    /// [`ConversationStoreError::NotFound`] when no conversation exists
+    /// under this id for this subject.
+    pub fn of(
+        runtime: &SynonzRuntime,
+        subject: &Subject,
+        id: &str,
+    ) -> Result<Self, ConversationStoreError> {
+        let store = runtime.conversation_store();
+        let state = store.load(subject, id)?;
+        Ok(Self {
+            id: state.id,
+            subject: subject.clone(),
+            store,
+            turns: Arc::new(Mutex::new(state.turns)),
+        })
+    }
+
+    /// The conversation's owning subject.
+    pub fn subject(&self) -> &Subject {
+        &self.subject
     }
 
     /// The conversation's identity.
@@ -148,6 +224,20 @@ impl Conversation {
             .lock()
             .unwrap_or_else(|p| p.into_inner())
             .push(turn);
+        // Auto-save (High Level persistence): the state lands in the
+        // registered store so `of` can restore it later. The in-process
+        // default store keeps this cheap.
+        let _ = self.persist();
+    }
+
+    /// Persists the current state to the registered store.
+    pub(crate) fn persist(&self) -> Result<(), ConversationStoreError> {
+        let turns = self.turns.lock().unwrap_or_else(|p| p.into_inner());
+        self.store.save(ConversationState {
+            subject_id: self.subject.to_string(),
+            id: self.id.clone(),
+            turns: turns.clone(),
+        })
     }
 
     /// Forks an independent copy of the conversation (deep copy of the
@@ -156,6 +246,8 @@ impl Conversation {
         let turns = self.turns.lock().unwrap_or_else(|p| p.into_inner());
         Conversation {
             id: self.id.clone(),
+            subject: self.subject.clone(),
+            store: Arc::clone(&self.store),
             turns: Arc::new(Mutex::new(turns.clone())),
         }
     }
@@ -165,27 +257,27 @@ impl Conversation {
         let mut turns = self.turns.lock().unwrap_or_else(|p| p.into_inner());
         let new_len = turns.len().saturating_sub(n);
         turns.truncate(new_len);
+        drop(turns);
+        let _ = self.persist();
     }
 
     /// Drops all turns.
     pub fn clear(&self) {
         self.turns.lock().unwrap_or_else(|p| p.into_inner()).clear();
+        let _ = self.persist();
     }
 
-    /// Serializes the conversation (JSON) for application-side storage.
+    /// Serializes the conversation state (JSON) for application-side
+    /// storage. Restoration goes through
+    /// [`Conversation::of`][Conversation::of] (identity-level restore),
+    /// which is the primary path.
     pub fn export(&self) -> Result<Vec<u8>, serde_json::Error> {
-        serde_json::to_vec(self)
-    }
-
-    /// Restores a conversation serialized with [`Conversation::export`].
-    pub fn import(bytes: &[u8]) -> Result<Self, serde_json::Error> {
-        serde_json::from_slice(bytes)
-    }
-}
-
-impl Default for Conversation {
-    fn default() -> Self {
-        Self::new()
+        let turns = self.turns.lock().unwrap_or_else(|p| p.into_inner());
+        serde_json::to_vec(&ConversationState {
+            subject_id: self.subject.to_string(),
+            id: self.id.clone(),
+            turns: turns.clone(),
+        })
     }
 }
 
@@ -194,34 +286,9 @@ impl std::fmt::Debug for Conversation {
         let turns = self.turns.lock().unwrap_or_else(|p| p.into_inner());
         f.debug_struct("Conversation")
             .field("id", &self.id)
+            .field("subject", &self.subject)
             .field("turns", &*turns)
             .finish()
-    }
-}
-
-impl Serialize for Conversation {
-    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        use serde::ser::SerializeStruct;
-        let mut state = serializer.serialize_struct("Conversation", 2)?;
-        state.serialize_field("id", &self.id)?;
-        let turns = self.turns.lock().unwrap_or_else(|p| p.into_inner());
-        state.serialize_field("turns", &*turns)?;
-        state.end()
-    }
-}
-
-impl<'de> Deserialize<'de> for Conversation {
-    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        #[derive(Deserialize)]
-        struct Shape {
-            id: String,
-            turns: Vec<Turn>,
-        }
-        let shape = Shape::deserialize(deserializer)?;
-        Ok(Self {
-            id: shape.id,
-            turns: Arc::new(Mutex::new(shape.turns)),
-        })
     }
 }
 
@@ -269,6 +336,14 @@ impl From<AgentInput> for TurnInput<'static> {
 mod tests {
     use super::*;
     use crate::message::Role;
+    use crate::subject::SubjectType;
+
+    fn rt() -> (SynonzRuntime, Subject) {
+        (
+            SynonzRuntime::builder().build(),
+            Subject::of(SubjectType::User, "u-42"),
+        )
+    }
 
     fn text_turn(input: &str, answer: &str) -> Turn {
         Turn::new(
@@ -283,21 +358,25 @@ mod tests {
 
     #[test]
     fn new_generates_unique_ids() {
-        let a = Conversation::new();
-        let b = Conversation::new();
+        let (runtime, subject) = rt();
+        let a = Conversation::new(&runtime, &subject);
+        let b = Conversation::new(&runtime, &subject);
         assert_ne!(a.id(), b.id());
         assert!(a.id().starts_with("conv-"));
+        assert_eq!(a.subject(), &subject);
     }
 
     #[test]
     fn with_id_preserves_application_identity() {
-        let conv = Conversation::with_id("user-42-ticket-7");
+        let (runtime, subject) = rt();
+        let conv = Conversation::with_id(&runtime, &subject, "user-42-ticket-7");
         assert_eq!(conv.id(), "user-42-ticket-7");
     }
 
     #[test]
     fn push_and_read_roundtrip() {
-        let conv = Conversation::new();
+        let (runtime, subject) = rt();
+        let conv = Conversation::new(&runtime, &subject);
         assert!(conv.is_empty());
         conv.push_turn(text_turn("a", "A"));
         conv.push_turn(text_turn("b", "B"));
@@ -311,7 +390,8 @@ mod tests {
 
     #[test]
     fn truncate_last_drops_whole_turns() {
-        let conv = Conversation::new();
+        let (runtime, subject) = rt();
+        let conv = Conversation::new(&runtime, &subject);
         conv.push_turn(text_turn("a", "A"));
         conv.push_turn(text_turn("b", "B"));
         conv.push_turn(text_turn("c", "C"));
@@ -321,23 +401,53 @@ mod tests {
     }
 
     #[test]
-    fn export_import_roundtrip() {
-        let conv = Conversation::with_id("keep-me");
+    fn of_restores_from_store_after_auto_save() {
+        let (runtime, subject) = rt();
+        let conv = Conversation::with_id(&runtime, &subject, "keep-me");
         conv.push_turn(text_turn("a", "A"));
         conv.push_turn(text_turn("b", "B"));
-        let bytes = conv.export().expect("export");
-        let restored = Conversation::import(&bytes).expect("import");
+        // Auto-save on push_turn persisted the state; `of` restores it.
+        let restored = Conversation::of(&runtime, &subject, "keep-me").expect("restore");
         assert_eq!(restored.id(), "keep-me");
         assert_eq!(restored.turns().len(), 2);
         assert_eq!(restored.messages(), conv.messages());
     }
 
     #[test]
+    fn of_fails_for_unknown_id() {
+        let (runtime, subject) = rt();
+        assert!(Conversation::of(&runtime, &subject, "nope").is_err());
+    }
+
+    #[test]
+    fn of_fails_for_wrong_subject() {
+        let (runtime, subject) = rt();
+        let conv = Conversation::with_id(&runtime, &subject, "shared-id");
+        conv.push_turn(text_turn("a", "A"));
+        let other = Subject::of(SubjectType::User, "u-43");
+        assert!(Conversation::of(&runtime, &other, "shared-id").is_err());
+    }
+
+    #[test]
     fn turn_input_serializes_by_borrow() {
-        let mut conv = Conversation::new();
+        let (runtime, subject) = rt();
+        let mut conv = Conversation::new(&runtime, &subject);
         let _turn = conv.turn_input("first");
         // Compile-time check: a second borrow cannot start while the first
         // turn input is alive. This test documents the borrow discipline.
         assert!(conv.is_empty());
+    }
+
+    #[test]
+    fn registered_store_replaces_default() {
+        let subject = Subject::of(SubjectType::User, "u-42");
+        // Two separate runtimes: conversation on runtime A must not be
+        // visible on runtime B (explicit same-source).
+        let runtime_a = SynonzRuntime::builder().build();
+        let runtime_b = SynonzRuntime::builder().build();
+        let conv = Conversation::with_id(&runtime_a, &subject, "isolated");
+        conv.push_turn(text_turn("a", "A"));
+        assert!(Conversation::of(&runtime_b, &subject, "isolated").is_err());
+        assert!(Conversation::of(&runtime_a, &subject, "isolated").is_ok());
     }
 }

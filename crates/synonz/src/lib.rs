@@ -23,9 +23,13 @@ pub mod agent;
 pub mod conversation;
 pub mod error;
 pub mod event;
+pub mod inprocess;
 pub mod io;
+pub mod memory;
 pub mod message;
 pub mod model;
+pub mod runtime;
+pub mod subject;
 pub mod tool;
 
 mod cancel;
@@ -34,18 +38,26 @@ mod cancel;
 pub mod mock;
 
 pub use agent::{Agent, AgentBuilder, Answer, DEFAULT_MAX_ROUNDS, Run};
-pub use conversation::{Conversation, Turn, TurnInput};
+pub use conversation::{
+    Conversation, ConversationState, ConversationStore, ConversationStoreError, Turn, TurnInput,
+};
 pub use error::{AgentError, ModelError};
 pub use event::{
     AgentEvent, CallPurpose, CancelReason, LifecycleEvent, ModelDelta, ModelEvent, TokenUsage,
     ToolEvent,
 };
 pub use io::{AgentInput, AgentOutput};
+pub use memory::{
+    FragmentIdentity, KnowledgeFragment, L1Entry, MemoryStore, MemoryStoreError, SummaryBlock,
+    Topic,
+};
 pub use message::{
     CallId, CanonicalViolation, ContentBlock, Message, Role, ToolCall, ToolContent, ToolResult,
     validate_conversation,
 };
 pub use model::{Model, ModelParams, ModelRequest, ModelStream, ModelStreamItem, complete};
+pub use runtime::{RuntimeBuilder, SynonzRuntime};
+pub use subject::{Subject, SubjectType};
 pub use tokio_util::sync::CancellationToken;
 pub use tool::{Tool, ToolContext, ToolError, ToolSpec};
 

@@ -10,9 +10,17 @@ use std::time::Duration;
 
 use serde_json::json;
 use synonz::{
-    Agent, ContentBlock, Conversation, MockModel, ModelStreamItem, Role, ToolCall, ToolContent,
-    ToolResult,
+    Agent, ContentBlock, Conversation, MockModel, ModelStreamItem, Role, Subject, SubjectType,
+    SynonzRuntime, ToolCall, ToolContent, ToolResult,
 };
+
+/// Test fixture: a fresh runtime and a subject.
+fn env() -> (SynonzRuntime, Subject) {
+    (
+        SynonzRuntime::builder().build(),
+        Subject::of(SubjectType::User, "test-user"),
+    )
+}
 
 /// A model with one scripted round per call: first round calls `weather`,
 /// later rounds answer directly.
@@ -77,7 +85,8 @@ fn weather_agent(scripts: usize) -> Agent {
 #[tokio::test]
 async fn multi_turn_conversation_remembers_history() {
     let agent = weather_agent(2);
-    let mut conv = Conversation::new();
+    let (runtime, subject) = env();
+    let mut conv = Conversation::new(&runtime, &subject);
 
     // Turn 1 (two model rounds inside one run): tool call + answer.
     let output = agent
@@ -114,7 +123,8 @@ async fn multi_turn_conversation_remembers_history() {
 #[tokio::test]
 async fn conversation_flat_history_replays_into_the_model() {
     let agent = weather_agent(2);
-    let mut conv = Conversation::new();
+    let (runtime, subject) = env();
+    let mut conv = Conversation::new(&runtime, &subject);
 
     let _ = agent.ask(conv.turn_input("one")).await.unwrap();
     let _ = agent.ask(conv.turn_input("two")).await.unwrap();
@@ -134,7 +144,8 @@ async fn cancelled_turns_are_not_recorded() {
         .model(MockModel::hanging())
         .build()
         .unwrap();
-    let mut conv = Conversation::new();
+    let (runtime, subject) = env();
+    let mut conv = Conversation::new(&runtime, &subject);
 
     let run = agent.run(conv.turn_input("starts then cancels"));
     drop(run); // cancel via drop
@@ -158,7 +169,8 @@ async fn failed_turns_are_not_recorded() {
         }
     }
     let agent = Agent::builder().model(FailingModel).build().unwrap();
-    let mut conv = Conversation::new();
+    let (runtime, subject) = env();
+    let mut conv = Conversation::new(&runtime, &subject);
 
     let result = agent.ask(conv.turn_input("fails")).await;
     assert!(matches!(
@@ -177,7 +189,8 @@ async fn multiple_agents_continue_one_conversation() {
     let researcher = weather_agent(1);
     let writer = Agent::builder().model(weather_model(1)).build().unwrap();
 
-    let mut conv = Conversation::new();
+    let (runtime, subject) = env();
+    let mut conv = Conversation::new(&runtime, &subject);
     let first = researcher
         .ask(conv.turn_input("research the weather"))
         .await
@@ -198,7 +211,8 @@ async fn one_shot_input_stays_conversation_less() {
 
 #[test]
 fn manual_push_and_management() {
-    let conv = Conversation::with_id("manual");
+    let (runtime, subject) = env();
+    let conv = Conversation::with_id(&runtime, &subject, "manual");
     let turn = synonz::Turn::new(
         synonz::AgentInput::new("hi"),
         vec![synonz::Message::user("hi")],
