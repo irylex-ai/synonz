@@ -1,6 +1,6 @@
 # ADR-0012: 记忆与上下文系统
 
-- 状态: DRAFT
+- 状态: APPROVED（2026-08-29，irylex 人工评审通过；含评审修订：主体身份 (SubjectType, id) 二元组）
 - 日期: 2026-08-29
 - 决策者: irylex（人类确认）
 - 性质: 系统级 ADR——原 S2b（ContextManager）与 S2c（Memory）的旧切分

@@ -52,7 +52,8 @@ Run them with `cargo run -p synonz-examples --bin <name>`:
 ## Documentation
 
 - Architecture decisions: `docs/adr/` (ADR-0001 and onward)
-- Architecture overview: `docs/architecture/v1.zh-CN.md`
+- Architecture overview: `docs/architecture/s2.zh-CN.md` (current; the v1
+  document is retained as the S1-era snapshot)
 - Implementation plan: `docs/design/implementation-plan-v1.zh-CN.md`
 
 ## Status
