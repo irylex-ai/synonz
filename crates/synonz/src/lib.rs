@@ -20,6 +20,7 @@
 //! All commonly used types are re-exported at the crate root.
 
 pub mod agent;
+pub mod conversation;
 pub mod error;
 pub mod event;
 pub mod io;
@@ -33,6 +34,7 @@ mod cancel;
 pub mod mock;
 
 pub use agent::{Agent, AgentBuilder, Answer, DEFAULT_MAX_ROUNDS, Run};
+pub use conversation::{Conversation, Turn, TurnInput};
 pub use error::{AgentError, ModelError};
 pub use event::{
     AgentEvent, CallPurpose, CancelReason, LifecycleEvent, ModelDelta, ModelEvent, TokenUsage,

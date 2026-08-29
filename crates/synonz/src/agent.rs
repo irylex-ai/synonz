@@ -59,6 +59,7 @@ use tokio::sync::mpsc;
 
 use crate::CancellationToken;
 use crate::cancel::{CancelCore, CancelHandle, CancelOutcome};
+use crate::conversation::{Conversation, Turn, TurnInput};
 use crate::error::{AgentError, ModelError};
 use crate::event::{
     AgentEvent, CallPurpose, CancelReason, LifecycleEvent, ModelDelta, ModelEvent, TokenUsage,
@@ -286,17 +287,23 @@ impl Agent {
     /// for the complete event stream. Dropping it (or calling
     /// [`Run::cancel`]) cancels the run — cooperative interruption at the
     /// loop's await points.
-    pub fn run(&self, input: impl Into<AgentInput>) -> Run {
+    pub fn run<'a>(&self, input: impl Into<TurnInput<'a>>) -> Run<'a> {
+        let (input, conv) = input.into().into_parts();
         let core = CancelCore::new();
-        let run = self.spawn_run(input.into(), core);
+        let run = self.spawn_run(input, conv, core);
         self.apply_default_timeout(run)
     }
 
     /// Runs the agent with an externally owned cancellation token: when the
     /// token fires, the run cancels with [`CancelReason::UserRequested`].
-    pub fn run_with(&self, input: impl Into<AgentInput>, token: CancellationToken) -> Run {
+    pub fn run_with<'a>(
+        &self,
+        input: impl Into<TurnInput<'a>>,
+        token: CancellationToken,
+    ) -> Run<'a> {
+        let (input, conv) = input.into().into_parts();
         let core = CancelCore::child_of(&token);
-        let run = self.spawn_run(input.into(), core);
+        let run = self.spawn_run(input, conv, core);
         self.apply_default_timeout(run)
     }
 
@@ -306,10 +313,19 @@ impl Agent {
     /// final [`AgentOutput`] when awaited — so the one-shot spelling
     /// `agent.ask(input).await?` behaves exactly like the previous blocking
     /// `ask`. Cancellation: [`Answer::cancel`], or dropping the handle.
-    pub fn ask(&self, input: impl Into<AgentInput>) -> Answer {
+    pub fn ask<'a>(&self, input: impl Into<TurnInput<'a>>) -> Answer<'a> {
+        let (input, conv) = input.into().into_parts();
         Answer {
-            run: self.run(input),
+            run: self.run_with_conv(input, conv),
         }
+    }
+
+    /// Internal shared path for `ask`: no default timeout handling here so
+    /// `ask` mirrors `run` semantics through the same machinery.
+    fn run_with_conv<'a>(&self, input: AgentInput, conv: Option<&'a Conversation>) -> Run<'a> {
+        let core = CancelCore::new();
+        let run = self.spawn_run(input, conv, core);
+        self.apply_default_timeout(run)
     }
 
     /// Sets a default time budget applied to every run started afterwards.
@@ -321,20 +337,26 @@ impl Agent {
         self
     }
 
-    fn apply_default_timeout(&self, run: Run) -> Run {
+    fn apply_default_timeout<'a>(&self, run: Run<'a>) -> Run<'a> {
         match self.default_timeout {
             Some(duration) => run.with_timeout(duration),
             None => run,
         }
     }
 
-    fn spawn_run(&self, input: AgentInput, core: Arc<CancelCore>) -> Run {
+    fn spawn_run<'a>(
+        &self,
+        input: AgentInput,
+        conv: Option<&'a Conversation>,
+        core: Arc<CancelCore>,
+    ) -> Run<'a> {
         let (sender, receiver) = mpsc::channel(1);
         let task = LoopTask {
             model: Arc::clone(&self.model),
             tools: Arc::clone(&self.tools),
             system_prompt: self.system_prompt.clone(),
             max_rounds: self.max_rounds,
+            conversation: conv.cloned(),
         };
         tokio::spawn(task.execute(input, Arc::clone(&core), sender));
         Run {
@@ -342,6 +364,10 @@ impl Agent {
             handle: CancelHandle::new(core),
             rounds_seen: 0,
             terminal: None,
+            // Serialization guard: while the handle is alive the
+            // conversation cannot start a competing turn (borrow checker).
+            // The turn write itself happens inside the execution.
+            _conv: conv,
         }
     }
 }
@@ -365,14 +391,16 @@ fn map_terminal(event: &AgentEvent) -> Option<Result<AgentOutput, AgentError>> {
 /// last event is always a terminal lifecycle event, and the stream closes
 /// after it. Dropping the handle (or calling [`Run::cancel`]) cancels the
 /// run.
-pub struct Run {
+pub struct Run<'a> {
     receiver: mpsc::Receiver<AgentEvent>,
     handle: CancelHandle,
     rounds_seen: usize,
     terminal: Option<Result<AgentOutput, AgentError>>,
+    // See `spawn_run`: borrow guard only, never read.
+    _conv: Option<&'a Conversation>,
 }
 
-impl Run {
+impl Run<'_> {
     /// Receives the next event, or `None` after the stream closes.
     ///
     /// The terminal event's outcome is remembered, so awaiting the handle
@@ -419,7 +447,7 @@ impl Run {
     }
 }
 
-impl Stream for Run {
+impl Stream for Run<'_> {
     type Item = AgentEvent;
 
     fn poll_next(
@@ -436,7 +464,7 @@ impl Stream for Run {
     }
 }
 
-impl Future for Run {
+impl Future for Run<'_> {
     type Output = Result<AgentOutput, AgentError>;
 
     fn poll(
@@ -471,11 +499,11 @@ impl Future for Run {
 /// to the final [`AgentOutput`] when awaited. Internally a filtered view of
 /// a [`Run`]: non-delta events are consumed silently, and the run's outcome
 /// is preserved for the eventual await.
-pub struct Answer {
-    run: Run,
+pub struct Answer<'a> {
+    run: Run<'a>,
 }
 
-impl Answer {
+impl Answer<'_> {
     /// Receives the next text delta, or `None` when the answer stream ends.
     pub async fn next(&mut self) -> Option<ModelDelta> {
         while let Some(event) = self.run.next().await {
@@ -499,7 +527,7 @@ impl Answer {
     }
 }
 
-impl Stream for Answer {
+impl Stream for Answer<'_> {
     type Item = ModelDelta;
 
     fn poll_next(
@@ -519,7 +547,7 @@ impl Stream for Answer {
     }
 }
 
-impl Future for Answer {
+impl Future for Answer<'_> {
     type Output = Result<AgentOutput, AgentError>;
 
     fn poll(
@@ -536,6 +564,7 @@ struct LoopTask {
     tools: Arc<[Arc<dyn Tool>]>,
     system_prompt: Option<String>,
     max_rounds: u32,
+    conversation: Option<Conversation>,
 }
 
 impl LoopTask {
@@ -564,7 +593,13 @@ impl LoopTask {
         if let Some(prompt) = &self.system_prompt {
             messages.push(Message::system(prompt.clone()));
         }
-        messages.push(Message::user(input.text));
+        if let Some(conversation) = &self.conversation {
+            messages.extend(conversation.messages());
+        }
+        // Everything from here on belongs to this turn (recorded on
+        // completion; cancelled or failed runs record nothing).
+        let base_len = messages.len();
+        messages.push(Message::user(input.text.clone()));
 
         let tool_specs: Vec<ToolSpec> = self
             .tools
@@ -642,8 +677,16 @@ impl LoopTask {
             }));
 
             if calls.is_empty() {
+                let output = AgentOutput::new(message, total_usage);
+                if let Some(conversation) = &self.conversation {
+                    conversation.push_turn(Turn::new(
+                        input.clone(),
+                        messages[base_len..].to_vec(),
+                        output.clone(),
+                    ));
+                }
                 emit!(AgentEvent::Lifecycle(LifecycleEvent::Completed {
-                    response: AgentOutput::new(message, total_usage),
+                    response: output,
                 }));
                 return;
             }

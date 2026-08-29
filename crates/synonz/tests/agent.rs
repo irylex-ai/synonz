@@ -128,7 +128,7 @@ fn finish_with_call(call_id: &str, tool: &str, city: &str) -> ModelStreamItem {
     }
 }
 
-async fn collect_events(stream: &mut synonz::Run) -> Vec<AgentEvent> {
+async fn collect_events(stream: &mut synonz::Run<'_>) -> Vec<AgentEvent> {
     let mut events = Vec::new();
     while let Some(event) = stream.next().await {
         events.push(event);
