@@ -44,11 +44,21 @@ Alternatives），最终收敛为一套以**主体（Subject）**为中心、分
 ### 二、主体模型（Subject 一等实体）
 
 ```rust
-let subject = Subject::of("user-42");        // of 家族：按身份解析
+pub enum SubjectType {
+    User,    // 用户主体（v1）
+    Agent,   // Agent 主体（变体自 v1 存在；其交互记忆的完整语义随 S3 落地）
+}
+
+let subject = Subject::of(SubjectType::User, "user-42");   // of 家族：按身份解析
 ```
 
+- **主体身份 = (SubjectType, id) 二元组**：`user-42` 与 `agent-42` 是
+  不同主体；记忆系统的归属键使用完整主体身份（片段三元组中的
+  subject 即此完整身份）——为 S3 的 Agent-Agent 记忆拓扑预留无需
+  破坏性变更的扩展；
 - 记忆的主体是**交互双方**：用户（现在实现）与 Agent（S3 多 Agent 时
-  预留——"问的人和答的人都产生记忆"）；
+  预留——"问的人和答的人都产生记忆"）；`SubjectType::Agent` 变体
+  第一天即存在于枚举中——可预知的后续扩展，代价为零；
 - 应用层为主体声明身份；记忆实体由框架经 Runtime 解析，开发者全程
   只接触 Subject 对象；
 - 会话创建**强制携带主体**（`Conversation::new(&runtime, &subject)`），
@@ -91,7 +101,7 @@ let runtime = SynonzRuntime::builder()
 
 ```rust
 let runtime = SynonzRuntime::builder().build();
-let subject = Subject::of("user-42");
+let subject = Subject::of(SubjectType::User, "user-42");
 let mut conv = Conversation::new(&runtime, &subject)?;          // new=创建
 // Conversation::of(&runtime, &subject, conv_id)?               // of=恢复
 // (S3) Conversation::ensure(&runtime, &subject, id)?           // get-or-create
@@ -308,7 +318,7 @@ trait ContextAssembly: Send + Sync {
 | 项 | 触发条件 |
 |---|---|
 | `Conversation::ensure`（get-or-create） | S3 编排 |
-| Agent 主体记忆 | S3 多 Agent |
+| Agent 主体的交互记忆语义 | S3 多 Agent（`SubjectType::Agent` 变体自 v1 存在，仅交互语义后置） |
 | Embedder 契约 | 永不——已消解为 MemoryStore 实现的内部依赖 |
 | token 级总预算分配器 | 装配优化的真实需求 |
 | 会话级配置覆盖（L1 窗口等） | 真实需求 |
