@@ -32,7 +32,7 @@ mod cancel;
 #[cfg(feature = "test-util")]
 pub mod mock;
 
-pub use agent::{Agent, AgentBuilder, DEFAULT_MAX_ROUNDS, RunStream};
+pub use agent::{Agent, AgentBuilder, Answer, DEFAULT_MAX_ROUNDS, Run};
 pub use error::{AgentError, ModelError};
 pub use event::{
     AgentEvent, CallPurpose, CancelReason, LifecycleEvent, ModelDelta, ModelEvent, TokenUsage,

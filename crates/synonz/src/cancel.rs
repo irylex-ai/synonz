@@ -146,6 +146,11 @@ impl CancelHandle {
         &self.core
     }
 
+    /// Explicitly cancels the run (user-requested cancellation).
+    pub(crate) fn cancel(&self) {
+        self.core.token().cancel();
+    }
+
     /// Arms the time budget.
     pub(crate) fn arm_timeout(&self, duration: Duration) {
         self.core.arm_timeout(duration);
