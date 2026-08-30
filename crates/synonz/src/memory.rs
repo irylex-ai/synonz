@@ -66,6 +66,17 @@ pub struct SummaryBlock {
     pub index: u64,
 }
 
+impl SummaryBlock {
+    /// Creates a summary block.
+    pub fn new(conversation_id: impl Into<String>, content: impl Into<String>, index: u64) -> Self {
+        Self {
+            conversation_id: conversation_id.into(),
+            content: content.into(),
+            index,
+        }
+    }
+}
+
 /// A turn recorded in L1.
 #[non_exhaustive]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

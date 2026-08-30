@@ -20,6 +20,7 @@
 //! All commonly used types are re-exported at the crate root.
 
 pub mod agent;
+pub mod context;
 pub mod conversation;
 pub mod error;
 pub mod event;
@@ -31,6 +32,7 @@ pub mod model;
 pub mod runtime;
 pub mod subject;
 pub mod tool;
+pub mod trigger;
 
 mod cancel;
 
@@ -38,6 +40,7 @@ mod cancel;
 pub mod mock;
 
 pub use agent::{Agent, AgentBuilder, Answer, DEFAULT_MAX_ROUNDS, Run};
+pub use context::{Context, ContextAssembly, ConversationHistory, LayeredMemory};
 pub use conversation::{
     Conversation, ConversationState, ConversationStore, ConversationStoreError, Turn, TurnInput,
 };
@@ -60,6 +63,7 @@ pub use runtime::{RuntimeBuilder, SynonzRuntime};
 pub use subject::{Subject, SubjectType};
 pub use tokio_util::sync::CancellationToken;
 pub use tool::{Tool, ToolContext, ToolError, ToolSpec};
+pub use trigger::{EventPolicy, FirstSegmentDetector, MemoryPolicies, TopicDetector};
 
 #[cfg(feature = "test-util")]
 pub use mock::MockModel;

@@ -59,6 +59,7 @@ use tokio::sync::mpsc;
 
 use crate::CancellationToken;
 use crate::cancel::{CancelCore, CancelHandle, CancelOutcome};
+use crate::context::Context;
 use crate::conversation::{Conversation, Turn, TurnInput};
 use crate::error::{AgentError, ModelError};
 use crate::event::{
@@ -186,6 +187,7 @@ impl AgentBuilder {
             system_prompt: self.system_prompt,
             max_rounds: self.max_rounds.unwrap_or(DEFAULT_MAX_ROUNDS),
             default_timeout: None,
+            context: None,
         })
     }
 }
@@ -201,6 +203,7 @@ pub struct Agent {
     system_prompt: Option<String>,
     max_rounds: u32,
     default_timeout: Option<Duration>,
+    context: Option<Arc<Context>>,
 }
 
 impl Agent {
@@ -337,6 +340,21 @@ impl Agent {
         self
     }
 
+    /// Attaches the narrative background (a conversation's
+    /// [`Context`], from
+    /// [`Conversation::context`][crate::Conversation::context]): the agent
+    /// executes within it — the background makes the stateless agent
+    /// stateful (ADR-0012).
+    ///
+    /// With a context, every `ask`/`run` assembles the send view freshly
+    /// through the context's assembly strategy (memory layers). Without
+    /// one, the pre-memory behavior applies (the conversation's history,
+    /// verbatim).
+    pub fn with_context(mut self, context: Context) -> Self {
+        self.context = Some(Arc::new(context));
+        self
+    }
+
     fn apply_default_timeout<'a>(&self, run: Run<'a>) -> Run<'a> {
         match self.default_timeout {
             Some(duration) => run.with_timeout(duration),
@@ -357,6 +375,7 @@ impl Agent {
             system_prompt: self.system_prompt.clone(),
             max_rounds: self.max_rounds,
             conversation: conv.cloned(),
+            context: self.context.clone(),
         };
         tokio::spawn(task.execute(input, Arc::clone(&core), sender));
         Run {
@@ -565,6 +584,7 @@ struct LoopTask {
     system_prompt: Option<String>,
     max_rounds: u32,
     conversation: Option<Conversation>,
+    context: Option<Arc<Context>>,
 }
 
 impl LoopTask {
@@ -593,7 +613,21 @@ impl LoopTask {
         if let Some(prompt) = &self.system_prompt {
             messages.push(Message::system(prompt.clone()));
         }
-        if let Some(conversation) = &self.conversation {
+        // Seed the narrative background: the attached context's assembly
+        // (fresh per ask), or the pre-memory fallback (history verbatim).
+        if let Some(context) = &self.context {
+            match context.assemble(&input.text).await {
+                Ok(assembled) => messages.extend(assembled),
+                Err(error) => {
+                    emit!(AgentEvent::Lifecycle(LifecycleEvent::Failed {
+                        error: crate::AgentError::InvalidConfiguration {
+                            message: format!("context assembly failed: {error}"),
+                        },
+                    }));
+                    return;
+                }
+            }
+        } else if let Some(conversation) = &self.conversation {
             messages.extend(conversation.messages());
         }
         // Everything from here on belongs to this turn (recorded on
@@ -684,6 +718,25 @@ impl LoopTask {
                         messages[base_len..].to_vec(),
                         output.clone(),
                     ));
+                    // Post-turn memory flows (M11b): L1 write, topic
+                    // tracking, mandatory floors, stacked policies. The
+                    // summary call emits ContextManagement events before
+                    // the terminal event — visible, not magic.
+                    let runtime = conversation.runtime().clone();
+                    let policies = runtime.memory_policies();
+                    let detector = runtime.topic_detector();
+                    let _soft = crate::trigger::run_post_turn_flows(
+                        crate::trigger::PostTurn {
+                            model: &*self.model,
+                            conversation,
+                            policies: &policies,
+                            detector: &*detector,
+                            input: &input.text,
+                            messages: messages[base_len..].to_vec(),
+                        },
+                        &sender,
+                    )
+                    .await;
                 }
                 emit!(AgentEvent::Lifecycle(LifecycleEvent::Completed {
                     response: output,

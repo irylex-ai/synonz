@@ -43,6 +43,11 @@ impl ConversationStore for InProcessConversationStore {
         map.insert(state.id.clone(), state);
         Ok(())
     }
+
+    fn list(&self) -> Result<Vec<ConversationState>, ConversationStoreError> {
+        let map = self.state.lock().unwrap_or_else(|p| p.into_inner());
+        Ok(map.values().cloned().collect())
+    }
 }
 
 // ─────────────────────────── layered memory ─────────────────────────────

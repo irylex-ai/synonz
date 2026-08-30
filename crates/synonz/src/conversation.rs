@@ -48,6 +48,10 @@ pub struct ConversationState {
     pub id: String,
     /// The recorded turns, in order.
     pub turns: Vec<Turn>,
+    /// The session topic state machine's current topic.
+    pub topic: Option<String>,
+    /// Epoch seconds of the last activity (idle-timeout tracking).
+    pub last_active: u64,
 }
 
 /// The conversation persistence contract (ADR-0012 决策七, sibling of
@@ -64,6 +68,9 @@ pub trait ConversationStore: Send + Sync + 'static {
 
     /// Saves (upserts) a conversation's state.
     fn save(&self, state: ConversationState) -> Result<(), ConversationStoreError>;
+
+    /// Lists all stored conversation states (idle-timeout sweeping).
+    fn list(&self) -> Result<Vec<ConversationState>, ConversationStoreError>;
 }
 
 /// One completed question-answer round of a conversation.
@@ -102,8 +109,9 @@ impl Turn {
 pub struct Conversation {
     id: String,
     subject: Subject,
-    store: Arc<dyn ConversationStore>,
+    runtime: SynonzRuntime,
     turns: Arc<Mutex<Vec<Turn>>>,
+    topic: Arc<Mutex<Option<String>>>,
 }
 
 impl Clone for Conversation {
@@ -115,8 +123,9 @@ impl Clone for Conversation {
         Self {
             id: self.id.clone(),
             subject: self.subject.clone(),
-            store: Arc::clone(&self.store),
+            runtime: self.runtime.clone(),
             turns: Arc::clone(&self.turns),
+            topic: Arc::clone(&self.topic),
         }
     }
 }
@@ -143,8 +152,9 @@ impl Conversation {
         Self {
             id: id.into(),
             subject: subject.clone(),
-            store: runtime.conversation_store(),
+            runtime: runtime.clone(),
             turns: Arc::new(Mutex::new(Vec::new())),
+            topic: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -158,19 +168,62 @@ impl Conversation {
         subject: &Subject,
         id: &str,
     ) -> Result<Self, ConversationStoreError> {
-        let store = runtime.conversation_store();
-        let state = store.load(subject, id)?;
+        let state = runtime.conversation_store().load(subject, id)?;
         Ok(Self {
             id: state.id,
             subject: subject.clone(),
-            store,
+            runtime: runtime.clone(),
             turns: Arc::new(Mutex::new(state.turns)),
+            topic: Arc::new(Mutex::new(state.topic)),
         })
     }
 
     /// The conversation's owning subject.
     pub fn subject(&self) -> &Subject {
         &self.subject
+    }
+
+    /// The conversation's environment (same-source handle).
+    pub(crate) fn runtime(&self) -> &SynonzRuntime {
+        &self.runtime
+    }
+
+    /// The current topic (session topic state machine), if any.
+    pub(crate) fn topic(&self) -> Option<String> {
+        self.topic.lock().unwrap_or_else(|p| p.into_inner()).clone()
+    }
+
+    /// Updates the current topic.
+    pub(crate) fn set_topic(&self, topic: &str) {
+        *self.topic.lock().unwrap_or_else(|p| p.into_inner()) = Some(topic.to_string());
+    }
+
+    /// The registered (or default) memory store for this conversation.
+    pub(crate) fn memory(&self) -> Arc<dyn crate::memory::MemoryStore> {
+        self.runtime.memory()
+    }
+
+    /// The registered (or default) assembly strategy.
+    pub(crate) fn assembly(&self) -> Arc<dyn crate::context::ContextAssembly> {
+        self.runtime.assembly()
+    }
+
+    /// The narrative background of this conversation: the third persistent
+    /// object (session-scoped runtime), produced by the conversation
+    /// (factory attribution: the conversation owns the background's
+    /// identity). Attach it to an agent with
+    /// [`Agent::with_context`][crate::Agent::with_context].
+    pub fn context(&self) -> crate::context::Context {
+        crate::context::Context::for_conversation(self)
+    }
+
+    /// Ends the conversation explicitly: runs the ConversationEnd flows
+    /// (L2 → L3 promotion) when the policy is enabled. The trigger
+    /// authority belongs to the initiating side (ADR-0012); the idle
+    /// timeout is the fallback for users who never call this.
+    pub fn end(&self) -> Vec<String> {
+        let policies = self.runtime.memory_policies();
+        crate::trigger::run_end_flows(self, &policies)
     }
 
     /// The conversation's identity.
@@ -233,10 +286,12 @@ impl Conversation {
     /// Persists the current state to the registered store.
     pub(crate) fn persist(&self) -> Result<(), ConversationStoreError> {
         let turns = self.turns.lock().unwrap_or_else(|p| p.into_inner());
-        self.store.save(ConversationState {
+        self.runtime.conversation_store().save(ConversationState {
             subject_id: self.subject.to_string(),
             id: self.id.clone(),
             turns: turns.clone(),
+            topic: self.topic(),
+            last_active: now_epoch(),
         })
     }
 
@@ -247,8 +302,9 @@ impl Conversation {
         Conversation {
             id: self.id.clone(),
             subject: self.subject.clone(),
-            store: Arc::clone(&self.store),
+            runtime: self.runtime.clone(),
             turns: Arc::new(Mutex::new(turns.clone())),
+            topic: Arc::clone(&self.topic),
         }
     }
 
@@ -277,6 +333,8 @@ impl Conversation {
             subject_id: self.subject.to_string(),
             id: self.id.clone(),
             turns: turns.clone(),
+            topic: self.topic(),
+            last_active: now_epoch(),
         })
     }
 }
@@ -300,6 +358,13 @@ impl std::fmt::Debug for Conversation {
 pub struct TurnInput<'a> {
     input: AgentInput,
     conv: Option<&'a Conversation>,
+}
+
+fn now_epoch() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
 }
 
 impl<'a> TurnInput<'a> {
