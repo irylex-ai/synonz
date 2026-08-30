@@ -1,4 +1,4 @@
-//! The interaction subject: the owner of memory (ADR-0012).
+//! The interaction subject: the owner of memory.
 //!
 //! A subject is a first-class entity identifying one side of an
 //! interaction (a user today; agents themselves when multi-agent

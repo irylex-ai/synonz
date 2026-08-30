@@ -114,8 +114,13 @@ async fn cancel_is_explicit_and_observable() {
             reason: CancelReason::UserRequested
         }))
     ));
-    // Await maps cancellation onto the error channel.
-    let run = agent.run("go");
+    // Await maps cancellation onto the error channel (a fresh agent with
+    // its own hanging script, so the run's only outcome is cancellation).
+    let await_agent = Agent::builder()
+        .model(MockModel::hanging())
+        .build()
+        .unwrap();
+    let run = await_agent.run("go");
     run.cancel();
     assert!(matches!(
         run.await,

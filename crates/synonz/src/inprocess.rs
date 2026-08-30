@@ -1,5 +1,5 @@
 //! The in-process default implementations: conversation persistence and
-//! layered memory (ADR-0012: "未注册即默认，缺省进程内实现").
+//! layered memory (register nothing, get the in-process defaults).
 //!
 //! Both are process-local (data does not survive restart), deterministic,
 //! and dependency-free — the bootstrap-quality defaults. Register real

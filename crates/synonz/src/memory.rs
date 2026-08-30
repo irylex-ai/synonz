@@ -1,5 +1,5 @@
 //! The memory system: fragment model and the layered memory store
-//! contract (ADR-0012).
+//! contract.
 //!
 //! Memory is the subject-owned abstraction of interaction. Three layers:
 //!
@@ -20,7 +20,7 @@ use crate::Subject;
 /// A memory fragment's topic tag.
 pub type Topic = String;
 
-/// The identity triple locating one memory fragment (ADR-0012 §5.2).
+/// The identity triple locating one memory fragment.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FragmentIdentity {
     /// The owning subject (full `(type, id)` identity).

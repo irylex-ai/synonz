@@ -13,10 +13,10 @@
 //! // documentation and in `synonz/tests/derive.rs`.
 //! use synonz::{Deserialize, JsonSchema, Tool, ToolContent, ToolResult};
 //!
-//! /// 查询城市天气
+//! /// Queries the current weather for a city.
 //! #[derive(Tool, Deserialize, JsonSchema)]
 //! struct Weather {
-//!     /// 城市名
+//!     /// The city name.
 //!     city: String,
 //! }
 //!

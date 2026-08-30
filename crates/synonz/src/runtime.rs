@@ -1,5 +1,5 @@
 //! The process-level runtime: explicit bootstrap, startup registry, and
-//! default implementations (ADR-0012 决策四).
+//! default implementations.
 //!
 //! `SynonzRuntime` is the single source of the process's environment
 //! services: conversation persistence, layered memory, and context

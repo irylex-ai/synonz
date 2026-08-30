@@ -9,12 +9,12 @@ use synonz::{Deserialize, JsonSchema, Tool, ToolContent, ToolContext, ToolError,
 
 // ── The derived tool ──
 
-/// 查询指定城市的当前天气。
+/// Queries the current weather for a city.
 #[derive(Tool, Deserialize, JsonSchema)]
 struct WeatherDerived {
-    /// 城市名，如 "beijing"。
+    /// The city name, e.g. "beijing".
     city: String,
-    /// 可选的温度单位，默认摄氏度。
+    /// Optional temperature unit, celsius by default.
     unit: Option<String>,
 }
 
@@ -38,7 +38,7 @@ impl Tool for WeatherManual {
         "weather_derived"
     }
     fn description(&self) -> &str {
-        "查询指定城市的当前天气。"
+        "Queries the current weather for a city."
     }
     fn parameters_schema(&self) -> &Value {
         static SCHEMA: OnceLock<Value> = OnceLock::new();
@@ -46,15 +46,15 @@ impl Tool for WeatherManual {
             json!({
                 "$schema": "https://json-schema.org/draft/2020-12/schema",
                 "title": "WeatherDerived",
-                "description": "查询指定城市的当前天气。",
+                "description": "Queries the current weather for a city.",
                 "type": "object",
                 "properties": {
                     "city": {
-                        "description": "城市名，如 \"beijing\"。",
+                        "description": "The city name, e.g. \"beijing\".",
                         "type": "string"
                     },
                     "unit": {
-                        "description": "可选的温度单位，默认摄氏度。",
+                        "description": "Optional temperature unit, celsius by default.",
                         "type": ["string", "null"]
                     }
                 },
@@ -113,15 +113,15 @@ async fn derived_schema_matches_expected_shape() {
         &json!({
             "$schema": "https://json-schema.org/draft/2020-12/schema",
             "title": "WeatherDerived",
-            "description": "查询指定城市的当前天气。",
+            "description": "Queries the current weather for a city.",
             "type": "object",
             "properties": {
                 "city": {
-                    "description": "城市名，如 \"beijing\"。",
+                    "description": "The city name, e.g. \"beijing\".",
                     "type": "string"
                 },
                 "unit": {
-                    "description": "可选的温度单位，默认摄氏度。",
+                    "description": "Optional temperature unit, celsius by default.",
                     "type": ["string", "null"]
                 }
             },

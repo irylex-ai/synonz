@@ -9,16 +9,16 @@ use schemars::JsonSchema;
 use schemars::schema_for;
 use serde_json::json;
 
-/// 查询城市天气。
+/// Queries the current weather for a city.
 ///
-/// 支持全球主要城市。
+/// Supports major cities worldwide.
 // Fields are consumed by the JsonSchema derive, which clippy cannot see.
 #[allow(dead_code)]
 #[derive(JsonSchema)]
 struct Weather {
-    /// 城市名，如 "beijing"。
+    /// The city name, e.g. "beijing".
     city: String,
-    /// 可选的温度单位。
+    /// Optional temperature unit.
     unit: Option<String>,
 }
 
@@ -30,15 +30,15 @@ fn schemars_shape_matches_derive_expectations() {
         json!({
             "$schema": "https://json-schema.org/draft/2020-12/schema",
             "title": "Weather",
-            "description": "查询城市天气。\n\n支持全球主要城市。",
+            "description": "Queries the current weather for a city.\n\nSupports major cities worldwide.",
             "type": "object",
             "properties": {
                 "city": {
-                    "description": "城市名，如 \"beijing\"。",
+                    "description": "The city name, e.g. \"beijing\".",
                     "type": "string"
                 },
                 "unit": {
-                    "description": "可选的温度单位。",
+                    "description": "Optional temperature unit.",
                     "type": ["string", "null"]
                 }
             },

@@ -1,4 +1,4 @@
-//! M11 acceptance: the memory & context system (ADR-0012).
+//! Acceptance tests for the memory & context system.
 //!
 //! Verifies: layered assembly (L3 recall / L2 summaries / L1 window),
 //! post-turn memory flows (L1 write, TurnCount demotion with visible

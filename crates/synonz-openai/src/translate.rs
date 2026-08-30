@@ -1,7 +1,7 @@
 //! Pure translation between Synonz canonical messages and the OpenAI
 //! chat-completions wire format.
 //!
-//! Wire-shape decisions locked by ADR-0006's difference table:
+//! Wire-shape decisions locked by the canonical/openai difference table:
 //!
 //! | Canonical | OpenAI |
 //! |---|---|

@@ -1,7 +1,7 @@
 //! Pure translation between Synonz canonical messages and the Anthropic
 //! Messages API wire format.
 //!
-//! Wire-shape decisions locked by ADR-0006's difference table:
+//! Wire-shape decisions locked by the canonical/anthropic difference table:
 //!
 //! | Canonical | Anthropic |
 //! |---|---|

@@ -8,7 +8,7 @@
 //!
 //! This parser is intentionally duplicated from `synonz-openai`: a
 //! ~60-line, well-understood parser does not justify a shared crate yet
-//! (ADR-0001: abstractions only for demonstrated repeated patterns). If a
+//! (abstractions only for demonstrated repeated patterns). If a
 //! third adapter appears, promote it to a shared location.
 
 /// Incremental parser turning raw byte chunks into SSE `data:` payloads.

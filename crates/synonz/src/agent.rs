@@ -344,7 +344,7 @@ impl Agent {
     /// [`Context`], from
     /// [`Conversation::context`][crate::Conversation::context]): the agent
     /// executes within it — the background makes the stateless agent
-    /// stateful (ADR-0012).
+    /// stateful.
     ///
     /// With a context, every `ask`/`run` assembles the send view freshly
     /// through the context's assembly strategy (memory layers). Without

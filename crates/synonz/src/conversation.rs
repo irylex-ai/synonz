@@ -1,6 +1,6 @@
 //! The conversation entity: a multi-turn dialogue with identity.
 //!
-//! A `Conversation` is a *data entity* (ADR-0011): the aggregate of its
+//! A `Conversation` is a *data entity*: the aggregate of its
 //! turns, identified, serializable, and agent-agnostic — different agents
 //! can continue the same conversation. Data-only behaviors live here
 //! (information expert); model-touching behaviors (summarization,
@@ -54,7 +54,7 @@ pub struct ConversationState {
     pub last_active: u64,
 }
 
-/// The conversation persistence contract (ADR-0012 决策七, sibling of
+/// The conversation persistence contract, sibling of
 /// [`crate::memory::MemoryStore`]). Implementations own storage; the
 /// framework owns when saves happen (auto-save on turn completion,
 /// High Level).
@@ -136,7 +136,7 @@ impl Conversation {
     /// The generated id is `conv-<timestamp>-<counter>`: unique within a
     /// process for practical purposes, not cryptographic. The
     /// conversation's environment is the given runtime — the explicit
-    /// same-source guarantee (ADR-0012).
+    /// same-source guarantee.
     pub fn new(runtime: &SynonzRuntime, subject: &Subject) -> Self {
         let nanos = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -219,7 +219,7 @@ impl Conversation {
 
     /// Ends the conversation explicitly: runs the ConversationEnd flows
     /// (L2 → L3 promotion) when the policy is enabled. The trigger
-    /// authority belongs to the initiating side (ADR-0012); the idle
+    /// authority belongs to the initiating side; the idle
     /// timeout is the fallback for users who never call this.
     pub fn end(&self) -> Vec<String> {
         let policies = self.runtime.memory_policies();
@@ -351,7 +351,7 @@ impl std::fmt::Debug for Conversation {
 }
 
 /// The per-turn input object: the question plus the conversation it belongs
-/// to (ADR-0011 parameter object).
+/// to (the parameter-object pattern).
 ///
 /// Constructed by [`Conversation::turn_input`]; `&str`, `String`, and
 /// [`AgentInput`] convert into a conversation-less one-shot input.

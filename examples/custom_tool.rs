@@ -9,10 +9,10 @@ use synonz::{
     ToolResult,
 };
 
-/// 查询指定城市的天气。
+/// Queries the current weather for a city.
 #[derive(Tool, Deserialize, JsonSchema)]
 struct Weather {
-    /// 城市名，如 "beijing"。
+    /// The city name, e.g. "beijing".
     city: String,
 }
 

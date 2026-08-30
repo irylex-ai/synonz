@@ -1,5 +1,5 @@
 //! The context engine: the narrative background of a conversation
-//! (ADR-0012 决策一/八/九).
+//! The assembly strategy decides what is sent; the framework owns when.
 //!
 //! `Context` is the third persistent object — the session-scoped runtime
 //! that lets the stateless agent execute with state. Created from a
@@ -137,7 +137,7 @@ impl ContextAssembly for LayeredMemory {
 }
 
 /// The pre-memory behavior as a built-in strategy: the conversation's
-/// full history, verbatim (v1 behavior, ADR-0012 决策八收编).
+/// full history, verbatim (the pre-memory behavior, kept as a built-in strategy).
 #[derive(Default)]
 pub struct ConversationHistory;
 

@@ -59,10 +59,10 @@ impl ToolContext {
 /// ```
 /// use synonz::{Deserialize, JsonSchema, Tool, ToolContent, ToolError, ToolResult};
 ///
-/// /// 查询城市天气
+/// /// Queries the current weather for a city.
 /// #[derive(Tool, Deserialize, JsonSchema)]
 /// struct Weather {
-///     /// 城市名
+///     /// The city name.
 ///     city: String,
 /// }
 ///

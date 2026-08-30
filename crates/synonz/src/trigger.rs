@@ -1,5 +1,5 @@
 //! The memory behavior engine: topic tracking and layer-flow triggers
-//! (ADR-0012 决策六).
+//! The mandatory floors fire on their resource conditions.
 //!
 //! Orchestration lives in the framework; storage lives in the plugin.
 //! After every completed turn the execution calls
