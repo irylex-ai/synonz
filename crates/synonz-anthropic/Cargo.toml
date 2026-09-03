@@ -4,6 +4,9 @@ description = "Anthropic model adapter for the Synonz agent framework"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
+keywords.workspace = true
+categories.workspace = true
 
 [lints]
 workspace = true

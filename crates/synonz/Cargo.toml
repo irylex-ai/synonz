@@ -4,6 +4,9 @@ description = "Explicit, controllable, observable agent engineering infrastructu
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
+keywords.workspace = true
+categories.workspace = true
 
 [features]
 # Mock test doubles (MockModel etc.) for downstream agent testing.
