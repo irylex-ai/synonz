@@ -10,9 +10,10 @@ members = [
 ]
 
 [workspace.package]
-version = "0.1.0"
+version = "0.1.1"
 edition = "2024"
 license = "Apache-2.0"
+readme = "../../README.md"
 repository = "https://github.com/irylex-ai/synonz"
 keywords = ["agent", "ai", "llm", "framework", "multi-agent"]
 categories = ["asynchronous", "development-tools"]
@@ -33,11 +34,11 @@ rmcp = { version = "3.1", default-features = false }
 syn = "2"
 quote = "1"
 proc-macro2 = "1"
-synonz = { path = "crates/synonz", version = "0.1.0" }
-synonz-derive = { path = "crates/synonz-derive", version = "0.1.0" }
-synonz-openai = { path = "crates/synonz-openai", version = "0.1.0" }
-synonz-anthropic = { path = "crates/synonz-anthropic", version = "0.1.0" }
-synonz-mcp = { path = "crates/synonz-mcp", version = "0.1.0" }
+synonz = { path = "crates/synonz", version = "0.1.1" }
+synonz-derive = { path = "crates/synonz-derive", version = "0.1.1" }
+synonz-openai = { path = "crates/synonz-openai", version = "0.1.1" }
+synonz-anthropic = { path = "crates/synonz-anthropic", version = "0.1.1" }
+synonz-mcp = { path = "crates/synonz-mcp", version = "0.1.1" }
 
 [workspace.lints.rust]
 unsafe_code = "deny"
