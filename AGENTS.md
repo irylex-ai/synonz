@@ -261,7 +261,12 @@ Coding agents working on Synonz must:
 - identify unresolved risks honestly;
 - avoid silently introducing breaking changes;
 - treat public API changes with additional care;
-- prefer incremental implementation for large changes.
+- prefer incremental implementation for large changes;
+- modify files only with file primitives (read, exact-match edit, write);
+  never generate or patch source code by embedding it in shell scripts,
+  heredocs, or inline scripts — text-substitution scripting is error-prone
+  (silent partial application, formatting drift, unverifiable matches) and
+  must not be used for code changes.
 
 For substantial work, prefer **understand → design → implement → verify →
 review**. Small, obvious changes may proceed directly when no meaningful
