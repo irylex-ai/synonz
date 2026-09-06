@@ -292,9 +292,14 @@ impl Agent {
     /// loop's await points.
     pub fn run<'a>(&self, input: impl Into<TurnInput<'a>>) -> Run<'a> {
         let (input, conv) = input.into().into_parts();
-        let core = CancelCore::new();
-        let run = self.spawn_run(input, conv, core);
-        self.apply_default_timeout(run)
+        let runner = self.spawn_runner(input, conv, CancelCore::new());
+        Run {
+            runner,
+            // Serialization guard: while the handle is alive the
+            // conversation cannot start a competing turn (borrow checker).
+            // The turn write itself happens inside the execution.
+            _conv: conv,
+        }
     }
 
     /// Runs the agent with an externally owned cancellation token: when the
@@ -305,9 +310,11 @@ impl Agent {
         token: CancellationToken,
     ) -> Run<'a> {
         let (input, conv) = input.into().into_parts();
-        let core = CancelCore::child_of(&token);
-        let run = self.spawn_run(input, conv, core);
-        self.apply_default_timeout(run)
+        let runner = self.spawn_runner(input, conv, CancelCore::child_of(&token));
+        Run {
+            runner,
+            _conv: conv,
+        }
     }
 
     /// Asks the agent a question, returning a streaming-first [`Answer`].
@@ -318,17 +325,13 @@ impl Agent {
     /// `ask`. Cancellation: [`Answer::cancel`], or dropping the handle.
     pub fn ask<'a>(&self, input: impl Into<TurnInput<'a>>) -> Answer<'a> {
         let (input, conv) = input.into().into_parts();
+        let runner = self.spawn_runner(input, conv, CancelCore::new());
         Answer {
-            run: self.run_with_conv(input, conv),
+            runner,
+            // Same serialization guard as `Run`: an in-flight answer also
+            // holds the conversation against competing turns.
+            _conv: conv,
         }
-    }
-
-    /// Internal shared path for `ask`: no default timeout handling here so
-    /// `ask` mirrors `run` semantics through the same machinery.
-    fn run_with_conv<'a>(&self, input: AgentInput, conv: Option<&'a Conversation>) -> Run<'a> {
-        let core = CancelCore::new();
-        let run = self.spawn_run(input, conv, core);
-        self.apply_default_timeout(run)
     }
 
     /// Sets a default time budget applied to every run started afterwards.
@@ -355,21 +358,18 @@ impl Agent {
         self
     }
 
-    fn apply_default_timeout<'a>(&self, run: Run<'a>) -> Run<'a> {
-        match self.default_timeout {
-            Some(duration) => run.with_timeout(duration),
-            None => run,
-        }
-    }
-
-    fn spawn_run<'a>(
+    /// Spawns the loop task and wraps its shared execution state in an
+    /// [`AgentRunner`]. Both `Run` and `Answer` are built on top of this —
+    /// they are peers over the same machinery, applying the agent's
+    /// default time budget when one is set.
+    fn spawn_runner(
         &self,
         input: AgentInput,
-        conv: Option<&'a Conversation>,
+        conv: Option<&Conversation>,
         core: Arc<CancelCore>,
-    ) -> Run<'a> {
+    ) -> AgentRunner {
         let (sender, receiver) = mpsc::channel(1);
-        let task = LoopTask {
+        let task = AgentLoopTask {
             model: Arc::clone(&self.model),
             tools: Arc::clone(&self.tools),
             system_prompt: self.system_prompt.clone(),
@@ -378,16 +378,16 @@ impl Agent {
             context: self.context.clone(),
         };
         tokio::spawn(task.execute(input, Arc::clone(&core), sender));
-        Run {
+        let runner = AgentRunner {
             receiver,
             handle: CancelHandle::new(core),
             rounds_seen: 0,
             terminal: None,
-            // Serialization guard: while the handle is alive the
-            // conversation cannot start a competing turn (borrow checker).
-            // The turn write itself happens inside the execution.
-            _conv: conv,
+        };
+        if let Some(duration) = self.default_timeout {
+            runner.arm_timeout(duration);
         }
+        runner
     }
 }
 
@@ -403,33 +403,30 @@ fn map_terminal(event: &AgentEvent) -> Option<Result<AgentOutput, AgentError>> {
     }
 }
 
-/// The handle to one in-flight run: the full event narrative.
+/// The shared execution state of one in-flight run.
 ///
-/// Dual-faced: iterate it ([`Stream`] of [`AgentEvent`]) for the complete
-/// observable narrative, or await it for the final [`AgentOutput`]. The
-/// last event is always a terminal lifecycle event, and the stream closes
-/// after it. Dropping the handle (or calling [`Run::cancel`]) cancels the
-/// run.
-pub struct Run<'a> {
+/// [`Answer`] and [`Run`] are peers that each wrap an `AgentRunner` —
+/// neither wraps the other. The runner owns the event receiver, the
+/// cancellation handle, and the terminal outcome; the two handles differ
+/// only in how they consume the event stream.
+pub(crate) struct AgentRunner {
     receiver: mpsc::Receiver<AgentEvent>,
     handle: CancelHandle,
     rounds_seen: usize,
     terminal: Option<Result<AgentOutput, AgentError>>,
-    // See `spawn_run`: borrow guard only, never read.
-    _conv: Option<&'a Conversation>,
 }
 
-impl Run<'_> {
-    /// Receives the next event, or `None` after the stream closes.
-    ///
-    /// The terminal event's outcome is remembered, so awaiting the handle
+impl AgentRunner {
+    /// Receives the next event, or `None` after the stream closes. The
+    /// terminal event's outcome is remembered, so awaiting the runner
     /// after full iteration still resolves.
-    pub async fn next(&mut self) -> Option<AgentEvent> {
+    async fn next(&mut self) -> Option<AgentEvent> {
         let event = self.receiver.recv().await?;
         self.note(&event);
         Some(event)
     }
 
+    /// Records round count and the terminal outcome from an event.
     fn note(&mut self, event: &AgentEvent) {
         if matches!(
             event,
@@ -448,29 +445,25 @@ impl Run<'_> {
     /// Explicitly cancels the run. The event stream then terminates with
     /// [`LifecycleEvent::Cancelled`] ([`CancelReason::UserRequested`]);
     /// dropping the handle is the RAII backstop for the same behavior.
-    pub fn cancel(&self) {
+    fn cancel(&self) {
         self.handle.cancel();
     }
 
     /// Arms the run's time budget. When it elapses first, the run cancels
     /// with [`CancelReason::Timeout`].
-    pub fn with_timeout(self, duration: Duration) -> Self {
+    fn arm_timeout(&self, duration: Duration) {
         self.handle.arm_timeout(duration);
-        self
     }
 
     /// The number of reasoning rounds observed so far (derived from consumed
     /// events — rounds are never stored as events).
-    pub fn rounds(&self) -> usize {
+    fn rounds(&self) -> usize {
         self.rounds_seen
     }
-}
 
-impl Stream for Run<'_> {
-    type Item = AgentEvent;
-
-    fn poll_next(
-        mut self: Pin<&mut Self>,
+    /// `Stream::poll_next` over the full event narrative.
+    fn poll_event(
+        &mut self,
         cx: &mut std::task::Context<'_>,
     ) -> std::task::Poll<Option<AgentEvent>> {
         match self.receiver.poll_recv(cx) {
@@ -481,21 +474,20 @@ impl Stream for Run<'_> {
             other => other,
         }
     }
-}
 
-impl Future for Run<'_> {
-    type Output = Result<AgentOutput, AgentError>;
-
-    fn poll(
-        mut self: Pin<&mut Self>,
+    /// `Future::poll` until the terminal outcome. Replays the stashed
+    /// outcome when the stream was already fully consumed.
+    fn poll_result(
+        &mut self,
         cx: &mut std::task::Context<'_>,
-    ) -> std::task::Poll<Self::Output> {
+    ) -> std::task::Poll<Result<AgentOutput, AgentError>> {
         if let Some(result) = &self.terminal {
             return std::task::Poll::Ready(result.clone());
         }
         loop {
             match self.receiver.poll_recv(cx) {
                 std::task::Poll::Ready(Some(event)) => {
+                    self.note(&event);
                     if let Some(result) = map_terminal(&event) {
                         self.terminal = Some(result.clone());
                         return std::task::Poll::Ready(result);
@@ -512,37 +504,112 @@ impl Future for Run<'_> {
     }
 }
 
+/// The handle to one in-flight run: the full event narrative.
+///
+/// Dual-faced: iterate it ([`Stream`] of [`AgentEvent`]) for the complete
+/// observable narrative, or await it for the final [`AgentOutput`]. The
+/// last event is always a terminal lifecycle event, and the stream closes
+/// after it. Dropping the handle (or calling [`Run::cancel`]) cancels the
+/// run.
+pub struct Run<'a> {
+    runner: AgentRunner,
+    // Serialization guard: while the handle is alive the conversation
+    // cannot start a competing turn (borrow checker). The turn write
+    // itself happens inside the execution.
+    _conv: Option<&'a Conversation>,
+}
+
+impl Run<'_> {
+    /// Receives the next event, or `None` after the stream closes.
+    ///
+    /// The terminal event's outcome is remembered, so awaiting the handle
+    /// after full iteration still resolves.
+    pub async fn next(&mut self) -> Option<AgentEvent> {
+        self.runner.next().await
+    }
+
+    /// Explicitly cancels the run. The event stream then terminates with
+    /// [`LifecycleEvent::Cancelled`] ([`CancelReason::UserRequested`]);
+    /// dropping the handle is the RAII backstop for the same behavior.
+    pub fn cancel(&self) {
+        self.runner.cancel();
+    }
+
+    /// Arms the run's time budget. When it elapses first, the run cancels
+    /// with [`CancelReason::Timeout`].
+    pub fn with_timeout(self, duration: Duration) -> Self {
+        self.runner.arm_timeout(duration);
+        self
+    }
+
+    /// The number of reasoning rounds observed so far (derived from consumed
+    /// events — rounds are never stored as events).
+    pub fn rounds(&self) -> usize {
+        self.runner.rounds()
+    }
+}
+
+impl Stream for Run<'_> {
+    type Item = AgentEvent;
+
+    fn poll_next(
+        mut self: Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Option<AgentEvent>> {
+        self.runner.poll_event(cx)
+    }
+}
+
+impl Future for Run<'_> {
+    type Output = Result<AgentOutput, AgentError>;
+
+    fn poll(
+        mut self: Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Self::Output> {
+        self.runner.poll_result(cx)
+    }
+}
+
 /// A streaming-first answer handle.
 ///
 /// Yields text deltas ([`ModelDelta`]) as the model streams, and resolves
-/// to the final [`AgentOutput`] when awaited. Internally a filtered view of
-/// a [`Run`]: non-delta events are consumed silently, and the run's outcome
-/// is preserved for the eventual await.
+/// to the final [`AgentOutput`] when awaited. A peer of [`Run`], not a
+/// view of it: both wrap their own [`AgentRunner`] over the same loop
+/// machinery, differing only in consumption — `Answer` filters the event
+/// stream down to text deltas, `Run` narrates every event. Awaiting
+/// either resolves to the identical final outcome.
 pub struct Answer<'a> {
-    run: Run<'a>,
+    runner: AgentRunner,
+    // Same serialization guard as `Run`: an in-flight answer holds the
+    // conversation against competing turns.
+    _conv: Option<&'a Conversation>,
 }
 
 impl Answer<'_> {
-    /// Receives the next text delta, or `None` when the answer stream ends.
+    /// Receives the next text delta, or `None` when the answer stream
+    /// ends. Non-delta events (lifecycle, tool calls, usage) are consumed
+    /// silently; awaiting the handle still resolves to the final outcome.
     pub async fn next(&mut self) -> Option<ModelDelta> {
-        while let Some(event) = self.run.next().await {
+        loop {
+            let event = self.runner.next().await?;
             if let AgentEvent::Model(ModelEvent::StreamDelta { delta }) = event {
                 return Some(delta);
             }
         }
-        None
     }
 
-    /// Explicitly cancels the answer's run (see [`Run::cancel`]).
+    /// Explicitly cancels the answer's run. The stream then ends;
+    /// awaiting the handle resolves to [`AgentError::Cancelled`].
     pub fn cancel(&self) {
-        self.run.cancel();
+        self.runner.cancel();
     }
 
-    /// Arms the answer's time budget (see [`Run::with_timeout`]).
+    /// Arms the answer's time budget. When it elapses first, the run
+    /// cancels with [`CancelReason::Timeout`].
     pub fn with_timeout(self, duration: Duration) -> Self {
-        Self {
-            run: self.run.with_timeout(duration),
-        }
+        self.runner.arm_timeout(duration);
+        self
     }
 }
 
@@ -554,7 +621,7 @@ impl Stream for Answer<'_> {
         cx: &mut std::task::Context<'_>,
     ) -> std::task::Poll<Option<ModelDelta>> {
         loop {
-            match Pin::new(&mut self.run).poll_next(cx) {
+            match self.runner.poll_event(cx) {
                 std::task::Poll::Ready(Some(AgentEvent::Model(ModelEvent::StreamDelta {
                     delta,
                 }))) => return std::task::Poll::Ready(Some(delta)),
@@ -573,12 +640,12 @@ impl Future for Answer<'_> {
         mut self: Pin<&mut Self>,
         cx: &mut std::task::Context<'_>,
     ) -> std::task::Poll<Self::Output> {
-        Pin::new(&mut self.run).poll(cx)
+        self.runner.poll_result(cx)
     }
 }
 
 /// The per-run task: everything the loop needs, all owned.
-struct LoopTask {
+struct AgentLoopTask {
     model: Arc<dyn Model>,
     tools: Arc<[Arc<dyn Tool>]>,
     system_prompt: Option<String>,
@@ -587,7 +654,7 @@ struct LoopTask {
     context: Option<Arc<Context>>,
 }
 
-impl LoopTask {
+impl AgentLoopTask {
     async fn execute(
         self,
         input: AgentInput,
