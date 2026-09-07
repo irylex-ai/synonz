@@ -6,7 +6,7 @@ use std::time::Duration;
 
 use futures::StreamExt;
 use synonz::CancellationToken;
-use synonz::{Agent, CancelReason, LifecycleEvent};
+use synonz::{Agent, CancelReason, ExecutionEvent};
 
 /// A model whose stream never finishes (to make cancellation observable).
 struct HangingModel;
@@ -35,7 +35,7 @@ async fn main() {
         token.cancel();
     });
     while let Some(event) = run.next().await {
-        if let Some(LifecycleEvent::Cancelled { reason }) = terminal(&event) {
+        if let Some(reason) = terminal(&event) {
             println!("token entry cancelled the run: {reason:?}");
             assert_eq!(reason, CancelReason::UserRequested);
             break;
@@ -45,26 +45,22 @@ async fn main() {
     // Entry 2: the time budget cancels with `Timeout`.
     let mut run = agent.run("go").with_timeout(Duration::from_millis(50));
     while let Some(event) = run.next().await {
-        if let Some(LifecycleEvent::Cancelled { reason }) = terminal(&event) {
+        if let Some(reason) = terminal(&event) {
             println!("timeout entry cancelled the run: {reason:?}");
             assert_eq!(reason, CancelReason::Timeout);
             break;
         }
     }
 
-    // Entry 3: dropping the stream cancels the run (cooperative teardown).
-    let mut run = agent.run("go");
-    let _started = run.next().await; // Started
-    let _requested = run.next().await; // Requested
+    // Entry 3: dropping the handle cancels the run (cooperative teardown).
+    let run = agent.run("go");
     drop(run);
-    println!("drop entry: the run stream was dropped and torn down");
+    println!("drop entry: the run handle was dropped and torn down");
 }
 
-fn terminal(event: &synonz::AgentEvent) -> Option<LifecycleEvent> {
+fn terminal(event: &synonz::ExecutionEvent) -> Option<CancelReason> {
     match event {
-        synonz::AgentEvent::Lifecycle(lifecycle @ LifecycleEvent::Cancelled { .. }) => {
-            Some(lifecycle.clone())
-        }
+        ExecutionEvent::Cancelled(reason) => Some(*reason),
         _ => None,
     }
 }

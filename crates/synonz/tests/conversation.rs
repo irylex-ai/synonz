@@ -90,14 +90,14 @@ async fn multi_turn_conversation_remembers_history() {
 
     // Turn 1 (two model rounds inside one run): tool call + answer.
     let output = agent
-        .ask(conv.turn_input("weather?"))
+        .run(conv.turn_input("weather?"))
         .await
         .expect("turn 1");
     assert_eq!(output.text(), Some("sunny"));
     assert_eq!(conv.len(), 1, "completed turn is recorded");
 
     // Turn 2: the conversation history (turn 1's messages) is replayed.
-    let output = agent.ask(conv.turn_input("again?")).await.expect("turn 2");
+    let output = agent.run(conv.turn_input("again?")).await.expect("turn 2");
     assert_eq!(output.text(), Some("sunny"));
     assert_eq!(conv.len(), 2);
 
@@ -126,8 +126,8 @@ async fn conversation_flat_history_replays_into_the_model() {
     let (runtime, subject) = env();
     let mut conv = Conversation::new(&runtime, &subject);
 
-    let _ = agent.ask(conv.turn_input("one")).await.unwrap();
-    let _ = agent.ask(conv.turn_input("two")).await.unwrap();
+    let _ = agent.run(conv.turn_input("one")).await.unwrap();
+    let _ = agent.run(conv.turn_input("two")).await.unwrap();
 
     // The flattened view is the full canonical conversation: every turn's
     // messages in order, including tool round-trips.
@@ -172,7 +172,7 @@ async fn failed_turns_are_not_recorded() {
     let (runtime, subject) = env();
     let mut conv = Conversation::new(&runtime, &subject);
 
-    let result = agent.ask(conv.turn_input("fails")).await;
+    let result = agent.run(conv.turn_input("fails")).await;
     assert!(matches!(
         result,
         Err(synonz::AgentError::Model(
@@ -192,12 +192,12 @@ async fn multiple_agents_continue_one_conversation() {
     let (runtime, subject) = env();
     let mut conv = Conversation::new(&runtime, &subject);
     let first = researcher
-        .ask(conv.turn_input("research the weather"))
+        .run(conv.turn_input("research the weather"))
         .await
         .unwrap();
     assert_eq!(first.text(), Some("sunny"));
 
-    let second = writer.ask(conv.turn_input("now summarize")).await.unwrap();
+    let second = writer.run(conv.turn_input("now summarize")).await.unwrap();
     assert_eq!(second.text(), Some("sunny"));
     assert_eq!(conv.len(), 2, "both agents' turns live in one conversation");
 }
@@ -205,7 +205,7 @@ async fn multiple_agents_continue_one_conversation() {
 #[tokio::test]
 async fn one_shot_input_stays_conversation_less() {
     let agent = weather_agent(1);
-    let output = agent.ask("no conversation here").await.unwrap();
+    let output = agent.run("no conversation here").await.unwrap();
     assert_eq!(output.text(), Some("sunny"));
 }
 

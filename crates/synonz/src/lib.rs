@@ -39,15 +39,15 @@ mod cancel;
 #[cfg(feature = "test-util")]
 pub mod mock;
 
-pub use agent::{Agent, AgentBuilder, Answer, DEFAULT_MAX_ROUNDS, Run};
+pub use agent::{Agent, AgentBuilder, DEFAULT_MAX_ROUNDS, Execution};
 pub use context::{Context, ContextAssembly, ConversationHistory, LayeredMemory};
 pub use conversation::{
     Conversation, ConversationState, ConversationStore, ConversationStoreError, Turn, TurnInput,
 };
 pub use error::{AgentError, ModelError};
 pub use event::{
-    AgentEvent, CallPurpose, CancelReason, LifecycleEvent, ModelDelta, ModelEvent, TokenUsage,
-    ToolEvent,
+    AgentEvent, CallPurpose, CancelReason, ExecutionEvent, LifecycleEvent, ModelDelta, ModelEvent,
+    TokenUsage, ToolEvent,
 };
 pub use io::{AgentInput, AgentOutput};
 pub use memory::{

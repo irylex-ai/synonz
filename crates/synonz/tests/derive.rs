@@ -189,6 +189,6 @@ async fn derived_tool_drives_a_full_agent_run() {
         .build()
         .unwrap();
 
-    let output = agent.ask("weather?").await.unwrap();
+    let output = agent.run("weather?").await.unwrap();
     assert_eq!(output.text(), Some("done"));
 }

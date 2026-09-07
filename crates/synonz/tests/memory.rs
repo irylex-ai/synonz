@@ -45,7 +45,7 @@ async fn post_turn_flow_writes_l1_and_demotes_on_turn_count() {
     let agent = Agent::builder().model(model.clone()).build().unwrap();
     let mut conv = Conversation::with_id(&runtime, &subject, "conv-1");
 
-    let _ = agent.ask(conv.turn_input("one")).await.unwrap();
+    let _ = agent.run(conv.turn_input("one")).await.unwrap();
     assert_eq!(conv.len(), 1);
 
     // After turn one, L1 holds one entry (within window).
@@ -54,7 +54,7 @@ async fn post_turn_flow_writes_l1_and_demotes_on_turn_count() {
 
     // Turn two overflows: the flow demotes the oldest into L2 (the
     // summarization call consumes the "summary" script).
-    let _ = agent.ask(conv.turn_input("two")).await.unwrap();
+    let _ = agent.run(conv.turn_input("two")).await.unwrap();
     assert_eq!(
         memory.l1_len(&subject, "conv-1").unwrap(),
         1,
@@ -79,7 +79,7 @@ async fn l2_overflow_distills_into_l3() {
     let mut conv = Conversation::with_id(&runtime, &subject, "conv-2");
 
     for text in ["one", "two", "three"] {
-        let _ = agent.ask(conv.turn_input(text)).await.unwrap();
+        let _ = agent.run(conv.turn_input(text)).await.unwrap();
     }
     let memory = runtime.memory();
     assert_eq!(memory.l1_len(&subject, "conv-2").unwrap(), 1);
@@ -98,8 +98,8 @@ async fn conversation_end_promotes_l2_into_l3() {
     let agent = Agent::builder().model(model).build().unwrap();
     let mut conv = Conversation::with_id(&runtime, &subject, "conv-3");
 
-    let _ = agent.ask(conv.turn_input("one")).await.unwrap();
-    let _ = agent.ask(conv.turn_input("two")).await.unwrap();
+    let _ = agent.run(conv.turn_input("one")).await.unwrap();
+    let _ = agent.run(conv.turn_input("two")).await.unwrap();
     let memory = runtime.memory();
     assert_eq!(memory.l2_len(&subject, "conv-3").unwrap(), 1);
 
@@ -219,7 +219,7 @@ async fn with_context_path_drives_a_full_turn() {
         .model(text_model(&["quick"]))
         .build()
         .unwrap();
-    let output = quick.ask("1+1").await.unwrap();
+    let output = quick.run("1+1").await.unwrap();
     assert_eq!(output.text(), Some("quick"));
 
     let mut conv = Conversation::with_id(&runtime, &subject, "conv-6");
@@ -228,7 +228,7 @@ async fn with_context_path_drives_a_full_turn() {
         .build()
         .unwrap()
         .with_context(conv.context());
-    let output = ctx_agent.ask(conv.turn_input("question")).await.unwrap();
+    let output = ctx_agent.run(conv.turn_input("question")).await.unwrap();
     assert_eq!(output.text(), Some("the answer"));
     assert_eq!(conv.len(), 1);
     // The turn landed in L1 (memory write after completion).

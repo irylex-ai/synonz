@@ -28,10 +28,7 @@ async fn main() {
     let mut run = agent.run("what is the weather like in beijing?");
     let mut delta_text = String::new();
     while let Some(event) = run.next().await {
-        if let synonz::AgentEvent::Model(synonz::ModelEvent::StreamDelta {
-            delta: synonz::ModelDelta::Text { text },
-        }) = event
-        {
+        if let synonz::ExecutionEvent::Delta(synonz::ModelDelta::Text { text }) = event {
             delta_text.push_str(&text);
             print!("{text}");
         }

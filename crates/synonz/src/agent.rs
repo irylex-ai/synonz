@@ -7,15 +7,14 @@
 //!
 //! # Interaction
 //!
-//! Two peer faces of the same execution machinery: [`Agent::run`]
-//! returns a [`Run`] of [`AgentEvent`]s (the complete, observable
-//! narrative; dropping it cancels the run), and [`Agent::ask`] returns
-//! a streaming-first [`Answer`] (text deltas, then the final output on
-//! await). Awaiting either resolves to the identical [`AgentOutput`].
+//! The single execution face (ADR-0014): [`Agent::run`] returns an
+//! [`Execution`] — a three-in-one handle (narrative stream of
+//! [`ExecutionEvent`]s, final-output Future, controller). Dropping it
+//! cancels the run.
 //!
 //! ```no_run
 //! use futures::StreamExt;
-//! use synonz::{Agent, AgentEvent, LifecycleEvent, Model, ModelRequest};
+//! use synonz::{Agent, ExecutionEvent, Model, ModelRequest};
 //!
 //! struct EchoModel;
 //!
@@ -40,10 +39,10 @@
 //!     .build()
 //!     .expect("model is set");
 //!
-//! let mut run = agent.run("hi");
-//! while let Some(event) = run.next().await {
-//!     if let AgentEvent::Lifecycle(LifecycleEvent::Completed { response }) = event {
-//!         assert_eq!(response.text(), Some("hello!"));
+//! let mut execution = agent.run("hi");
+//! while let Some(event) = execution.next().await {
+//!     if let ExecutionEvent::Completed(output) = event {
+//!         assert_eq!(output.text(), Some("hello!"));
 //!     }
 //! }
 //! # }
@@ -64,7 +63,7 @@ use crate::context::Context;
 use crate::conversation::{Conversation, Turn, TurnInput};
 use crate::error::{AgentError, ModelError};
 use crate::event::{
-    AgentEvent, CallPurpose, CancelReason, LifecycleEvent, ModelDelta, ModelEvent, TokenUsage,
+    AgentEvent, CallPurpose, CancelReason, ExecutionEvent, LifecycleEvent, ModelEvent, TokenUsage,
     ToolEvent,
 };
 use crate::io::{AgentInput, AgentOutput};
@@ -291,10 +290,16 @@ impl Agent {
     /// for the complete event stream. Dropping it (or calling
     /// [`Run::cancel`]) cancels the run — cooperative interruption at the
     /// loop's await points.
-    pub fn run<'a>(&self, input: impl Into<TurnInput<'a>>) -> Run<'a> {
+    /// Runs the agent: the single execution face (ADR-0014).
+    ///
+    /// Returns an [`Execution`] — a three-in-one handle (narrative
+    /// stream of [`ExecutionEvent`]s, final-output Future, controller).
+    /// Dropping it (or calling [`Execution::cancel`]) cancels the run —
+    /// cooperative interruption at the loop's await points.
+    pub fn run<'a>(&self, input: impl Into<TurnInput<'a>>) -> Execution<'a> {
         let (input, conv) = input.into().into_parts();
         let runner = self.spawn_runner(input, conv, CancelCore::new());
-        Run {
+        Execution {
             runner,
             // Serialization guard: while the handle is alive the
             // conversation cannot start a competing turn (borrow checker).
@@ -309,28 +314,11 @@ impl Agent {
         &self,
         input: impl Into<TurnInput<'a>>,
         token: CancellationToken,
-    ) -> Run<'a> {
+    ) -> Execution<'a> {
         let (input, conv) = input.into().into_parts();
         let runner = self.spawn_runner(input, conv, CancelCore::child_of(&token));
-        Run {
+        Execution {
             runner,
-            _conv: conv,
-        }
-    }
-
-    /// Asks the agent a question, returning a streaming-first [`Answer`].
-    ///
-    /// `Answer` yields text deltas via [`Answer::next`] and resolves to the
-    /// final [`AgentOutput`] when awaited — so the one-shot spelling
-    /// `agent.ask(input).await?` behaves exactly like the previous blocking
-    /// `ask`. Cancellation: [`Answer::cancel`], or dropping the handle.
-    pub fn ask<'a>(&self, input: impl Into<TurnInput<'a>>) -> Answer<'a> {
-        let (input, conv) = input.into().into_parts();
-        let runner = self.spawn_runner(input, conv, CancelCore::new());
-        Answer {
-            runner,
-            // Same serialization guard as `Run`: an in-flight answer also
-            // holds the conversation against competing turns.
             _conv: conv,
         }
     }
@@ -350,7 +338,7 @@ impl Agent {
     /// executes within it — the background makes the stateless agent
     /// stateful.
     ///
-    /// With a context, every `ask`/`run` assembles the send view freshly
+    /// With a context, every `run` assembles the send view freshly
     /// through the context's assembly strategy (memory layers). Without
     /// one, the pre-memory behavior applies (the conversation's history,
     /// verbatim).
@@ -505,14 +493,45 @@ impl AgentRunner {
     }
 }
 
-/// The handle to one in-flight run: the full event narrative.
+/// Projects an internal event onto the execution face (ADR-0014):
+/// input-side payloads (`Started` / `Requested` / `Responded`) stay on
+/// the observation bypass; everything a product consumer renders
+/// surfaces as an [`ExecutionEvent`].
+fn execution_event(event: AgentEvent) -> Option<ExecutionEvent> {
+    match event {
+        AgentEvent::Model(ModelEvent::StreamDelta { delta }) => Some(ExecutionEvent::Delta(delta)),
+        AgentEvent::Tool(ToolEvent::CallRequested { call }) => {
+            Some(ExecutionEvent::ToolRequested(call))
+        }
+        AgentEvent::Tool(ToolEvent::CallCompleted { call_id, result }) => {
+            Some(ExecutionEvent::ToolCompleted { call_id, result })
+        }
+        AgentEvent::Lifecycle(LifecycleEvent::Completed { response }) => {
+            Some(ExecutionEvent::Completed(response))
+        }
+        AgentEvent::Lifecycle(LifecycleEvent::Failed { error }) => {
+            Some(ExecutionEvent::Failed(error))
+        }
+        AgentEvent::Lifecycle(LifecycleEvent::Cancelled { reason }) => {
+            Some(ExecutionEvent::Cancelled(reason))
+        }
+        AgentEvent::Lifecycle(LifecycleEvent::Started { .. })
+        | AgentEvent::Model(ModelEvent::Requested { .. })
+        | AgentEvent::Model(ModelEvent::Responded { .. }) => None,
+    }
+}
+
+/// The handle to one in-flight execution: the product-narrative face.
 ///
-/// Dual-faced: iterate it ([`Stream`] of [`AgentEvent`]) for the complete
-/// observable narrative, or await it for the final [`AgentOutput`]. The
-/// last event is always a terminal lifecycle event, and the stream closes
-/// after it. Dropping the handle (or calling [`Run::cancel`]) cancels the
-/// run.
-pub struct Run<'a> {
+/// Three-in-one (ADR-0014): iterate it ([`Stream`] of
+/// [`ExecutionEvent`]) for the narrative — text deltas, tool cards,
+/// status, terminal outcome — await it for the final [`AgentOutput`]
+/// (stream self-sufficiency: the terminal `Completed` event already
+/// carries it), and control the run (cancel / timeout / rounds). The
+/// terminal invariant holds: a terminal variant is always the last
+/// item, and the stream closes after it. Dropping the handle (or
+/// calling [`Execution::cancel`]) cancels the run.
+pub struct Execution<'a> {
     runner: AgentRunner,
     // Serialization guard: while the handle is alive the conversation
     // cannot start a competing turn (borrow checker). The turn write
@@ -520,18 +539,22 @@ pub struct Run<'a> {
     _conv: Option<&'a Conversation>,
 }
 
-impl Run<'_> {
-    /// Receives the next event, or `None` after the stream closes.
-    ///
-    /// The terminal event's outcome is remembered, so awaiting the handle
-    /// after full iteration still resolves.
-    pub async fn next(&mut self) -> Option<AgentEvent> {
-        self.runner.next().await
+impl Execution<'_> {
+    /// Receives the next narrative event, or `None` after the stream
+    /// closes. The terminal outcome is remembered, so awaiting the
+    /// handle after full iteration still resolves.
+    pub async fn next(&mut self) -> Option<ExecutionEvent> {
+        loop {
+            let event = self.runner.next().await?;
+            if let Some(narrative) = execution_event(event) {
+                return Some(narrative);
+            }
+        }
     }
 
-    /// Explicitly cancels the run. The event stream then terminates with
-    /// [`LifecycleEvent::Cancelled`] ([`CancelReason::UserRequested`]);
-    /// dropping the handle is the RAII backstop for the same behavior.
+    /// Explicitly cancels the run. The stream then terminates with
+    /// [`ExecutionEvent::Cancelled`]; dropping the handle is the RAII
+    /// backstop for the same behavior.
     pub fn cancel(&self) {
         self.runner.cancel();
     }
@@ -550,83 +573,20 @@ impl Run<'_> {
     }
 }
 
-impl Stream for Run<'_> {
-    type Item = AgentEvent;
+impl Stream for Execution<'_> {
+    type Item = ExecutionEvent;
 
     fn poll_next(
         mut self: Pin<&mut Self>,
         cx: &mut std::task::Context<'_>,
-    ) -> std::task::Poll<Option<AgentEvent>> {
-        self.runner.poll_event(cx)
-    }
-}
-
-impl Future for Run<'_> {
-    type Output = Result<AgentOutput, AgentError>;
-
-    fn poll(
-        mut self: Pin<&mut Self>,
-        cx: &mut std::task::Context<'_>,
-    ) -> std::task::Poll<Self::Output> {
-        self.runner.poll_result(cx)
-    }
-}
-
-/// A streaming-first answer handle.
-///
-/// Yields text deltas ([`ModelDelta`]) as the model streams, and resolves
-/// to the final [`AgentOutput`] when awaited. A peer of [`Run`], not a
-/// view of it: both wrap their own [`AgentRunner`] over the same loop
-/// machinery, differing only in consumption — `Answer` filters the event
-/// stream down to text deltas, `Run` narrates every event. Awaiting
-/// either resolves to the identical final outcome.
-pub struct Answer<'a> {
-    runner: AgentRunner,
-    // Same serialization guard as `Run`: an in-flight answer holds the
-    // conversation against competing turns.
-    _conv: Option<&'a Conversation>,
-}
-
-impl Answer<'_> {
-    /// Receives the next text delta, or `None` when the answer stream
-    /// ends. Non-delta events (lifecycle, tool calls, usage) are consumed
-    /// silently; awaiting the handle still resolves to the final outcome.
-    pub async fn next(&mut self) -> Option<ModelDelta> {
-        loop {
-            let event = self.runner.next().await?;
-            if let AgentEvent::Model(ModelEvent::StreamDelta { delta }) = event {
-                return Some(delta);
-            }
-        }
-    }
-
-    /// Explicitly cancels the answer's run. The stream then ends;
-    /// awaiting the handle resolves to [`AgentError::Cancelled`].
-    pub fn cancel(&self) {
-        self.runner.cancel();
-    }
-
-    /// Arms the answer's time budget. When it elapses first, the run
-    /// cancels with [`CancelReason::Timeout`].
-    pub fn with_timeout(self, duration: Duration) -> Self {
-        self.runner.arm_timeout(duration);
-        self
-    }
-}
-
-impl Stream for Answer<'_> {
-    type Item = ModelDelta;
-
-    fn poll_next(
-        mut self: Pin<&mut Self>,
-        cx: &mut std::task::Context<'_>,
-    ) -> std::task::Poll<Option<ModelDelta>> {
+    ) -> std::task::Poll<Option<ExecutionEvent>> {
         loop {
             match self.runner.poll_event(cx) {
-                std::task::Poll::Ready(Some(AgentEvent::Model(ModelEvent::StreamDelta {
-                    delta,
-                }))) => return std::task::Poll::Ready(Some(delta)),
-                std::task::Poll::Ready(Some(_)) => continue,
+                std::task::Poll::Ready(Some(event)) => {
+                    if let Some(narrative) = execution_event(event) {
+                        return std::task::Poll::Ready(Some(narrative));
+                    }
+                }
                 std::task::Poll::Ready(None) => return std::task::Poll::Ready(None),
                 std::task::Poll::Pending => return std::task::Poll::Pending,
             }
@@ -634,7 +594,7 @@ impl Stream for Answer<'_> {
     }
 }
 
-impl Future for Answer<'_> {
+impl Future for Execution<'_> {
     type Output = Result<AgentOutput, AgentError>;
 
     fn poll(
@@ -1070,7 +1030,7 @@ mod preset_tests {
             usage: TokenUsage::new(1, 1),
         }]]);
         let agent = Agent::research(model, dummy_tools()).build().unwrap();
-        let output = agent.ask("research x").await.unwrap();
+        let output = agent.run("research x").await.unwrap();
         assert_eq!(output.text(), Some("found the answer"));
     }
 }

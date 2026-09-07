@@ -117,7 +117,7 @@ async fn main() {
         .tools(tools)
         .build()
         .expect("model is set");
-    let output = agent.ask("say hi").await.expect("run completes");
+    let output = agent.run("say hi").await.expect("run completes");
     println!("agent run: {:?}", output.text());
 
     drop(bridge);

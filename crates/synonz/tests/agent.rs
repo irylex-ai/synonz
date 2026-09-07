@@ -15,9 +15,9 @@ use serde_json::json;
 use tokio_util::sync::CancellationToken;
 
 use synonz::{
-    Agent, AgentError, AgentEvent, CallId, CancelReason, ContentBlock, LifecycleEvent, MockModel,
-    Model, ModelError, ModelEvent, ModelRequest, ModelStream, ModelStreamItem, Role, Tool,
-    ToolCall, ToolContent, ToolError, ToolResult,
+    Agent, AgentError, CallId, CancelReason, ContentBlock, ExecutionEvent, MockModel, Model,
+    ModelError, ModelRequest, ModelStream, ModelStreamItem, Role, Tool, ToolCall, ToolContent,
+    ToolError, ToolResult,
 };
 
 // ────────────────────────── helpers ──────────────────────────
@@ -128,7 +128,7 @@ fn finish_with_call(call_id: &str, tool: &str, city: &str) -> ModelStreamItem {
     }
 }
 
-async fn collect_events(stream: &mut synonz::Run<'_>) -> Vec<AgentEvent> {
+async fn collect_events(stream: &mut synonz::Execution<'_>) -> Vec<ExecutionEvent> {
     let mut events = Vec::new();
     while let Some(event) = stream.next().await {
         events.push(event);
@@ -136,15 +136,11 @@ async fn collect_events(stream: &mut synonz::Run<'_>) -> Vec<AgentEvent> {
     events
 }
 
-fn assert_terminal_invariant(events: &[AgentEvent]) {
+fn assert_terminal_invariant(events: &[ExecutionEvent]) {
     let terminals = events.iter().filter(|event| {
         matches!(
             event,
-            AgentEvent::Lifecycle(
-                LifecycleEvent::Completed { .. }
-                    | LifecycleEvent::Failed { .. }
-                    | LifecycleEvent::Cancelled { .. }
-            )
+            ExecutionEvent::Completed(_) | ExecutionEvent::Failed(_) | ExecutionEvent::Cancelled(_)
         )
     });
     assert_eq!(
@@ -155,11 +151,11 @@ fn assert_terminal_invariant(events: &[AgentEvent]) {
     assert!(
         matches!(
             events.last(),
-            Some(AgentEvent::Lifecycle(
-                LifecycleEvent::Completed { .. }
-                    | LifecycleEvent::Failed { .. }
-                    | LifecycleEvent::Cancelled { .. }
-            ))
+            Some(
+                ExecutionEvent::Completed(_)
+                    | ExecutionEvent::Failed(_)
+                    | ExecutionEvent::Cancelled(_)
+            )
         ),
         "last event must be terminal: {events:?}"
     );
@@ -179,11 +175,10 @@ async fn single_round_completes() {
     let events = collect_events(&mut stream).await;
 
     assert_terminal_invariant(&events);
-    assert!(matches!(
-        &events[0],
-        AgentEvent::Lifecycle(LifecycleEvent::Started { .. })
-    ));
-    assert_eq!(events.len(), 4); // Started, Requested, Responded, Completed
+    // Input-side payloads (Started / Requested / Responded) stay on the
+    // observation bypass; the single-round narrative is just the terminal.
+    assert_eq!(events.len(), 1);
+    assert!(matches!(&events[0], ExecutionEvent::Completed(_)));
 }
 
 #[tokio::test]
@@ -193,7 +188,7 @@ async fn ask_returns_final_output() {
         .build()
         .unwrap();
 
-    let output = agent.ask("weather?").await.unwrap();
+    let output = agent.run("weather?").await.unwrap();
     assert_eq!(output.text(), Some("sunny, 28C."));
     assert_eq!(output.usage.input_tokens, 1);
 }
@@ -222,12 +217,11 @@ async fn tool_loop_feeds_results_back() {
     // Tool activity is visible.
     assert!(events.iter().any(|e| matches!(
         e,
-        AgentEvent::Tool(synonz::ToolEvent::CallRequested { call })
-            if call.call_id == CallId::new("x1")
+        ExecutionEvent::ToolRequested(call) if call.call_id == CallId::new("x1")
     )));
     assert!(events.iter().any(|e| matches!(
         e,
-        AgentEvent::Tool(synonz::ToolEvent::CallCompleted { result, .. })
+        ExecutionEvent::ToolCompleted { result, .. }
             if matches!(result, ToolResult::Ok { .. })
     )));
     // The second request contained the tool result message.
@@ -239,10 +233,7 @@ async fn tool_loop_feeds_results_back() {
         "tool result message must be fed back to the model"
     );
     // And the run completed.
-    assert!(matches!(
-        events.last(),
-        Some(AgentEvent::Lifecycle(LifecycleEvent::Completed { .. }))
-    ));
+    assert!(matches!(events.last(), Some(ExecutionEvent::Completed(_))));
 }
 
 #[tokio::test]
@@ -279,9 +270,7 @@ async fn parallel_tools_pair_by_call_id_and_keep_conversation_order() {
     let completions: Vec<String> = events
         .iter()
         .filter_map(|e| match e {
-            AgentEvent::Tool(synonz::ToolEvent::CallCompleted { call_id, .. }) => {
-                Some(call_id.as_str().to_string())
-            }
+            ExecutionEvent::ToolCompleted { call_id, .. } => Some(call_id.as_str().to_string()),
             _ => None,
         })
         .collect();
@@ -323,14 +312,11 @@ async fn soft_failure_is_fed_back_not_fatal() {
 
     assert_terminal_invariant(&events);
     // The run did NOT fail: two rounds happened and the run completed.
-    assert!(matches!(
-        events.last(),
-        Some(AgentEvent::Lifecycle(LifecycleEvent::Completed { .. }))
-    ));
+    assert!(matches!(events.last(), Some(ExecutionEvent::Completed(_))));
     // The machinery error was converted to a soft failure for the model.
     assert!(events.iter().any(|e| matches!(
         e,
-        AgentEvent::Tool(synonz::ToolEvent::CallCompleted { result, .. })
+        ExecutionEvent::ToolCompleted { result, .. }
             if matches!(result, ToolResult::Err { message } if message.contains("machinery broke"))
     )));
     // The model saw the failure text.
@@ -365,13 +351,10 @@ async fn unknown_tool_is_soft_failure() {
     assert_terminal_invariant(&events);
     assert!(events.iter().any(|e| matches!(
         e,
-        AgentEvent::Tool(synonz::ToolEvent::CallCompleted { result, .. })
+        ExecutionEvent::ToolCompleted { result, .. }
             if matches!(result, ToolResult::Err { message } if message.contains("unknown tool"))
     )));
-    assert!(matches!(
-        events.last(),
-        Some(AgentEvent::Lifecycle(LifecycleEvent::Completed { .. }))
-    ));
+    assert!(matches!(events.last(), Some(ExecutionEvent::Completed(_))));
 }
 
 #[tokio::test]
@@ -397,12 +380,10 @@ async fn max_rounds_exceeded_fails_explicitly() {
     assert_terminal_invariant(&events);
     assert!(matches!(
         events.last(),
-        Some(AgentEvent::Lifecycle(LifecycleEvent::Failed {
-            error: AgentError::MaxRoundsExceeded
-        }))
+        Some(ExecutionEvent::Failed(AgentError::MaxRoundsExceeded))
     ));
     assert_eq!(stream.rounds(), 1);
-    let answer = agent.ask("weather everywhere").await;
+    let answer = agent.run("weather everywhere").await;
     assert!(matches!(answer, Err(AgentError::MaxRoundsExceeded)));
 }
 
@@ -415,19 +396,14 @@ async fn cancel_by_external_token() {
         .unwrap();
 
     let mut stream = agent.run_with("go", token.clone());
-    let started = stream.next().await;
-    assert!(matches!(
-        started,
-        Some(AgentEvent::Lifecycle(LifecycleEvent::Started { .. }))
-    ));
-
+    // Input-side payloads stay on the observation bypass: on the narrative
+    // face the first surfaced event is already the cancellation terminal.
     token.cancel();
-    // Buffered in-flight events may precede the terminal one.
     let mut cancelled = None;
     while let Some(event) = stream.next().await {
         if matches!(
             event,
-            AgentEvent::Lifecycle(LifecycleEvent::Cancelled { .. })
+            ExecutionEvent::Cancelled(CancelReason::UserRequested)
         ) {
             cancelled = Some(event);
             break;
@@ -435,9 +411,7 @@ async fn cancel_by_external_token() {
     }
     assert!(matches!(
         cancelled,
-        Some(AgentEvent::Lifecycle(LifecycleEvent::Cancelled {
-            reason: CancelReason::UserRequested
-        }))
+        Some(ExecutionEvent::Cancelled(CancelReason::UserRequested))
     ));
     assert!(
         stream.next().await.is_none(),
@@ -461,9 +435,7 @@ async fn cancel_by_timeout() {
     assert_terminal_invariant(&events);
     assert!(matches!(
         events.last(),
-        Some(AgentEvent::Lifecycle(LifecycleEvent::Cancelled {
-            reason: CancelReason::Timeout
-        }))
+        Some(ExecutionEvent::Cancelled(CancelReason::Timeout))
     ));
 }
 
@@ -525,14 +497,11 @@ async fn cancel_by_drop_reaches_inflight_model_stream() {
         .unwrap();
 
     let mut stream = agent.run("go");
-    assert!(stream.next().await.is_some()); // Started
+    // Input-side events are skipped on the narrative face: the first
+    // surfaced item is the model's text delta.
     assert!(matches!(
         stream.next().await,
-        Some(AgentEvent::Model(ModelEvent::Requested { .. }))
-    ));
-    assert!(matches!(
-        stream.next().await,
-        Some(AgentEvent::Model(ModelEvent::StreamDelta { .. }))
+        Some(ExecutionEvent::Delta(synonz::ModelDelta::Text { .. }))
     ));
 
     drop(stream); // the drop-cancel entry
@@ -569,9 +538,9 @@ async fn model_failure_fails_the_run() {
     assert_terminal_invariant(&events);
     assert!(matches!(
         events.last(),
-        Some(AgentEvent::Lifecycle(LifecycleEvent::Failed {
-            error: AgentError::Model(ModelError::Transport { .. })
-        }))
+        Some(ExecutionEvent::Failed(AgentError::Model(
+            ModelError::Transport { .. }
+        )))
     ));
 }
 
@@ -595,7 +564,7 @@ async fn event_narrative_is_replayable() {
     }
 
     let encoded = serde_json::to_string(&events).unwrap();
-    let decoded: Vec<AgentEvent> = serde_json::from_str(&encoded).unwrap();
+    let decoded: Vec<ExecutionEvent> = serde_json::from_str(&encoded).unwrap();
     assert_eq!(decoded, events);
 }
 
@@ -616,7 +585,7 @@ async fn concurrent_runs_of_one_agent_are_independent() {
     ]);
     let agent = Agent::builder().model(model.clone()).build().unwrap();
 
-    let (a, b) = tokio::join!(agent.ask("q1"), agent.ask("q2"));
+    let (a, b) = tokio::join!(agent.run("q1"), agent.run("q2"));
     // Each run gets its own script; which run answers first is scheduling.
     let text_a = a.unwrap().text().unwrap().to_string();
     let text_b = b.unwrap().text().unwrap().to_string();

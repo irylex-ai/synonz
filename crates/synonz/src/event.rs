@@ -203,6 +203,36 @@ pub enum ToolEvent {
     },
 }
 
+/// The product-narrative event of the execution face (ADR-0014).
+///
+/// A filtered projection of [`AgentEvent`]: input-side payloads
+/// (`Started` / `Requested` / `Responded`) stay on the observation
+/// bypass; everything a product consumer renders surfaces here. The
+/// terminal invariant carries over — a terminal variant is always the
+/// last item, and the stream closes after it.
+#[non_exhaustive]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum ExecutionEvent {
+    /// A text delta as the model streams.
+    Delta(ModelDelta),
+    /// The model issued a tool call.
+    ToolRequested(ToolCall),
+    /// A tool invocation finished (success or soft failure).
+    ToolCompleted {
+        /// Correlation id of the answered call.
+        call_id: CallId,
+        /// The tool outcome; `Err` was fed back to the model.
+        result: ToolResult,
+    },
+    /// The run failed; the stream closes after this.
+    Failed(AgentError),
+    /// The run was cancelled; the stream closes after this.
+    Cancelled(CancelReason),
+    /// The run completed, carrying the final output — the stream is
+    /// self-sufficient: no extra await is required.
+    Completed(AgentOutput),
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -5,8 +5,7 @@
 
 use futures::StreamExt;
 use synonz::{
-    Agent, AgentEvent, Deserialize, JsonSchema, LifecycleEvent, Tool, ToolContent, ToolError,
-    ToolResult,
+    Agent, Deserialize, ExecutionEvent, JsonSchema, Tool, ToolContent, ToolError, ToolResult,
 };
 
 /// Queries the current weather for a city.
@@ -70,16 +69,16 @@ async fn main() {
         .build()
         .expect("model is set");
 
-    // `run` yields the full event narrative ...
-    let mut run = agent.run("weather in beijing?");
-    while let Some(event) = run.next().await {
-        if let AgentEvent::Lifecycle(LifecycleEvent::Completed { response }) = event {
-            println!("completed: {:?}", response.text());
+    // `run` streams the product narrative: deltas, tool activity, and the
+    // terminal event carrying the output.
+    let mut execution = agent.run("weather in beijing?");
+    while let Some(event) = execution.next().await {
+        if let ExecutionEvent::Completed(output) = event {
+            println!("completed: {:?}", output.text());
         }
     }
 
-    // ... and `ask` is its peer face over the same machinery: stream
-    // text deltas, or await the identical final output.
-    let output = agent.ask("weather?").await.expect("run completes");
-    println!("ask answer: {:?}", output.text());
+    // One-shot spelling: awaiting the handle resolves to the same output.
+    let output = agent.run("weather?").await.expect("run completes");
+    println!("run answer: {:?}", output.text());
 }

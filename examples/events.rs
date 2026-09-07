@@ -1,9 +1,9 @@
-//! `events`: watching the run's event narrative (the observability core).
+//! `events`: watching the run's product narrative (ExecutionEvent).
 //!
 //! Run: `cargo run -p synonz-examples --bin events`
 
 use futures::StreamExt;
-use synonz::{Agent, AgentEvent};
+use synonz::{Agent, ExecutionEvent};
 
 /// A model that streams two text deltas and then finishes.
 struct StreamingModel;
@@ -38,28 +38,20 @@ async fn main() {
         .build()
         .expect("model is set");
 
-    let mut run = agent.run("weather?");
+    let mut execution = agent.run("weather?");
     let mut delta_text = String::new();
-    while let Some(event) = run.next().await {
+    while let Some(event) = execution.next().await {
         match event {
-            AgentEvent::Lifecycle(synonz::LifecycleEvent::Started { input }) => {
-                println!("started with: {}", input.text);
-            }
-            AgentEvent::Model(synonz::ModelEvent::StreamDelta {
-                delta: synonz::ModelDelta::Text { text },
-            }) => {
+            ExecutionEvent::Delta(synonz::ModelDelta::Text { text }) => {
                 delta_text.push_str(&text);
                 println!("delta: {text:?}");
             }
-            AgentEvent::Model(synonz::ModelEvent::Responded { usage, .. }) => {
-                println!("model call used {usage:?}");
+            ExecutionEvent::Completed(output) => {
+                println!("completed: {:?}", output.text());
             }
-            AgentEvent::Lifecycle(synonz::LifecycleEvent::Completed { response }) => {
-                println!("completed: {:?}", response.text());
-            }
-            other => println!("other event: {other:?}"),
+            other => println!("other narrative event: {other:?}"),
         }
     }
-    println!("consumed rounds: {}", run.rounds());
+    println!("consumed rounds: {}", execution.rounds());
     assert_eq!(delta_text, "beijing is sunny");
 }
