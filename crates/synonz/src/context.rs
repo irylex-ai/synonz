@@ -12,15 +12,14 @@
 
 use std::sync::Arc;
 
-use futures::future::BoxFuture;
-use tokio::sync::mpsc;
-
 use crate::conversation::Conversation;
 use crate::event::{AgentEvent, LifecycleEvent, MemoryFlowStage};
 use crate::memory::MemoryStore;
 use crate::message::Message;
 use crate::model::Model;
+use crate::observer::EventTap;
 use crate::subject::Subject;
+use futures::future::BoxFuture;
 
 /// The inputs an assembly strategy consumes — the minimal sufficient set.
 /// Deliberately narrow (ADR-0015): a strategy reads **memory**, plus the
@@ -142,15 +141,15 @@ impl Context {
     /// cancelled turns enter the truth archive only — they never feed the
     /// memory layers.
     ///
-    /// Flow failures are emitted as `MemoryFlowFailed` events into
-    /// `sender` — visible, never silent (ADR-0015 decision 6); they do
+    /// Flow failures are emitted as `MemoryFlowFailed` events through the
+    /// event tap — visible, never silent (ADR-0015 decision 6); they do
     /// not abort the run.
     pub(crate) async fn on_turn_completed(
         &self,
         model: &dyn Model,
         input: &str,
         messages: Vec<Message>,
-        sender: &mpsc::Sender<AgentEvent>,
+        tap: &EventTap,
     ) {
         let runtime = self.conversation.runtime();
         let policies = runtime.memory_policies();
@@ -164,12 +163,12 @@ impl Context {
                 input,
                 messages,
             },
-            sender,
+            tap,
         )
         .await;
         for (stage, detail) in soft_errors {
-            let _ = sender
-                .send(AgentEvent::Lifecycle(LifecycleEvent::MemoryFlowFailed {
+            let _ = tap
+                .emit(AgentEvent::Lifecycle(LifecycleEvent::MemoryFlowFailed {
                     stage,
                     detail,
                 }))

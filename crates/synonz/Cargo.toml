@@ -26,3 +26,9 @@ synonz-derive.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
 tokio-util.workspace = true
+
+[dev-dependencies]
+# The observer tests exercise a slow observer running concurrently with the
+# loop: that needs the multi-thread runtime flavor (test-only; downstream
+# feature unification is not affected).
+tokio = { workspace = true, features = ["rt-multi-thread"] }

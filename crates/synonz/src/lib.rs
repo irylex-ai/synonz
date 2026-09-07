@@ -29,6 +29,7 @@ pub mod io;
 pub mod memory;
 pub mod message;
 pub mod model;
+pub mod observer;
 pub mod runtime;
 pub mod subject;
 pub mod tool;
@@ -63,6 +64,7 @@ pub use message::{
     validate_conversation,
 };
 pub use model::{Model, ModelParams, ModelRequest, ModelStream, ModelStreamItem, complete};
+pub use observer::{Observer, ObserverContext};
 pub use runtime::{RuntimeBuilder, SynonzRuntime};
 pub use subject::{Subject, SubjectType};
 pub use tokio_util::sync::CancellationToken;

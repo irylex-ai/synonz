@@ -9,7 +9,7 @@
 //! uses the agent's model and is visible in the event stream under
 //! [`crate::CallPurpose::ContextManagement`].
 
-use tokio::sync::mpsc;
+use crate::observer::EventTap;
 
 use crate::conversation::Conversation;
 use crate::event::{AgentEvent, CallPurpose, LifecycleEvent, MemoryFlowStage, ModelEvent};
@@ -139,7 +139,7 @@ pub(crate) struct PostTurn<'a> {
 /// caller).
 pub(crate) async fn run_post_turn_flows(
     ctx: PostTurn<'_>,
-    sender: &mpsc::Sender<AgentEvent>,
+    tap: &EventTap,
 ) -> (String, Vec<(MemoryFlowStage, String)>) {
     let PostTurn {
         model,
@@ -174,7 +174,7 @@ pub(crate) async fn run_post_turn_flows(
         match memory.l1_len(conversation.subject(), conversation.id()) {
             Ok(l1_len) if l1_len > 0 => {
                 if let Err(e) =
-                    flush_l1_into_l2(model, conversation, memory.as_ref(), l1_len, sender).await
+                    flush_l1_into_l2(model, conversation, memory.as_ref(), l1_len, tap).await
                 {
                     soft_errors.push((MemoryFlowStage::Summarize, e));
                 }
@@ -192,7 +192,7 @@ pub(crate) async fn run_post_turn_flows(
         Ok(l1_len) if l1_len > policies.l1_window => {
             let overflow = l1_len - policies.l1_window;
             if let Err(e) =
-                flush_l1_into_l2(model, conversation, memory.as_ref(), overflow, sender).await
+                flush_l1_into_l2(model, conversation, memory.as_ref(), overflow, tap).await
             {
                 soft_errors.push((MemoryFlowStage::Summarize, e));
             }
@@ -251,12 +251,12 @@ async fn flush_l1_into_l2(
     conversation: &Conversation,
     memory: &dyn MemoryStore,
     count: usize,
-    sender: &mpsc::Sender<AgentEvent>,
+    tap: &EventTap,
 ) -> Result<(), String> {
     let popped = memory
         .l1_pop_oldest(conversation.subject(), conversation.id(), count)
         .map_err(|e| format!("l1 pop: {e}"))?;
-    let summary = summarize_l1(model, &popped, sender).await;
+    let summary = summarize_l1(model, &popped, tap).await;
     memory
         .l2_append(
             conversation.subject(),
@@ -326,7 +326,7 @@ pub(crate) fn run_end_flows(
 async fn summarize_l1(
     model: &dyn Model,
     entries: &[crate::memory::L1Entry],
-    sender: &mpsc::Sender<AgentEvent>,
+    tap: &EventTap,
 ) -> String {
     if entries.is_empty() {
         return String::new();
@@ -360,13 +360,13 @@ async fn summarize_l1(
         purpose: CallPurpose::ContextManagement,
         messages: vec![request.clone()],
     });
-    let _ = sender.send(emit_requested).await;
+    let _ = tap.emit(emit_requested).await;
 
     let request = ModelRequest::new(vec![request], Vec::new());
     match crate::model::complete(model, request).await {
         Ok((message, usage)) => {
-            let _ = sender
-                .send(AgentEvent::Model(ModelEvent::Responded {
+            let _ = tap
+                .emit(AgentEvent::Model(ModelEvent::Responded {
                     message: message.clone(),
                     usage,
                 }))
@@ -377,8 +377,8 @@ async fn summarize_l1(
             // Lossless degradation: the raw transcript becomes the L2
             // content — and the degradation is VISIBLE (ADR-0015 decision
             // 6: memory-flow failures are never silent).
-            let _ = sender
-                .send(AgentEvent::Lifecycle(LifecycleEvent::MemoryFlowFailed {
+            let _ = tap
+                .emit(AgentEvent::Lifecycle(LifecycleEvent::MemoryFlowFailed {
                     stage: MemoryFlowStage::Summarize,
                     detail: format!(
                         "summarization failed; the raw transcript was archived as the summary: {error}"

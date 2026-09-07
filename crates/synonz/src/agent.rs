@@ -110,6 +110,7 @@ pub struct AgentBuilder {
     tools: Vec<Arc<dyn Tool>>,
     system_prompt: Option<String>,
     max_rounds: Option<u32>,
+    observability: bool,
 }
 
 impl AgentBuilder {
@@ -123,6 +124,16 @@ impl AgentBuilder {
     /// the same runtime (enforced at the execution entry).
     pub fn runtime(mut self, runtime: &SynonzRuntime) -> Self {
         self.runtime = Some(runtime.clone());
+        self
+    }
+
+    /// Enables the observation bypass for this agent's runs (ADR-0016):
+    /// every event is tapped to the runtime's registered observers on a
+    /// side queue — the hot path never waits. Default **off**: the
+    /// observation face is closed unless explicitly opened (it is
+    /// normally carried by a dedicated service).
+    pub fn observability(mut self, enabled: bool) -> Self {
+        self.observability = enabled;
         self
     }
 
@@ -210,6 +221,7 @@ impl AgentBuilder {
             system_prompt: self.system_prompt,
             max_rounds: self.max_rounds.unwrap_or(DEFAULT_MAX_ROUNDS),
             default_timeout: None,
+            observability: self.observability,
         })
     }
 }
@@ -226,6 +238,7 @@ pub struct Agent {
     system_prompt: Option<String>,
     max_rounds: u32,
     default_timeout: Option<Duration>,
+    observability: bool,
 }
 
 impl Agent {
@@ -389,14 +402,31 @@ impl Agent {
         core: Arc<CancelCore>,
     ) -> AgentRunner {
         let (sender, receiver) = mpsc::channel(1);
+        // The observation bypass (ADR-0016): when the switch is on and the
+        // runtime has observers, events are tapped into a bounded side
+        // queue; a per-run dispatcher delivers them off the hot path.
+        let observation = if self.observability && !self.runtime.observers().is_empty() {
+            Some(crate::observer::ObservationQueue::spawn(
+                self.runtime.observers().to_vec(),
+                crate::observer::next_execution_id(),
+            ))
+        } else {
+            None
+        };
+        let tap = if let Some(observation) = observation {
+            crate::observer::EventTap::with_observation(sender, observation)
+        } else {
+            crate::observer::EventTap::consumer_only(sender)
+        };
         let task = AgentLoopTask {
             model: Arc::clone(&self.model),
             tools: Arc::clone(&self.tools),
             system_prompt: self.system_prompt.clone(),
             max_rounds: self.max_rounds,
             conversation: conv.clone(),
+            tap,
         };
-        tokio::spawn(task.execute(input, Arc::clone(&core), sender));
+        tokio::spawn(task.execute(input, Arc::clone(&core)));
         let runner = AgentRunner {
             receiver,
             handle: CancelHandle::new(core),
@@ -643,21 +673,19 @@ struct AgentLoopTask {
     system_prompt: Option<String>,
     max_rounds: u32,
     conversation: Conversation,
+    tap: crate::observer::EventTap,
 }
 
 impl AgentLoopTask {
-    async fn execute(
-        self,
-        input: AgentInput,
-        core: Arc<CancelCore>,
-        sender: mpsc::Sender<AgentEvent>,
-    ) {
+    async fn execute(self, input: AgentInput, core: Arc<CancelCore>) {
+        // Local binding: the macros below resolve `tap` to this borrow.
+        let tap = &self.tap;
         let mut total_usage = TokenUsage::new(0, 0);
 
         // Started: a plain send. A consumer already gone here is caught by
         // the cancelled check right after the turn's frame is built below.
-        let _ = sender
-            .send(AgentEvent::Lifecycle(LifecycleEvent::Started {
+        let _ = tap
+            .emit(AgentEvent::Lifecycle(LifecycleEvent::Started {
                 input: input.clone(),
             }))
             .await;
@@ -671,8 +699,8 @@ impl AgentLoopTask {
         // a consumer gone at this point is caught below.)
         let assembled = context.assemble(&input.text).await;
         for failure in &assembled.failures {
-            let _ = sender
-                .send(AgentEvent::Lifecycle(LifecycleEvent::MemoryFlowFailed {
+            let _ = tap
+                .emit(AgentEvent::Lifecycle(LifecycleEvent::MemoryFlowFailed {
                     stage: failure.stage.clone(),
                     detail: failure.detail.clone(),
                 }))
@@ -694,8 +722,8 @@ impl AgentLoopTask {
         macro_rules! record {
             ($turn:expr) => {
                 if let Err(error) = self.conversation.push_turn($turn) {
-                    let _ = sender
-                        .send(AgentEvent::Lifecycle(LifecycleEvent::MemoryFlowFailed {
+                    let _ = tap
+                        .emit(AgentEvent::Lifecycle(LifecycleEvent::MemoryFlowFailed {
                             stage: MemoryFlowStage::Archive,
                             detail: format!("conversation auto-save failed: {error}"),
                         }))
@@ -715,7 +743,7 @@ impl AgentLoopTask {
                 messages[base_len..].to_vec(),
                 cancel_reason(outcome),
             ));
-            let _ = sender.send(cancelled_event(outcome)).await;
+            let _ = tap.emit(cancelled_event(outcome)).await;
             return;
         }
 
@@ -723,7 +751,7 @@ impl AgentLoopTask {
         // archived before the run ends — then the loop simply stops.
         macro_rules! emit {
             ($event:expr) => {
-                if sender.send($event).await.is_err() {
+                if !tap.emit($event).await {
                     record!(Turn::cancelled(
                         input.clone(),
                         messages[base_len..].to_vec(),
@@ -846,7 +874,7 @@ impl AgentLoopTask {
                         &*self.model,
                         &input.text,
                         messages[base_len..].to_vec(),
-                        &sender,
+                        tap,
                     )
                     .await;
                 emit!(AgentEvent::Lifecycle(LifecycleEvent::Completed {
@@ -861,8 +889,8 @@ impl AgentLoopTask {
 
             // Suspension point 3: parallel tool execution — completion-order
             // events, deterministic call-order conversation.
-            emit_all_requested(&sender, &calls).await;
-            let results = match self.run_tools_parallel(&calls, &core, &sender).await {
+            emit_all_requested(tap, &calls).await;
+            let results = match self.run_tools_parallel(&calls, &core, tap).await {
                 Ok(results) => results,
                 Err(outcome) => {
                     record!(Turn::cancelled(
@@ -900,7 +928,7 @@ impl AgentLoopTask {
         &self,
         calls: &[ToolCall],
         core: &Arc<CancelCore>,
-        sender: &mpsc::Sender<AgentEvent>,
+        tap: &crate::observer::EventTap,
     ) -> Result<std::collections::HashMap<CallId, ToolResult>, CancelOutcome> {
         let mut set = tokio::task::JoinSet::new();
         for call in calls {
@@ -937,13 +965,12 @@ impl AgentLoopTask {
             };
             match joined {
                 Some(Ok((call_id, result))) => {
-                    if sender
-                        .send(AgentEvent::Tool(ToolEvent::CallCompleted {
+                    if !tap
+                        .emit(AgentEvent::Tool(ToolEvent::CallCompleted {
                             call_id: call_id.clone(),
                             result: result.clone(),
                         }))
                         .await
-                        .is_err()
                     {
                         // The consumer is gone: dropping the handle fired the
                         // cancel signal, so this resolves as user-requested.
@@ -962,13 +989,12 @@ impl AgentLoopTask {
                         let result = ToolResult::Err {
                             message: format!("tool task failed: {join_error}"),
                         };
-                        if sender
-                            .send(AgentEvent::Tool(ToolEvent::CallCompleted {
+                        if !tap
+                            .emit(AgentEvent::Tool(ToolEvent::CallCompleted {
                                 call_id: call.call_id.clone(),
                                 result: result.clone(),
                             }))
                             .await
-                            .is_err()
                         {
                             return Err(CancelOutcome::Signal);
                         }
@@ -982,17 +1008,12 @@ impl AgentLoopTask {
     }
 }
 
-async fn emit_all_requested(sender: &mpsc::Sender<AgentEvent>, calls: &[ToolCall]) {
+async fn emit_all_requested(tap: &crate::observer::EventTap, calls: &[ToolCall]) {
     for call in calls {
-        if sender
-            .send(AgentEvent::Tool(ToolEvent::CallRequested {
-                call: call.clone(),
-            }))
-            .await
-            .is_err()
-        {
-            return; // consumer gone; the loop notices on the next emit
-        }
+        tap.emit(AgentEvent::Tool(ToolEvent::CallRequested {
+            call: call.clone(),
+        }))
+        .await;
     }
 }
 

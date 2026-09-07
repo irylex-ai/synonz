@@ -28,6 +28,7 @@ pub struct RuntimeBuilder {
     conversation_store: Option<Arc<dyn ConversationStore>>,
     memory: Option<Arc<dyn MemoryStore>>,
     assembly: Option<Arc<dyn ContextAssembly>>,
+    observers: Vec<Arc<dyn crate::observer::Observer>>,
     policies: MemoryPolicies,
     detector: Option<Arc<dyn TopicDetector>>,
     idle_timeout: Option<Duration>,
@@ -54,6 +55,15 @@ impl RuntimeBuilder {
     /// Registers an assembly strategy (default: `LayeredMemory`).
     pub fn register_assembly(mut self, assembly: impl ContextAssembly) -> Self {
         self.assembly = Some(Arc::new(assembly));
+        self
+    }
+
+    /// Registers an observer of the full event stream (ADR-0016). Unlike
+    /// the other services there is **no default** — with no observer
+    /// registered, the observation face is fully closed. Observability is
+    /// additionally gated per agent (`AgentBuilder::observability`).
+    pub fn observer(mut self, observer: impl crate::observer::Observer) -> Self {
+        self.observers.push(Arc::new(observer));
         self
     }
 
@@ -90,6 +100,7 @@ impl RuntimeBuilder {
                 .memory
                 .unwrap_or_else(|| Arc::new(InProcessMemoryStore::default())),
             assembly: self.assembly.unwrap_or_else(|| Arc::new(LayeredMemory)),
+            observers: self.observers.into(),
             policies: self.policies,
             detector: self
                 .detector
@@ -115,6 +126,7 @@ pub struct SynonzRuntime {
     conversation_store: Arc<dyn ConversationStore>,
     memory: Arc<dyn MemoryStore>,
     assembly: Arc<dyn ContextAssembly>,
+    observers: Arc<[Arc<dyn crate::observer::Observer>]>,
     policies: MemoryPolicies,
     detector: Arc<dyn TopicDetector>,
     idle_timeout: Option<Duration>,
@@ -148,6 +160,11 @@ impl SynonzRuntime {
     /// The registered (or default) assembly strategy.
     pub(crate) fn assembly(&self) -> Arc<dyn ContextAssembly> {
         Arc::clone(&self.assembly)
+    }
+
+    /// The registered observers (empty = the observation face is closed).
+    pub(crate) fn observers(&self) -> &[Arc<dyn crate::observer::Observer>] {
+        &self.observers
     }
 
     /// The memory policies (floors always apply).
