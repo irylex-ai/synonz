@@ -7,10 +7,11 @@
 //!
 //! # Interaction
 //!
-//! The dual-layer API: [`Agent::run`] returns a [`Run`] of
-//! [`AgentEvent`]s (the complete, observable narrative; dropping it
-//! cancels the run), and [`Agent::ask`] returns a streaming-first
-//! [`Answer`] (text deltas, then the final output on await).
+//! Two peer faces of the same execution machinery: [`Agent::run`]
+//! returns a [`Run`] of [`AgentEvent`]s (the complete, observable
+//! narrative; dropping it cancels the run), and [`Agent::ask`] returns
+//! a streaming-first [`Answer`] (text deltas, then the final output on
+//! await). Awaiting either resolves to the identical [`AgentOutput`].
 //!
 //! ```no_run
 //! use futures::StreamExt;

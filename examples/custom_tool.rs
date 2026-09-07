@@ -70,7 +70,7 @@ async fn main() {
         .build()
         .expect("model is set");
 
-    // The dual-layer API: `run` yields the full event narrative ...
+    // `run` yields the full event narrative ...
     let mut run = agent.run("weather in beijing?");
     while let Some(event) = run.next().await {
         if let AgentEvent::Lifecycle(LifecycleEvent::Completed { response }) = event {
@@ -78,7 +78,8 @@ async fn main() {
         }
     }
 
-    // ... and `ask` is the convenience shell built on that same stream.
+    // ... and `ask` is its peer face over the same machinery: stream
+    // text deltas, or await the identical final output.
     let output = agent.ask("weather?").await.expect("run completes");
     println!("ask answer: {:?}", output.text());
 }
