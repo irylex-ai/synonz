@@ -12,10 +12,11 @@
 use tokio::sync::mpsc;
 
 use crate::conversation::Conversation;
-use crate::event::{AgentEvent, CallPurpose, ModelEvent};
-use crate::memory::{KnowledgeFragment, SummaryBlock};
+use crate::event::{AgentEvent, CallPurpose, LifecycleEvent, MemoryFlowStage, ModelEvent};
+use crate::memory::{KnowledgeFragment, MemoryStore, SummaryBlock};
 use crate::message::{Message, Role};
-use crate::model::{Model, ModelRequest};
+use crate::model::Model;
+use crate::model::ModelRequest;
 
 /// The resource floors (mandatory, deterministic — can never be removed)
 /// and the stacked event policies (opt-in).
@@ -129,15 +130,17 @@ pub(crate) struct PostTurn<'a> {
 
 /// Runs the post-turn memory flows: L1 write, topic update, resource
 /// floors, and stacked event policies. Emits `ContextManagement` events
-/// for summarization calls into `emit`; returns the current topic.
+/// for summarization calls into `emit`; returns the current topic plus
+/// the typed soft errors (surfaced by the caller as `MemoryFlowFailed`
+/// events — degraded but never silent, ADR-0015 decision 6).
 ///
-/// Failures of the *flows* are non-fatal (memory is auxiliary): they are
-/// logged through the returned `Vec` of soft errors and do not fail the
-/// run (the run's own terminal event is emitted by the caller).
+/// Failures of the *flows* are non-fatal (memory is auxiliary): they do
+/// not fail the run (the run's own terminal event is emitted by the
+/// caller).
 pub(crate) async fn run_post_turn_flows(
     ctx: PostTurn<'_>,
     sender: &mpsc::Sender<AgentEvent>,
-) -> (String, Vec<String>) {
+) -> (String, Vec<(MemoryFlowStage, String)>) {
     let PostTurn {
         model,
         conversation,
@@ -162,104 +165,141 @@ pub(crate) async fn run_post_turn_flows(
         &decision.topic,
         messages,
     ) {
-        soft_errors.push(format!("l1 append: {e}"));
+        soft_errors.push((MemoryFlowStage::Archive, format!("l1 append: {e}")));
     }
 
     // 3. TopicShift policy: flush pre-shift turns into L2.
     let topic_shift_enabled = policies.extra.contains(&EventPolicy::TopicShift);
     if topic_shift_enabled && decision.shifted {
-        let l1_len = memory
-            .l1_len(conversation.subject(), conversation.id())
-            .unwrap_or(0);
-        if l1_len > 0 {
-            let popped = memory
-                .l1_pop_oldest(conversation.subject(), conversation.id(), l1_len)
-                .unwrap_or_default();
-            let summary = summarize_l1(model, &popped, sender).await;
-            if let Err(e) = memory.l2_append(
-                conversation.subject(),
-                SummaryBlock {
-                    conversation_id: conversation.id().to_string(),
-                    content: summary,
-                    index: 0,
-                },
-            ) {
-                soft_errors.push(format!("l2 append (topic shift): {e}"));
+        match memory.l1_len(conversation.subject(), conversation.id()) {
+            Ok(l1_len) if l1_len > 0 => {
+                if let Err(e) =
+                    flush_l1_into_l2(model, conversation, memory.as_ref(), l1_len, sender).await
+                {
+                    soft_errors.push((MemoryFlowStage::Summarize, e));
+                }
             }
+            Ok(_) => {}
+            Err(e) => soft_errors.push((
+                MemoryFlowStage::Summarize,
+                format!("l1 len (topic shift): {e}"),
+            )),
         }
     }
 
     // 4. TurnCount floor: L1 overflow demotes oldest turns into L2.
-    let l1_len = memory
-        .l1_len(conversation.subject(), conversation.id())
-        .unwrap_or(0);
-    if l1_len > policies.l1_window {
-        let overflow = l1_len - policies.l1_window;
-        let popped = memory
-            .l1_pop_oldest(conversation.subject(), conversation.id(), overflow)
-            .unwrap_or_default();
-        let summary = summarize_l1(model, &popped, sender).await;
-        if let Err(e) = memory.l2_append(
+    match memory.l1_len(conversation.subject(), conversation.id()) {
+        Ok(l1_len) if l1_len > policies.l1_window => {
+            let overflow = l1_len - policies.l1_window;
+            if let Err(e) =
+                flush_l1_into_l2(model, conversation, memory.as_ref(), overflow, sender).await
+            {
+                soft_errors.push((MemoryFlowStage::Summarize, e));
+            }
+        }
+        Ok(_) => {}
+        Err(e) => soft_errors.push((
+            MemoryFlowStage::Summarize,
+            format!("l1 len (turn count floor): {e}"),
+        )),
+    }
+
+    // 5. L2Overflow floor: distill oldest summary blocks into L3.
+    match memory.l2_len(conversation.subject(), conversation.id()) {
+        Ok(l2_len) if l2_len > policies.l2_cap => {
+            let overflow = l2_len - policies.l2_cap;
+            match memory.l2_pop_oldest(conversation.subject(), conversation.id(), overflow) {
+                Ok(popped) => {
+                    for block in popped {
+                        // Mechanical distillation: the summary becomes long-term
+                        // knowledge under the conversation's topic (no extra LLM call;
+                        // LLM-based extraction is a future pluggable improvement).
+                        let fragment = KnowledgeFragment {
+                            identity: crate::memory::FragmentIdentity {
+                                subject_id: conversation.subject().to_string(),
+                                conversation_id: block.conversation_id,
+                                topic: decision.topic.clone(),
+                            },
+                            content: block.content,
+                            created_at: std::time::SystemTime::now()
+                                .duration_since(std::time::UNIX_EPOCH)
+                                .map(|d| d.as_secs())
+                                .unwrap_or(0),
+                        };
+                        if let Err(e) = memory.l3_upsert(conversation.subject(), fragment) {
+                            soft_errors.push((MemoryFlowStage::Distill, format!("l3 upsert: {e}")));
+                        }
+                    }
+                }
+                Err(e) => soft_errors.push((MemoryFlowStage::Distill, format!("l2 pop: {e}"))),
+            }
+        }
+        Ok(_) => {}
+        Err(e) => soft_errors.push((
+            MemoryFlowStage::Distill,
+            format!("l2 len (l2 overflow floor): {e}"),
+        )),
+    }
+
+    (decision.topic, soft_errors)
+}
+
+/// Demotes the oldest `count` L1 entries into one L2 summary block
+/// (summarized via the model — visible as `ContextManagement`).
+async fn flush_l1_into_l2(
+    model: &dyn Model,
+    conversation: &Conversation,
+    memory: &dyn MemoryStore,
+    count: usize,
+    sender: &mpsc::Sender<AgentEvent>,
+) -> Result<(), String> {
+    let popped = memory
+        .l1_pop_oldest(conversation.subject(), conversation.id(), count)
+        .map_err(|e| format!("l1 pop: {e}"))?;
+    let summary = summarize_l1(model, &popped, sender).await;
+    memory
+        .l2_append(
             conversation.subject(),
             SummaryBlock {
                 conversation_id: conversation.id().to_string(),
                 content: summary,
                 index: 0,
             },
-        ) {
-            soft_errors.push(format!("l2 append (turn count): {e}"));
-        }
-    }
-
-    // 5. L2Overflow floor: distill oldest summary blocks into L3.
-    let l2_len = memory
-        .l2_len(conversation.subject(), conversation.id())
-        .unwrap_or(0);
-    if l2_len > policies.l2_cap {
-        let overflow = l2_len - policies.l2_cap;
-        let popped = memory
-            .l2_pop_oldest(conversation.subject(), conversation.id(), overflow)
-            .unwrap_or_default();
-        for block in popped {
-            // Mechanical distillation: the summary becomes long-term
-            // knowledge under the conversation's topic (no extra LLM call;
-            // LLM-based extraction is a future pluggable improvement).
-            let fragment = KnowledgeFragment {
-                identity: crate::memory::FragmentIdentity {
-                    subject_id: conversation.subject().to_string(),
-                    conversation_id: block.conversation_id,
-                    topic: decision.topic.clone(),
-                },
-                content: block.content,
-                created_at: std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .map(|d| d.as_secs())
-                    .unwrap_or(0),
-            };
-            if let Err(e) = memory.l3_upsert(conversation.subject(), fragment) {
-                soft_errors.push(format!("l3 upsert: {e}"));
-            }
-        }
-    }
-
-    (decision.topic, soft_errors)
+        )
+        .map_err(|e| format!("l2 append: {e}"))?;
+    Ok(())
 }
 
 /// Runs the conversation-end flow: mechanical promotion of all L2 blocks
 /// into L3 (the explicit `Conversation::end` path and the idle-timeout
 /// fallback both land here). No model call is required.
-pub(crate) fn run_end_flows(conversation: &Conversation, policies: &MemoryPolicies) -> Vec<String> {
+pub(crate) fn run_end_flows(
+    conversation: &Conversation,
+    policies: &MemoryPolicies,
+) -> Vec<(MemoryFlowStage, String)> {
     if !policies.extra.contains(&EventPolicy::ConversationEnd) {
         return Vec::new();
     }
     let memory = conversation.memory();
     let mut soft_errors = Vec::new();
-    let l2_len = memory
-        .l2_len(conversation.subject(), conversation.id())
-        .unwrap_or(0);
-    let blocks = memory
-        .l2_pop_oldest(conversation.subject(), conversation.id(), l2_len)
-        .unwrap_or_default();
+    let l2_len = match memory.l2_len(conversation.subject(), conversation.id()) {
+        Ok(len) => len,
+        Err(e) => {
+            return vec![(
+                MemoryFlowStage::Distill,
+                format!("l2 len (conversation end): {e}"),
+            )];
+        }
+    };
+    let blocks = match memory.l2_pop_oldest(conversation.subject(), conversation.id(), l2_len) {
+        Ok(blocks) => blocks,
+        Err(e) => {
+            return vec![(
+                MemoryFlowStage::Distill,
+                format!("l2 pop (conversation end): {e}"),
+            )];
+        }
+    };
     let topic = conversation.topic().unwrap_or_default();
     for block in blocks {
         let fragment = KnowledgeFragment {
@@ -275,7 +315,7 @@ pub(crate) fn run_end_flows(conversation: &Conversation, policies: &MemoryPolici
                 .unwrap_or(0),
         };
         if let Err(e) = memory.l3_upsert(conversation.subject(), fragment) {
-            soft_errors.push(format!("l3 upsert (end): {e}"));
+            soft_errors.push((MemoryFlowStage::Distill, format!("l3 upsert (end): {e}")));
         }
     }
     soft_errors
@@ -322,11 +362,7 @@ async fn summarize_l1(
     });
     let _ = sender.send(emit_requested).await;
 
-    let request = ModelRequest::new(
-        vec![request],
-        Vec::new(),
-        crate::model::ModelParams::default().with_max_tokens(256),
-    );
+    let request = ModelRequest::new(vec![request], Vec::new());
     match crate::model::complete(model, request).await {
         Ok((message, usage)) => {
             let _ = sender
@@ -337,8 +373,18 @@ async fn summarize_l1(
                 .await;
             message_text(&message).unwrap_or_default()
         }
-        Err(_error) => {
-            // Fallback: mechanical join so L2 never loses the content.
+        Err(error) => {
+            // Lossless degradation: the raw transcript becomes the L2
+            // content — and the degradation is VISIBLE (ADR-0015 decision
+            // 6: memory-flow failures are never silent).
+            let _ = sender
+                .send(AgentEvent::Lifecycle(LifecycleEvent::MemoryFlowFailed {
+                    stage: MemoryFlowStage::Summarize,
+                    detail: format!(
+                        "summarization failed; the raw transcript was archived as the summary: {error}"
+                    ),
+                }))
+                .await;
             transcript
         }
     }

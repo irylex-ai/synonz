@@ -12,12 +12,13 @@
 
 use serde_json::{Value, json};
 use synonz::message::{ContentBlock, Message, Role, ToolResult};
-use synonz::{ModelDelta, ModelError, ModelStreamItem};
+use synonz::{ModelDelta, ModelError, ModelParams, ModelStreamItem};
 
 /// Builds the chat-completions request body.
 pub(crate) fn request_body(
     model_name: &str,
     request: &synonz::ModelRequest,
+    params: &ModelParams,
 ) -> Result<Value, ModelError> {
     let mut body = json!({
         "model": model_name,
@@ -25,6 +26,12 @@ pub(crate) fn request_body(
         "stream": true,
         "stream_options": { "include_usage": true },
     });
+    if let Some(temperature) = params.temperature {
+        body["temperature"] = json!(temperature);
+    }
+    if let Some(max_tokens) = params.max_tokens {
+        body["max_tokens"] = json!(max_tokens);
+    }
     if !request.tools.is_empty() {
         body["tools"] = Value::Array(
             request
@@ -42,12 +49,6 @@ pub(crate) fn request_body(
                 })
                 .collect(),
         );
-    }
-    if let Some(temperature) = request.params.temperature {
-        body["temperature"] = json!(temperature);
-    }
-    if let Some(max_tokens) = request.params.max_tokens {
-        body["max_tokens"] = json!(max_tokens);
     }
     Ok(body)
 }
@@ -324,11 +325,11 @@ mod tests {
                 "weather lookup",
                 json!({"type": "object"}),
             )],
-            synonz::ModelParams::default()
-                .with_temperature(0.3)
-                .with_max_tokens(256),
         );
-        let body = request_body("gpt-4o-mini", &request).unwrap();
+        let params = synonz::ModelParams::default()
+            .with_temperature(0.3)
+            .with_max_tokens(256);
+        let body = request_body("gpt-4o-mini", &request, &params).unwrap();
         assert_eq!(body["model"], "gpt-4o-mini");
         assert_eq!(body["stream"], true);
         assert_eq!(body["temperature"], json!(0.3_f32));

@@ -79,6 +79,32 @@ pub enum LifecycleEvent {
         /// Why the run was cancelled.
         reason: CancelReason,
     },
+    /// Non-terminal: a memory-flow failure (archive, topic, compression,
+    /// or assembly read). Memory failures are **visible, never silent**
+    /// (ADR-0015) and do not abort the run.
+    MemoryFlowFailed {
+        /// Which stage of the background lifecycle failed.
+        stage: MemoryFlowStage,
+        /// Human-readable detail of the failure.
+        detail: String,
+    },
+}
+
+/// Which stage of the background lifecycle failed (ADR-0015 decision 6).
+#[non_exhaustive]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MemoryFlowStage {
+    /// Reading a memory layer during background assembly.
+    AssembleRead,
+    /// Writing the L1 archive after a completed turn.
+    Archive,
+    /// Updating the session topic.
+    TopicUpdate,
+    /// Summarizing demoted L1 turns into L2.
+    Summarize,
+    /// Distilling L2 overflow into L3.
+    Distill,
 }
 
 /// Why a run was cancelled.

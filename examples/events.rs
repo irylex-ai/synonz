@@ -3,7 +3,7 @@
 //! Run: `cargo run -p synonz-examples --bin events`
 
 use futures::StreamExt;
-use synonz::{Agent, ExecutionEvent};
+use synonz::{Agent, ExecutionEvent, Subject, SubjectType, SynonzRuntime};
 
 /// A model that streams two text deltas and then finishes.
 struct StreamingModel;
@@ -33,12 +33,15 @@ impl synonz::Model for StreamingModel {
 
 #[tokio::main]
 async fn main() {
+    let runtime = SynonzRuntime::builder().build();
+    let mut conv = synonz::Conversation::new(&runtime, &Subject::of(SubjectType::User, "demo"));
     let agent = Agent::builder()
+        .runtime(&runtime)
         .model(StreamingModel)
         .build()
         .expect("model is set");
 
-    let mut execution = agent.run("weather?");
+    let mut execution = agent.run(conv.turn_input("weather?"));
     let mut delta_text = String::new();
     while let Some(event) = execution.next().await {
         match event {

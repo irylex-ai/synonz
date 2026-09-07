@@ -180,7 +180,13 @@ async fn derived_tool_drives_a_full_agent_run() {
             usage: synonz::TokenUsage::new(1, 1),
         }],
     ]);
+    let runtime = synonz::SynonzRuntime::builder().build();
+    let mut conv = synonz::Conversation::new(
+        &runtime,
+        &synonz::Subject::of(synonz::SubjectType::User, "u"),
+    );
     let agent = Agent::builder()
+        .runtime(&runtime)
         .model(model)
         .tool(WeatherDerived {
             city: String::new(), // per-call state comes from the arguments
@@ -189,6 +195,6 @@ async fn derived_tool_drives_a_full_agent_run() {
         .build()
         .unwrap();
 
-    let output = agent.run("weather?").await.unwrap();
+    let output = agent.run(conv.turn_input("weather?")).await.unwrap();
     assert_eq!(output.text(), Some("done"));
 }

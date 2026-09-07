@@ -21,6 +21,7 @@ use synonz::{ModelDelta, ModelError, ModelStreamItem, TokenUsage};
 pub(crate) fn request_body(
     model_name: &str,
     request: &synonz::ModelRequest,
+    params: &synonz::ModelParams,
 ) -> Result<Value, ModelError> {
     let mut system = String::new();
     let mut messages = Vec::new();
@@ -53,7 +54,7 @@ pub(crate) fn request_body(
     let mut body = json!({
         "model": model_name,
         // Anthropic requires max_tokens; the default is documented.
-        "max_tokens": request.params.max_tokens.unwrap_or(crate::DEFAULT_MAX_TOKENS),
+        "max_tokens": params.max_tokens.unwrap_or(crate::DEFAULT_MAX_TOKENS),
         "stream": true,
         "messages": messages,
     });
@@ -75,7 +76,7 @@ pub(crate) fn request_body(
                 .collect(),
         );
     }
-    if let Some(temperature) = request.params.temperature {
+    if let Some(temperature) = params.temperature {
         body["temperature"] = json!(temperature);
     }
     Ok(body)
@@ -325,9 +326,13 @@ mod tests {
                 Message::user("weather?"),
             ],
             vec![],
-            synonz::ModelParams::default(),
         );
-        let body = request_body("claude-sonnet-4-5", &request).unwrap();
+        let body = request_body(
+            "claude-sonnet-4-5",
+            &request,
+            &synonz::ModelParams::default(),
+        )
+        .unwrap();
         assert_eq!(body["system"], "weather assistant");
         // The system prompt is NOT a message.
         let messages = body["messages"].as_array().unwrap();
@@ -373,9 +378,13 @@ mod tests {
 
     #[test]
     fn max_tokens_has_a_documented_default() {
-        let request =
-            synonz::ModelRequest::new(vec![Message::user("hi")], vec![], Default::default());
-        let body = request_body("claude-sonnet-4-5", &request).unwrap();
+        let request = synonz::ModelRequest::new(vec![Message::user("hi")], vec![]);
+        let body = request_body(
+            "claude-sonnet-4-5",
+            &request,
+            &synonz::ModelParams::default(),
+        )
+        .unwrap();
         assert_eq!(body["max_tokens"], crate::DEFAULT_MAX_TOKENS);
     }
 

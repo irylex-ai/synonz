@@ -15,12 +15,26 @@ use serde_json::json;
 use tokio_util::sync::CancellationToken;
 
 use synonz::{
-    Agent, AgentError, CallId, CancelReason, ContentBlock, ExecutionEvent, MockModel, Model,
-    ModelError, ModelRequest, ModelStream, ModelStreamItem, Role, Tool, ToolCall, ToolContent,
-    ToolError, ToolResult,
+    Agent, AgentError, CallId, CancelReason, ContentBlock, Conversation, ExecutionEvent, MockModel,
+    Model, ModelError, ModelRequest, ModelStream, ModelStreamItem, Role, Subject, SubjectType,
+    SynonzRuntime, Tool, ToolCall, ToolContent, ToolError, ToolResult,
 };
 
 // ────────────────────────── helpers ──────────────────────────
+
+/// A runtime + subject: every execution belongs to a conversation on a
+/// runtime (ADR-0015).
+fn fixture() -> (SynonzRuntime, Subject) {
+    let runtime = SynonzRuntime::builder().build();
+    let subject = Subject::of(SubjectType::User, "u-test");
+    (runtime, subject)
+}
+
+/// A fresh conversation on `runtime` (each test builds its own runtime, so
+/// the in-process stores never collide across tests).
+fn fresh_conv(runtime: &SynonzRuntime) -> Conversation {
+    Conversation::new(runtime, &Subject::of(SubjectType::User, "u-test"))
+}
 
 /// A tool with a scripted outcome and optional delay.
 struct StubTool {
@@ -165,13 +179,16 @@ fn assert_terminal_invariant(events: &[ExecutionEvent]) {
 
 #[tokio::test]
 async fn single_round_completes() {
+    let (runtime, subject) = fixture();
+    let mut conv = Conversation::new(&runtime, &subject);
     let agent = Agent::builder()
+        .runtime(&runtime)
         .model(MockModel::finishing_with_text("beijing is sunny, 28C."))
         .system_prompt("weather assistant")
         .build()
         .unwrap();
 
-    let mut stream = agent.run("weather?");
+    let mut stream = agent.run(conv.turn_input("weather?"));
     let events = collect_events(&mut stream).await;
 
     assert_terminal_invariant(&events);
@@ -179,33 +196,42 @@ async fn single_round_completes() {
     // observation bypass; the single-round narrative is just the terminal.
     assert_eq!(events.len(), 1);
     assert!(matches!(&events[0], ExecutionEvent::Completed(_)));
+    // Truth archive: the completed turn is in the history with its output.
+    assert_eq!(conv.len(), 1);
+    assert!(conv.turns()[0].output().is_some());
 }
 
 #[tokio::test]
-async fn ask_returns_final_output() {
+async fn run_returns_final_output() {
+    let (runtime, subject) = fixture();
+    let mut conv = Conversation::new(&runtime, &subject);
     let agent = Agent::builder()
+        .runtime(&runtime)
         .model(MockModel::finishing_with_text("sunny, 28C."))
         .build()
         .unwrap();
 
-    let output = agent.run("weather?").await.unwrap();
+    let output = agent.run(conv.turn_input("weather?")).await.unwrap();
     assert_eq!(output.text(), Some("sunny, 28C."));
     assert_eq!(output.usage.input_tokens, 1);
 }
 
 #[tokio::test]
 async fn tool_loop_feeds_results_back() {
+    let (runtime, subject) = fixture();
+    let mut conv = Conversation::new(&runtime, &subject);
     let model = MockModel::new(vec![
         vec![finish_with_call("x1", "weather", "beijing")],
         vec![finish_text("beijing is sunny, 28C.")],
     ]);
     let agent = Agent::builder()
+        .runtime(&runtime)
         .model(model.clone())
         .tool(StubTool::ok("weather", "sunny, 28C"))
         .build()
         .unwrap();
 
-    let mut stream = agent.run("weather?");
+    let mut stream = agent.run(conv.turn_input("weather?"));
     let mut events = Vec::new();
     while let Some(event) = stream.next().await {
         events.push(event);
@@ -238,6 +264,8 @@ async fn tool_loop_feeds_results_back() {
 
 #[tokio::test]
 async fn parallel_tools_pair_by_call_id_and_keep_conversation_order() {
+    let (runtime, subject) = fixture();
+    let mut conv = Conversation::new(&runtime, &subject);
     let model = MockModel::new(vec![
         vec![ModelStreamItem::Finish {
             message: synonz::Message::new(
@@ -252,13 +280,14 @@ async fn parallel_tools_pair_by_call_id_and_keep_conversation_order() {
         vec![finish_text("both done")],
     ]);
     let agent = Agent::builder()
+        .runtime(&runtime)
         .model(model.clone())
         .tool(StubTool::slow("t1", Duration::from_millis(80)))
         .tool(StubTool::slow("t2", Duration::from_millis(5)))
         .build()
         .unwrap();
 
-    let mut stream = agent.run("go");
+    let mut stream = agent.run(conv.turn_input("go"));
     let mut events = Vec::new();
     while let Some(event) = stream.next().await {
         events.push(event);
@@ -294,17 +323,20 @@ async fn parallel_tools_pair_by_call_id_and_keep_conversation_order() {
 
 #[tokio::test]
 async fn soft_failure_is_fed_back_not_fatal() {
+    let (runtime, subject) = fixture();
+    let mut conv = Conversation::new(&runtime, &subject);
     let model = MockModel::new(vec![
         vec![finish_with_call("x1", "broken", "{}")],
         vec![finish_text("recovered")],
     ]);
     let agent = Agent::builder()
+        .runtime(&runtime)
         .model(model.clone())
         .tool(BrokenTool { name: "broken" })
         .build()
         .unwrap();
 
-    let mut stream = agent.run("go");
+    let mut stream = agent.run(conv.turn_input("go"));
     let mut events = Vec::new();
     while let Some(event) = stream.next().await {
         events.push(event);
@@ -337,13 +369,19 @@ async fn soft_failure_is_fed_back_not_fatal() {
 
 #[tokio::test]
 async fn unknown_tool_is_soft_failure() {
+    let (runtime, subject) = fixture();
+    let mut conv = Conversation::new(&runtime, &subject);
     let model = MockModel::new(vec![
         vec![finish_with_call("x1", "nonexistent", "{}")],
         vec![finish_text("ok, skipping that")],
     ]);
-    let agent = Agent::builder().model(model).build().unwrap();
+    let agent = Agent::builder()
+        .runtime(&runtime)
+        .model(model)
+        .build()
+        .unwrap();
 
-    let mut stream = agent.run("go");
+    let mut stream = agent.run(conv.turn_input("go"));
     let mut events = Vec::new();
     while let Some(event) = stream.next().await {
         events.push(event);
@@ -359,19 +397,22 @@ async fn unknown_tool_is_soft_failure() {
 
 #[tokio::test]
 async fn max_rounds_exceeded_fails_explicitly() {
+    let (runtime, subject) = fixture();
+    let mut conv = Conversation::new(&runtime, &subject);
     // The model always wants another tool call; the budget must stop it.
     let model = MockModel::new(vec![
         vec![finish_with_call("x1", "weather", "beijing")],
         vec![finish_with_call("x2", "weather", "shanghai")],
     ]);
     let agent = Agent::builder()
+        .runtime(&runtime)
         .model(model)
         .tool(StubTool::ok("weather", "sunny"))
         .max_rounds(1)
         .build()
         .unwrap();
 
-    let mut stream = agent.run("weather everywhere");
+    let mut stream = agent.run(conv.turn_input("weather everywhere"));
     let mut events = Vec::new();
     while let Some(event) = stream.next().await {
         events.push(event);
@@ -383,19 +424,32 @@ async fn max_rounds_exceeded_fails_explicitly() {
         Some(ExecutionEvent::Failed(AgentError::MaxRoundsExceeded))
     ));
     assert_eq!(stream.rounds(), 1);
-    let answer = agent.run("weather everywhere").await;
-    assert!(matches!(answer, Err(AgentError::MaxRoundsExceeded)));
+    // Truth archive: the failed turn is in the history, marked.
+    let turns = conv.turns();
+    assert_eq!(turns.len(), 1);
+    assert!(matches!(
+        turns[0].outcome,
+        synonz::TurnOutcome::Failed(AgentError::MaxRoundsExceeded)
+    ));
+    // The memory layers were NOT fed from the failed turn.
+    let memory = runtime.memory();
+    assert_eq!(memory.l1_len(&subject, conv.id()).expect("l1 len"), 0);
+    let retried = agent.run(conv.turn_input("weather everywhere")).await;
+    assert!(matches!(retried, Err(AgentError::MaxRoundsExceeded)));
 }
 
 #[tokio::test]
 async fn cancel_by_external_token() {
+    let (runtime, subject) = fixture();
+    let mut conv = Conversation::new(&runtime, &subject);
     let token = CancellationToken::new();
     let agent = Agent::builder()
+        .runtime(&runtime)
         .model(MockModel::hanging())
         .build()
         .unwrap();
 
-    let mut stream = agent.run_with("go", token.clone());
+    let mut stream = agent.run_with(conv.turn_input("go"), token.clone());
     // Input-side payloads stay on the observation bypass: on the narrative
     // face the first surfaced event is already the cancellation terminal.
     token.cancel();
@@ -417,16 +471,28 @@ async fn cancel_by_external_token() {
         stream.next().await.is_none(),
         "stream closes after terminal"
     );
+    // Truth archive: the cancelled turn is in the history, marked.
+    let turns = conv.turns();
+    assert_eq!(turns.len(), 1);
+    assert!(matches!(
+        turns[0].outcome,
+        synonz::TurnOutcome::Cancelled(CancelReason::UserRequested)
+    ));
 }
 
 #[tokio::test]
 async fn cancel_by_timeout() {
+    let (runtime, subject) = fixture();
+    let mut conv = Conversation::new(&runtime, &subject);
     let agent = Agent::builder()
+        .runtime(&runtime)
         .model(MockModel::hanging())
         .build()
         .unwrap();
 
-    let mut stream = agent.run("go").with_timeout(Duration::from_millis(50));
+    let mut stream = agent
+        .run(conv.turn_input("go"))
+        .with_timeout(Duration::from_millis(50));
     let mut events = Vec::new();
     while let Some(event) = stream.next().await {
         events.push(event);
@@ -436,6 +502,13 @@ async fn cancel_by_timeout() {
     assert!(matches!(
         events.last(),
         Some(ExecutionEvent::Cancelled(CancelReason::Timeout))
+    ));
+    // Truth archive: the timed-out turn is in the history, marked.
+    let turns = conv.turns();
+    assert_eq!(turns.len(), 1);
+    assert!(matches!(
+        turns[0].outcome,
+        synonz::TurnOutcome::Cancelled(CancelReason::Timeout)
     ));
 }
 
@@ -488,15 +561,18 @@ async fn cancel_by_drop_reaches_inflight_model_stream() {
         }
     }
 
+    let (runtime, subject) = fixture();
+    let mut conv = Conversation::new(&runtime, &subject);
     let dropped = Arc::new(AtomicBool::new(false));
     let agent = Agent::builder()
+        .runtime(&runtime)
         .model(HangingModel {
             dropped: Arc::clone(&dropped),
         })
         .build()
         .unwrap();
 
-    let mut stream = agent.run("go");
+    let mut stream = agent.run(conv.turn_input("go"));
     // Input-side events are skipped on the narrative face: the first
     // surfaced item is the model's text delta.
     assert!(matches!(
@@ -527,9 +603,15 @@ async fn model_failure_fails_the_run() {
             })
         }
     }
-    let agent = Agent::builder().model(FailingModel).build().unwrap();
+    let (runtime, _subject) = fixture();
+    let agent = Agent::builder()
+        .runtime(&runtime)
+        .model(FailingModel)
+        .build()
+        .unwrap();
 
-    let mut stream = agent.run("go");
+    let mut conv = fresh_conv(&runtime);
+    let mut stream = agent.run(conv.turn_input("go"));
     let mut events = Vec::new();
     while let Some(event) = stream.next().await {
         events.push(event);
@@ -547,17 +629,20 @@ async fn model_failure_fails_the_run() {
 #[tokio::test]
 async fn event_narrative_is_replayable() {
     // A full run's narrative survives a JSON round-trip (record/replay).
+    let (runtime, _subject) = fixture();
+    let mut conv = fresh_conv(&runtime);
     let model = MockModel::new(vec![
         vec![finish_with_call("x1", "weather", "beijing")],
         vec![finish_text("sunny")],
     ]);
     let agent = Agent::builder()
+        .runtime(&runtime)
         .model(model)
         .tool(StubTool::ok("weather", "sunny, 28C"))
         .build()
         .unwrap();
 
-    let mut stream = agent.run("weather?");
+    let mut stream = agent.run(conv.turn_input("weather?"));
     let mut events = Vec::new();
     while let Some(event) = stream.next().await {
         events.push(event);
@@ -578,14 +663,52 @@ async fn build_without_model_is_invalid_configuration() {
 }
 
 #[tokio::test]
+async fn build_without_runtime_is_invalid_configuration() {
+    let error = match Agent::builder()
+        .model(MockModel::finishing_with_text("hi"))
+        .build()
+    {
+        Err(error) => error,
+        Ok(_) => panic!("build without a runtime must fail"),
+    };
+    assert!(matches!(error, AgentError::InvalidConfiguration { .. }));
+}
+
+#[tokio::test]
+#[should_panic(expected = "belongs to a different runtime")]
+async fn cross_runtime_mixing_panics_loudly() {
+    let (runtime_a, _subject_a) = fixture();
+    let runtime_b = SynonzRuntime::builder().build();
+    let agent = Agent::builder()
+        .runtime(&runtime_a)
+        .model(MockModel::finishing_with_text("hi"))
+        .build()
+        .unwrap();
+    let mut conv_b = fresh_conv(&runtime_b);
+    // Mixing the conversation of runtime B into an agent of runtime A is a
+    // programmer error — it must fail loudly, not silently.
+    let _execution = agent.run(conv_b.turn_input("hi"));
+}
+
+#[tokio::test]
 async fn concurrent_runs_of_one_agent_are_independent() {
+    let (runtime, _subject) = fixture();
+    let mut conv_a = fresh_conv(&runtime);
+    let mut conv_b = fresh_conv(&runtime);
     let model = MockModel::new(vec![
         vec![finish_text("answer-1")],
         vec![finish_text("answer-2")],
     ]);
-    let agent = Agent::builder().model(model.clone()).build().unwrap();
+    let agent = Agent::builder()
+        .runtime(&runtime)
+        .model(model.clone())
+        .build()
+        .unwrap();
 
-    let (a, b) = tokio::join!(agent.run("q1"), agent.run("q2"));
+    let (a, b) = tokio::join!(
+        agent.run(conv_a.turn_input("q1")),
+        agent.run(conv_b.turn_input("q2"))
+    );
     // Each run gets its own script; which run answers first is scheduling.
     let text_a = a.unwrap().text().unwrap().to_string();
     let text_b = b.unwrap().text().unwrap().to_string();

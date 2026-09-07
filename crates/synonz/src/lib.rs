@@ -40,14 +40,18 @@ mod cancel;
 pub mod mock;
 
 pub use agent::{Agent, AgentBuilder, DEFAULT_MAX_ROUNDS, Execution};
-pub use context::{Context, ContextAssembly, ConversationHistory, LayeredMemory};
+pub use context::{
+    AssemblyError, AssemblyFailure, AssemblyOutput, AssemblyRequest, Context, ContextAssembly,
+    LayeredMemory,
+};
 pub use conversation::{
     Conversation, ConversationState, ConversationStore, ConversationStoreError, Turn, TurnInput,
+    TurnOutcome,
 };
 pub use error::{AgentError, ModelError};
 pub use event::{
-    AgentEvent, CallPurpose, CancelReason, ExecutionEvent, LifecycleEvent, ModelDelta, ModelEvent,
-    TokenUsage, ToolEvent,
+    AgentEvent, CallPurpose, CancelReason, ExecutionEvent, LifecycleEvent, MemoryFlowStage,
+    ModelDelta, ModelEvent, TokenUsage, ToolEvent,
 };
 pub use io::{AgentInput, AgentOutput};
 pub use memory::{

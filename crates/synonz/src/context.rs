@@ -1,30 +1,71 @@
-//! The context engine: the narrative background of a conversation
-//! The assembly strategy decides what is sent; the framework owns when.
+//! The context engine: the narrative background of a conversation.
 //!
-//! `Context` is the third persistent object — the session-scoped runtime
-//! that lets the stateless agent execute with state. Created from a
-//! conversation ([`Conversation::context`]), it holds the memory handles
-//! and the assembly strategy. Assembly is fresh per ask (never once at
-//! creation): the strategy composes what is *sent*, nothing else.
+//! `Context` is the background engine — the third persistent object. It
+//! owns the **three behaviors** of the conversation's narrative background
+//! (ADR-0015): **assemble** (what the model sees before a call), **archive**
+//! (what a completed turn leaves in the L1 layer and the topic state), and
+//! **compress** (the L1→L2 / L2→L3 flows fired by the trigger policies).
+//!
+//! Its data source is **memory only** — the conversation is where the
+//! engine comes from (identity, handles, timing), never what it reads. The
+//! strategy decides what is sent; the framework owns when.
 
 use std::sync::Arc;
 
 use futures::future::BoxFuture;
+use tokio::sync::mpsc;
 
 use crate::conversation::Conversation;
+use crate::event::{AgentEvent, LifecycleEvent, MemoryFlowStage};
+use crate::memory::MemoryStore;
 use crate::message::Message;
+use crate::model::Model;
+use crate::subject::Subject;
 
-/// The inputs an assembly strategy consumes: the conversation (history,
-/// memory handles, subject) and the turn's user input.
+/// The inputs an assembly strategy consumes — the minimal sufficient set.
+/// Deliberately narrow (ADR-0015): a strategy reads **memory**, plus the
+/// identity and topic needed to query it; reading the conversation entity
+/// is not expressible.
 #[non_exhaustive]
 pub struct AssemblyRequest<'a> {
-    /// The conversation of this turn.
-    pub conversation: &'a Conversation,
+    /// The memory store (the sole data source).
+    pub memory: &'a dyn MemoryStore,
+    /// The subject owning the memory.
+    pub subject: &'a Subject,
+    /// The conversation whose layers are assembled.
+    pub conversation_id: &'a str,
+    /// The session's current topic.
+    pub topic: &'a str,
     /// The turn's user input text.
     pub input: &'a str,
 }
 
-/// Assembly failures.
+/// One degraded read: the stage that failed and why. Surfaced as a
+/// `MemoryFlowFailed` event by the caller — never silent (ADR-0015).
+#[non_exhaustive]
+#[derive(Debug, Clone, PartialEq)]
+pub struct AssemblyFailure {
+    /// Which background stage failed.
+    pub stage: MemoryFlowStage,
+    /// Human-readable detail of the failure.
+    pub detail: String,
+}
+
+/// What an assembly produced: the composed background plus the reads that
+/// failed along the way (degraded but visible).
+#[non_exhaustive]
+#[derive(Debug, Clone, Default)]
+pub struct AssemblyOutput {
+    /// The composed background messages.
+    pub messages: Vec<Message>,
+    /// The memory reads that failed while composing (the corresponding
+    /// layers are absent from `messages`).
+    pub failures: Vec<AssemblyFailure>,
+}
+
+/// Strategy-level failure: the strategy itself could not produce anything.
+/// Memory-read degradation is *not* this — it travels in
+/// [`AssemblyOutput::failures`].
 #[non_exhaustive]
 #[derive(Debug, Clone, PartialEq, thiserror::Error)]
 pub enum AssemblyError {
@@ -35,23 +76,23 @@ pub enum AssemblyError {
 
 /// The context assembly strategy contract.
 ///
-/// Strategies decide **what is sent** (the composition of L1/L2/L3/history
-/// and their formatting); timing, turn recording, and write flows stay in
-/// the framework. Everything is a strategy: built-in [`LayeredMemory`]
-/// (default) or [`ConversationHistory`] (the pre-memory behavior), or a
-/// developer's own.
+/// Strategies decide **what is sent** (the composition of L1/L2/L3 and
+/// their formatting); timing, turn recording, and write flows stay in the
+/// framework. Strategies read memory through [`AssemblyRequest`]; the
+/// type makes reading the conversation entity unexpressible.
 pub trait ContextAssembly: Send + Sync + 'static {
     /// Assembles the context messages for one turn.
     fn assemble<'a>(
         &'a self,
         request: AssemblyRequest<'a>,
-    ) -> BoxFuture<'a, Result<Vec<Message>, AssemblyError>>;
+    ) -> BoxFuture<'a, Result<AssemblyOutput, AssemblyError>>;
 }
 
-/// The session-scoped runtime (narrative background engine).
+/// The session-scoped background engine (the third persistent object).
 ///
-/// Cloning shares the same background. Created by
-/// [`Conversation::context`].
+/// Cloning shares the same background. Derived from the conversation
+/// (`Conversation::context`) at execution time — there is no manual
+/// mounting (ADR-0015: derivation kills the background/turn split).
 #[derive(Clone)]
 pub struct Context {
     conversation: Conversation,
@@ -66,24 +107,84 @@ impl Context {
         }
     }
 
-    /// Assembles the context for one turn (fresh — the memory layers are
-    /// read at assembly time, so just-completed turns are included).
-    pub async fn assemble(&self, input: &str) -> Result<Vec<Message>, AssemblyError> {
-        self.assembly
-            .assemble(AssemblyRequest {
+    /// Assembles the background for one turn (fresh — the memory layers
+    /// are read at assembly time, so just-completed turns are included).
+    ///
+    /// Memory reads that fail are reported in
+    /// [`AssemblyOutput::failures`] and the run continues with the layers
+    /// that succeeded — degraded, never silent (ADR-0015 decision 6).
+    pub async fn assemble(&self, input: &str) -> AssemblyOutput {
+        let topic = self.conversation.topic().unwrap_or_default();
+        let request = AssemblyRequest {
+            memory: &*self.conversation.memory(),
+            subject: self.conversation.subject(),
+            conversation_id: self.conversation.id(),
+            topic: &topic,
+            input,
+        };
+        match self.assembly.assemble(request).await {
+            Ok(output) => output,
+            Err(error) => AssemblyOutput {
+                messages: Vec::new(),
+                failures: vec![AssemblyFailure {
+                    stage: MemoryFlowStage::AssembleRead,
+                    detail: error.to_string(),
+                }],
+            },
+        }
+    }
+
+    /// The archive + compress moment (the second and third behaviors).
+    ///
+    /// Called by the execution loop after a **completed** turn: the L1
+    /// archive is written, the topic state advances, and the trigger
+    /// policies (mandatory floors + stacked events) run. Failed and
+    /// cancelled turns enter the truth archive only — they never feed the
+    /// memory layers.
+    ///
+    /// Flow failures are emitted as `MemoryFlowFailed` events into
+    /// `sender` — visible, never silent (ADR-0015 decision 6); they do
+    /// not abort the run.
+    pub(crate) async fn on_turn_completed(
+        &self,
+        model: &dyn Model,
+        input: &str,
+        messages: Vec<Message>,
+        sender: &mpsc::Sender<AgentEvent>,
+    ) {
+        let runtime = self.conversation.runtime();
+        let policies = runtime.memory_policies();
+        let detector = runtime.topic_detector();
+        let (topic, soft_errors) = crate::trigger::run_post_turn_flows(
+            crate::trigger::PostTurn {
+                model,
                 conversation: &self.conversation,
+                policies: &policies,
+                detector: &*detector,
                 input,
-            })
-            .await
+                messages,
+            },
+            sender,
+        )
+        .await;
+        for (stage, detail) in soft_errors {
+            let _ = sender
+                .send(AgentEvent::Lifecycle(LifecycleEvent::MemoryFlowFailed {
+                    stage,
+                    detail,
+                }))
+                .await;
+        }
+        let _ = topic;
     }
 }
 
 /// The L3 retrieval budget for the default strategy.
 pub const DEFAULT_L3_BUDGET: usize = 3;
 
-/// The default strategy: layered assembly
-/// (L3 recall → L2 summaries → L1 window). Memory is the sole source;
-/// the conversation is not read directly.
+/// The default strategy: layered assembly (L3 recall → L2 summaries →
+/// L1 window). Memory is the sole source; per-layer read failures degrade
+/// the background visibly (`AssemblyOutput::failures`), never silently.
 #[derive(Default)]
 pub struct LayeredMemory;
 
@@ -91,64 +192,72 @@ impl ContextAssembly for LayeredMemory {
     fn assemble<'a>(
         &'a self,
         request: AssemblyRequest<'a>,
-    ) -> BoxFuture<'a, Result<Vec<Message>, AssemblyError>> {
+    ) -> BoxFuture<'a, Result<AssemblyOutput, AssemblyError>> {
         Box::pin(async move {
-            let conversation = request.conversation;
-            let memory = conversation.memory();
-            let subject = conversation.subject();
-            let conversation_id = conversation.id();
-            let topic = conversation.topic().unwrap_or_default();
-            let mut messages = Vec::new();
+            let mut output = AssemblyOutput::default();
 
             // L3 recall: independent System message (persona/memory
             // separation, P2).
-            let l3 = memory
-                .l3_retrieve(subject, request.input, &topic, DEFAULT_L3_BUDGET)
-                .unwrap_or_default();
-            if !l3.is_empty() {
-                let recall = l3
-                    .iter()
-                    .map(|fragment| format!("- {}", fragment.content))
-                    .collect::<Vec<_>>()
-                    .join("\n");
-                messages.push(Message::system(format!("Memory recall:\n{recall}")));
+            let topic = request.topic.to_string();
+            match request.memory.l3_retrieve(
+                request.subject,
+                request.input,
+                &topic,
+                DEFAULT_L3_BUDGET,
+            ) {
+                Ok(l3) if !l3.is_empty() => {
+                    let recall = l3
+                        .iter()
+                        .map(|fragment| format!("- {}", fragment.content))
+                        .collect::<Vec<_>>()
+                        .join("\n");
+                    output
+                        .messages
+                        .push(Message::system(format!("Memory recall:\n{recall}")));
+                }
+                Ok(_) => {}
+                Err(error) => output.failures.push(AssemblyFailure {
+                    stage: MemoryFlowStage::AssembleRead,
+                    detail: format!("l3 retrieve: {error}"),
+                }),
             }
 
             // L2: this conversation's earlier turns, summarized.
-            let l2 = memory.l2_read(subject, conversation_id).unwrap_or_default();
-            for block in l2 {
-                messages.push(Message::system(format!(
-                    "Earlier in this conversation:\n{}",
-                    block.content
-                )));
+            match request
+                .memory
+                .l2_read(request.subject, request.conversation_id)
+            {
+                Ok(l2) => {
+                    for block in l2 {
+                        output.messages.push(Message::system(format!(
+                            "Earlier in this conversation:\n{}",
+                            block.content
+                        )));
+                    }
+                }
+                Err(error) => output.failures.push(AssemblyFailure {
+                    stage: MemoryFlowStage::AssembleRead,
+                    detail: format!("l2 read: {error}"),
+                }),
             }
 
             // L1: this conversation's recent turns, verbatim, in order.
-            let l1 = memory
-                .l1_window(subject, conversation_id)
-                .unwrap_or_default();
-            for entry in l1 {
-                messages.extend(entry.messages);
+            match request
+                .memory
+                .l1_window(request.subject, request.conversation_id)
+            {
+                Ok(l1) => {
+                    for entry in l1 {
+                        output.messages.extend(entry.messages);
+                    }
+                }
+                Err(error) => output.failures.push(AssemblyFailure {
+                    stage: MemoryFlowStage::AssembleRead,
+                    detail: format!("l1 window: {error}"),
+                }),
             }
 
-            Ok(messages)
+            Ok(output)
         })
-    }
-}
-
-/// The pre-memory behavior as a built-in strategy: the conversation's
-/// full history, verbatim (the pre-memory behavior, kept as a built-in strategy).
-#[derive(Default)]
-pub struct ConversationHistory;
-
-impl ContextAssembly for ConversationHistory {
-    fn assemble<'a>(
-        &'a self,
-        request: AssemblyRequest<'a>,
-    ) -> BoxFuture<'a, Result<Vec<Message>, AssemblyError>> {
-        // The loop appends the user input itself; strategies return the
-        // context only.
-        let _ = request.input;
-        Box::pin(async move { Ok(request.conversation.messages()) })
     }
 }

@@ -18,13 +18,19 @@ async fn main() {
         .unwrap_or_else(|_| synonz_openai::DEFAULT_BASE_URL.into());
     let model_name = std::env::var("SYNONZ_OPENAI_MODEL").unwrap_or_else(|_| "gpt-4o-mini".into());
 
+    let runtime = synonz::SynonzRuntime::builder().build();
     let agent = synonz::Agent::builder()
+        .runtime(&runtime)
         .model(Client::new(base_url, api_key, model_name))
         .system_prompt("reply in one short sentence")
         .build()
         .expect("model is set");
+    let mut conv = synonz::Conversation::new(
+        &runtime,
+        &synonz::Subject::of(synonz::SubjectType::User, "demo"),
+    );
 
-    let mut run = agent.run("what is the weather like in beijing?");
+    let mut run = agent.run(conv.turn_input("what is the weather like in beijing?"));
     let mut delta_text = String::new();
     while let Some(event) = run.next().await {
         if let synonz::ExecutionEvent::Delta(synonz::ModelDelta::Text { text }) = event {

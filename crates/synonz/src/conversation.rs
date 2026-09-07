@@ -73,6 +73,21 @@ pub trait ConversationStore: Send + Sync + 'static {
     fn list(&self) -> Result<Vec<ConversationState>, ConversationStoreError>;
 }
 
+/// How a turn ended. Every turn enters the history, marked with its
+/// outcome (ADR-0015: the truth archive keeps the full audit trail —
+/// failures and cancellations are as much a part of the record as
+/// successes).
+#[non_exhaustive]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub enum TurnOutcome {
+    /// The run completed; carries the final output snapshot.
+    Completed(AgentOutput),
+    /// The run failed; carries the error.
+    Failed(crate::AgentError),
+    /// The run was cancelled; carries the reason.
+    Cancelled(crate::CancelReason),
+}
+
 /// One completed question-answer round of a conversation.
 #[non_exhaustive]
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -83,19 +98,49 @@ pub struct Turn {
     /// message and any tool round-trips — the context replayed into the
     /// model on later turns.
     pub messages: Vec<Message>,
-    /// The final result snapshot (`output.message` is the last assistant
-    /// message of `messages`; kept as a snapshot for O(1) access and type
-    /// consistency across `Answer::await` / `Run::await` / `Completed`).
-    pub output: AgentOutput,
+    /// How the turn ended (success carries the output snapshot; failures
+    /// and cancellations carry their reason — the full audit trail).
+    pub outcome: TurnOutcome,
 }
 
 impl Turn {
-    /// Creates a turn from its parts.
-    pub fn new(input: AgentInput, messages: Vec<Message>, output: AgentOutput) -> Self {
+    /// Records a completed turn with its final output.
+    pub fn completed(input: AgentInput, messages: Vec<Message>, output: AgentOutput) -> Self {
         Self {
             input,
             messages,
-            output,
+            outcome: TurnOutcome::Completed(output),
+        }
+    }
+
+    /// Records a failed turn (the messages built up to the failure are
+    /// the audit trail; the memory layers are not fed from failed turns).
+    pub fn failed(input: AgentInput, messages: Vec<Message>, error: crate::AgentError) -> Self {
+        Self {
+            input,
+            messages,
+            outcome: TurnOutcome::Failed(error),
+        }
+    }
+
+    /// Records a cancelled turn.
+    pub fn cancelled(
+        input: AgentInput,
+        messages: Vec<Message>,
+        reason: crate::CancelReason,
+    ) -> Self {
+        Self {
+            input,
+            messages,
+            outcome: TurnOutcome::Cancelled(reason),
+        }
+    }
+
+    /// The final output snapshot (completed turns only).
+    pub fn output(&self) -> Option<&AgentOutput> {
+        match &self.outcome {
+            TurnOutcome::Completed(output) => Some(output),
+            _ => None,
         }
     }
 }
@@ -117,8 +162,7 @@ pub struct Conversation {
 impl Clone for Conversation {
     /// Clones the handle (shared storage): the clone *is* the same
     /// conversation — this is how the execution task receives the
-    /// conversation it must record into. For an independent copy, see
-    /// [`Conversation::fork`].
+    /// conversation it must record into.
     fn clone(&self) -> Self {
         Self {
             id: self.id.clone(),
@@ -219,9 +263,10 @@ impl Conversation {
 
     /// Ends the conversation explicitly: runs the ConversationEnd flows
     /// (L2 → L3 promotion) when the policy is enabled. The trigger
-    /// authority belongs to the initiating side; the idle
-    /// timeout is the fallback for users who never call this.
-    pub fn end(&self) -> Vec<String> {
+    /// authority belongs to the initiating side; the idle timeout is the
+    /// fallback for users who never call this. Returns the flow failures
+    /// (typed by stage) — the caller decides how to surface them.
+    pub fn end(&self) -> Vec<(crate::event::MemoryFlowStage, String)> {
         let policies = self.runtime.memory_policies();
         crate::trigger::run_end_flows(self, &policies)
     }
@@ -258,29 +303,28 @@ impl Conversation {
 
     /// Builds the input object for the next turn, borrowing the conversation
     /// for the turn's duration (turns on one conversation are serialized by
-    /// the borrow checker).
+    /// the borrow checker). This is the only way to construct a
+    /// [`TurnInput`] — every execution belongs to a conversation.
     pub fn turn_input<'a>(&'a mut self, text: impl Into<String>) -> TurnInput<'a> {
         TurnInput {
             input: AgentInput::new(text),
-            conv: Some(self),
+            conv: self,
         }
     }
 
-    /// Records a completed turn.
-    ///
-    /// In the normal flow this is called internally at the execution's
-    /// epilogue (only completed turns are recorded; cancelled or failed
-    /// runs leave the history untouched). Manual calls serve conversation
-    /// construction (tests, imports, memory injection in S2c).
-    pub fn push_turn(&self, turn: Turn) {
+    /// Records a turn into the truth archive (the only write path; called
+    /// by the execution loop for completed, failed, and cancelled turns —
+    /// all enter the history, marked by [`Turn::outcome`]).
+    pub(crate) fn push_turn(&self, turn: Turn) -> Result<(), ConversationStoreError> {
         self.turns
             .lock()
             .unwrap_or_else(|p| p.into_inner())
             .push(turn);
         // Auto-save (High Level persistence): the state lands in the
         // registered store so `of` can restore it later. The in-process
-        // default store keeps this cheap.
-        let _ = self.persist();
+        // default store keeps this cheap. Failures surface (ADR-0015:
+        // persistence failures are never silent).
+        self.persist()
     }
 
     /// Persists the current state to the registered store.
@@ -295,38 +339,14 @@ impl Conversation {
         })
     }
 
-    /// Forks an independent copy of the conversation (deep copy of the
-    /// turn history at this moment) — the branching operation.
-    pub fn fork(&self) -> Conversation {
-        let turns = self.turns.lock().unwrap_or_else(|p| p.into_inner());
-        Conversation {
-            id: self.id.clone(),
-            subject: self.subject.clone(),
-            runtime: self.runtime.clone(),
-            turns: Arc::new(Mutex::new(turns.clone())),
-            topic: Arc::clone(&self.topic),
-        }
-    }
-
-    /// Drops the last `n` completed turns.
-    pub fn truncate_last(&self, n: usize) {
-        let mut turns = self.turns.lock().unwrap_or_else(|p| p.into_inner());
-        let new_len = turns.len().saturating_sub(n);
-        turns.truncate(new_len);
-        drop(turns);
-        let _ = self.persist();
-    }
-
-    /// Drops all turns.
-    pub fn clear(&self) {
-        self.turns.lock().unwrap_or_else(|p| p.into_inner()).clear();
-        let _ = self.persist();
-    }
-
     /// Serializes the conversation state (JSON) for application-side
-    /// storage. Restoration goes through
-    /// [`Conversation::of`][Conversation::of] (identity-level restore),
-    /// which is the primary path.
+    /// storage.
+    ///
+    /// Boundary (ADR-0015): what migrates is the **truth record** — the
+    /// turns. The memory layers (L2/L3) and topic state are the
+    /// `MemoryStore`'s own transactions and do not travel with an export;
+    /// restoration goes through [`Conversation::of`] with a store that
+    /// holds the state.
     pub fn export(&self) -> Result<Vec<u8>, serde_json::Error> {
         let turns = self.turns.lock().unwrap_or_else(|p| p.into_inner());
         serde_json::to_vec(&ConversationState {
@@ -353,11 +373,12 @@ impl std::fmt::Debug for Conversation {
 /// The per-turn input object: the question plus the conversation it belongs
 /// to (the parameter-object pattern).
 ///
-/// Constructed by [`Conversation::turn_input`]; `&str`, `String`, and
-/// [`AgentInput`] convert into a conversation-less one-shot input.
+/// Constructed only by [`Conversation::turn_input`] — every execution
+/// belongs to a conversation; there is no conversation-less execution
+/// (ADR-0015).
 pub struct TurnInput<'a> {
     input: AgentInput,
-    conv: Option<&'a Conversation>,
+    conv: &'a Conversation,
 }
 
 fn now_epoch() -> u64 {
@@ -368,32 +389,8 @@ fn now_epoch() -> u64 {
 }
 
 impl<'a> TurnInput<'a> {
-    pub(crate) fn into_parts(self) -> (AgentInput, Option<&'a Conversation>) {
+    pub(crate) fn into_parts(self) -> (AgentInput, &'a Conversation) {
         (self.input, self.conv)
-    }
-}
-
-impl From<&str> for TurnInput<'static> {
-    fn from(text: &str) -> Self {
-        TurnInput {
-            input: AgentInput::new(text),
-            conv: None,
-        }
-    }
-}
-
-impl From<String> for TurnInput<'static> {
-    fn from(text: String) -> Self {
-        TurnInput {
-            input: AgentInput::new(text),
-            conv: None,
-        }
-    }
-}
-
-impl From<AgentInput> for TurnInput<'static> {
-    fn from(input: AgentInput) -> Self {
-        TurnInput { input, conv: None }
     }
 }
 
@@ -411,7 +408,7 @@ mod tests {
     }
 
     fn text_turn(input: &str, answer: &str) -> Turn {
-        Turn::new(
+        Turn::completed(
             AgentInput::new(input),
             vec![Message::user(input), Message::assistant_text(answer)],
             AgentOutput::new(
@@ -443,8 +440,8 @@ mod tests {
         let (runtime, subject) = rt();
         let conv = Conversation::new(&runtime, &subject);
         assert!(conv.is_empty());
-        conv.push_turn(text_turn("a", "A"));
-        conv.push_turn(text_turn("b", "B"));
+        conv.push_turn(text_turn("a", "A")).expect("persist");
+        conv.push_turn(text_turn("b", "B")).expect("persist");
         assert_eq!(conv.len(), 2);
         assert_eq!(conv.turns().len(), 2);
         let messages = conv.messages();
@@ -454,23 +451,11 @@ mod tests {
     }
 
     #[test]
-    fn truncate_last_drops_whole_turns() {
-        let (runtime, subject) = rt();
-        let conv = Conversation::new(&runtime, &subject);
-        conv.push_turn(text_turn("a", "A"));
-        conv.push_turn(text_turn("b", "B"));
-        conv.push_turn(text_turn("c", "C"));
-        conv.truncate_last(2);
-        assert_eq!(conv.len(), 1);
-        assert_eq!(conv.turns()[0].input.text, "a");
-    }
-
-    #[test]
     fn of_restores_from_store_after_auto_save() {
         let (runtime, subject) = rt();
         let conv = Conversation::with_id(&runtime, &subject, "keep-me");
-        conv.push_turn(text_turn("a", "A"));
-        conv.push_turn(text_turn("b", "B"));
+        conv.push_turn(text_turn("a", "A")).expect("persist");
+        conv.push_turn(text_turn("b", "B")).expect("persist");
         // Auto-save on push_turn persisted the state; `of` restores it.
         let restored = Conversation::of(&runtime, &subject, "keep-me").expect("restore");
         assert_eq!(restored.id(), "keep-me");
@@ -488,7 +473,7 @@ mod tests {
     fn of_fails_for_wrong_subject() {
         let (runtime, subject) = rt();
         let conv = Conversation::with_id(&runtime, &subject, "shared-id");
-        conv.push_turn(text_turn("a", "A"));
+        conv.push_turn(text_turn("a", "A")).expect("persist");
         let other = Subject::of(SubjectType::User, "u-43");
         assert!(Conversation::of(&runtime, &other, "shared-id").is_err());
     }
@@ -511,7 +496,7 @@ mod tests {
         let runtime_a = SynonzRuntime::builder().build();
         let runtime_b = SynonzRuntime::builder().build();
         let conv = Conversation::with_id(&runtime_a, &subject, "isolated");
-        conv.push_turn(text_turn("a", "A"));
+        conv.push_turn(text_turn("a", "A")).expect("persist");
         assert!(Conversation::of(&runtime_b, &subject, "isolated").is_err());
         assert!(Conversation::of(&runtime_a, &subject, "isolated").is_ok());
     }

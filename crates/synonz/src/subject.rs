@@ -39,6 +39,22 @@ impl Subject {
         }
     }
 
+    /// Parses a subject from its `Display` form (`"User:id"`). The inverse
+    /// of [`Display`](std::fmt::Display) — used to rebuild subjects from
+    /// persisted state that stored the full identity string.
+    pub fn parse(display: &str) -> Option<Self> {
+        let (type_name, id) = display.split_once(':')?;
+        let subject_type = match type_name {
+            "User" => SubjectType::User,
+            "Agent" => SubjectType::Agent,
+            _ => return None,
+        };
+        Some(Self {
+            subject_type,
+            id: id.to_string(),
+        })
+    }
+
     /// The subject's type.
     pub fn subject_type(&self) -> SubjectType {
         self.subject_type

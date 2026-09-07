@@ -1,8 +1,8 @@
-//! S2a acceptance: the conversation entity and turn lifecycle.
+//! S2a acceptance: the conversation entity and turn lifecycle (0.2.0 form).
 //!
-//! Verifies multi-turn memory, commit timing (only completed turns are
-//! recorded), multi-agent continuation of one conversation, and
-//! export/import round-trips.
+//! Verifies multi-turn memory, the truth archive (all outcomes enter,
+//! marked with their outcome), multi-agent continuation of one
+//! conversation, and the export boundary.
 
 #![cfg(feature = "test-util")]
 
@@ -11,7 +11,7 @@ use std::time::Duration;
 use serde_json::json;
 use synonz::{
     Agent, ContentBlock, Conversation, MockModel, ModelStreamItem, Role, Subject, SubjectType,
-    SynonzRuntime, ToolCall, ToolContent, ToolResult,
+    SynonzRuntime, ToolCall, ToolContent, ToolResult, TurnOutcome,
 };
 
 /// Test fixture: a fresh runtime and a subject.
@@ -74,8 +74,9 @@ impl synonz::Tool for WeatherTool {
     }
 }
 
-fn weather_agent(scripts: usize) -> Agent {
+fn weather_agent(runtime: &SynonzRuntime, scripts: usize) -> Agent {
     Agent::builder()
+        .runtime(runtime)
         .model(weather_model(scripts))
         .tool(WeatherTool)
         .build()
@@ -84,8 +85,8 @@ fn weather_agent(scripts: usize) -> Agent {
 
 #[tokio::test]
 async fn multi_turn_conversation_remembers_history() {
-    let agent = weather_agent(2);
     let (runtime, subject) = env();
+    let agent = weather_agent(&runtime, 2);
     let mut conv = Conversation::new(&runtime, &subject);
 
     // Turn 1 (two model rounds inside one run): tool call + answer.
@@ -117,13 +118,13 @@ async fn multi_turn_conversation_remembers_history() {
                 )
             })
     }));
-    assert_eq!(first.output.text(), Some("sunny"));
+    assert_eq!(first.output().map(|o| o.text()), Some(Some("sunny")));
 }
 
 #[tokio::test]
 async fn conversation_flat_history_replays_into_the_model() {
-    let agent = weather_agent(2);
     let (runtime, subject) = env();
+    let agent = weather_agent(&runtime, 2);
     let mut conv = Conversation::new(&runtime, &subject);
 
     let _ = agent.run(conv.turn_input("one")).await.unwrap();
@@ -139,22 +140,31 @@ async fn conversation_flat_history_replays_into_the_model() {
 }
 
 #[tokio::test]
-async fn cancelled_turns_are_not_recorded() {
+async fn cancelled_turns_enter_the_history_marked() {
+    let (runtime, subject) = env();
     let agent = Agent::builder()
+        .runtime(&runtime)
         .model(MockModel::hanging())
         .build()
         .unwrap();
-    let (runtime, subject) = env();
     let mut conv = Conversation::new(&runtime, &subject);
 
-    let run = agent.run(conv.turn_input("starts then cancels"));
-    drop(run); // cancel via drop
+    let execution = agent.run(conv.turn_input("starts then cancels"));
+    drop(execution); // cancel via drop
     tokio::time::sleep(Duration::from_millis(50)).await;
-    assert!(conv.is_empty(), "cancelled runs must not record a turn");
+
+    // ADR-0015: the truth archive keeps the full audit trail — the
+    // cancelled turn is recorded, marked with its outcome.
+    let turns = conv.turns();
+    assert_eq!(turns.len(), 1, "the cancelled turn enters the history");
+    assert!(matches!(
+        turns[0].outcome,
+        TurnOutcome::Cancelled(synonz::CancelReason::UserRequested)
+    ));
 }
 
 #[tokio::test]
-async fn failed_turns_are_not_recorded() {
+async fn failed_turns_enter_the_history_marked() {
     struct FailingModel;
     impl synonz::Model for FailingModel {
         fn stream(
@@ -168,8 +178,12 @@ async fn failed_turns_are_not_recorded() {
             })
         }
     }
-    let agent = Agent::builder().model(FailingModel).build().unwrap();
     let (runtime, subject) = env();
+    let agent = Agent::builder()
+        .runtime(&runtime)
+        .model(FailingModel)
+        .build()
+        .unwrap();
     let mut conv = Conversation::new(&runtime, &subject);
 
     let result = agent.run(conv.turn_input("fails")).await;
@@ -179,17 +193,35 @@ async fn failed_turns_are_not_recorded() {
             synonz::ModelError::Transport { .. }
         ))
     ));
-    assert!(conv.is_empty(), "failed runs must not record a turn");
+    let turns = conv.turns();
+    assert_eq!(turns.len(), 1, "the failed turn enters the history");
+    assert!(matches!(
+        turns[0].outcome,
+        TurnOutcome::Failed(synonz::AgentError::Model(_))
+    ));
+    // The memory layers are not fed from failed turns (only success turns
+    // write L1).
+    assert_eq!(
+        runtime
+            .memory()
+            .l1_len(&subject, conv.id())
+            .expect("l1 len"),
+        0
+    );
 }
 
 #[tokio::test]
 async fn multiple_agents_continue_one_conversation() {
     // A research-flavored agent starts; a writer-flavored agent continues
     // the same conversation.
-    let researcher = weather_agent(1);
-    let writer = Agent::builder().model(weather_model(1)).build().unwrap();
-
     let (runtime, subject) = env();
+    let researcher = weather_agent(&runtime, 1);
+    let writer = Agent::builder()
+        .runtime(&runtime)
+        .model(weather_model(1))
+        .build()
+        .unwrap();
+
     let mut conv = Conversation::new(&runtime, &subject);
     let first = researcher
         .run(conv.turn_input("research the weather"))
@@ -202,28 +234,16 @@ async fn multiple_agents_continue_one_conversation() {
     assert_eq!(conv.len(), 2, "both agents' turns live in one conversation");
 }
 
-#[tokio::test]
-async fn one_shot_input_stays_conversation_less() {
-    let agent = weather_agent(1);
-    let output = agent.run("no conversation here").await.unwrap();
-    assert_eq!(output.text(), Some("sunny"));
-}
-
 #[test]
-fn manual_push_and_management() {
+fn export_round_trips_the_truth_record() {
     let (runtime, subject) = env();
-    let conv = Conversation::with_id(&runtime, &subject, "manual");
-    let turn = synonz::Turn::new(
-        synonz::AgentInput::new("hi"),
-        vec![synonz::Message::user("hi")],
-        synonz::AgentOutput::new(
-            synonz::Message::assistant_text("hello"),
-            synonz::TokenUsage::new(0, 0),
-        ),
-    );
-    conv.push_turn(turn);
-    assert_eq!(conv.len(), 1);
-    conv.truncate_last(1);
-    assert!(conv.is_empty());
-    conv.clear();
+    let conv = Conversation::with_id(&runtime, &subject, "exported");
+    let turns_before = conv.export().expect("export");
+
+    // The export holds the truth record; restoration goes through a store
+    // that holds the state (`of`). The memory layers do not travel with
+    // the export — that is the MemoryStore's own transaction.
+    let state: synonz::ConversationState = serde_json::from_slice(&turns_before).unwrap();
+    assert_eq!(state.id, "exported");
+    assert!(state.turns.is_empty());
 }

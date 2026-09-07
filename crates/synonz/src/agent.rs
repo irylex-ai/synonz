@@ -14,7 +14,9 @@
 //!
 //! ```no_run
 //! use futures::StreamExt;
-//! use synonz::{Agent, ExecutionEvent, Model, ModelRequest};
+//! use synonz::{
+//!     Agent, ExecutionEvent, Model, ModelRequest, Subject, SubjectType, SynonzRuntime,
+//! };
 //!
 //! struct EchoModel;
 //!
@@ -33,13 +35,19 @@
 //! }
 //!
 //! # async fn demo() {
+//! let runtime = SynonzRuntime::builder().build();
+//! let mut conv = synonz::Conversation::new(
+//!     &runtime,
+//!     &Subject::of(SubjectType::User, "demo"),
+//! );
 //! let agent = Agent::builder()
+//!     .runtime(&runtime)
 //!     .model(EchoModel)
 //!     .system_prompt("be friendly")
 //!     .build()
 //!     .expect("model is set");
 //!
-//! let mut execution = agent.run("hi");
+//! let mut execution = agent.run(conv.turn_input("hi"));
 //! while let Some(event) = execution.next().await {
 //!     if let ExecutionEvent::Completed(output) = event {
 //!         assert_eq!(output.text(), Some("hello!"));
@@ -59,16 +67,16 @@ use tokio::sync::mpsc;
 
 use crate::CancellationToken;
 use crate::cancel::{CancelCore, CancelHandle, CancelOutcome};
-use crate::context::Context;
 use crate::conversation::{Conversation, Turn, TurnInput};
 use crate::error::{AgentError, ModelError};
 use crate::event::{
-    AgentEvent, CallPurpose, CancelReason, ExecutionEvent, LifecycleEvent, ModelEvent, TokenUsage,
-    ToolEvent,
+    AgentEvent, CallPurpose, CancelReason, ExecutionEvent, LifecycleEvent, MemoryFlowStage,
+    ModelEvent, TokenUsage, ToolEvent,
 };
 use crate::io::{AgentInput, AgentOutput};
 use crate::message::{CallId, ContentBlock, Message, ToolCall, ToolResult};
-use crate::model::{Model, ModelParams, ModelRequest, ModelStreamItem};
+use crate::model::{Model, ModelRequest, ModelStreamItem};
+use crate::runtime::SynonzRuntime;
 use crate::tool::{Tool, ToolContext, ToolSpec};
 
 /// Default round budget: how many reasoning rounds a run may use before it
@@ -97,6 +105,7 @@ const REFLECTION_SYSTEM_PROMPT: &str = "You are a reflective agent. Work in thre
 /// documented [`DEFAULT_MAX_ROUNDS`] budget.
 #[derive(Default)]
 pub struct AgentBuilder {
+    runtime: Option<SynonzRuntime>,
     model: Option<Arc<dyn Model>>,
     tools: Vec<Arc<dyn Tool>>,
     system_prompt: Option<String>,
@@ -107,6 +116,14 @@ impl AgentBuilder {
     /// Starts building an agent.
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Sets the runtime (required): the environment the agent lives in.
+    /// The agent and every conversation it executes against must come from
+    /// the same runtime (enforced at the execution entry).
+    pub fn runtime(mut self, runtime: &SynonzRuntime) -> Self {
+        self.runtime = Some(runtime.clone());
+        self
     }
 
     /// Sets the model (required). Accepts a concrete model or an
@@ -175,35 +192,40 @@ impl AgentBuilder {
 
     /// Assembles the agent.
     ///
-    /// Fails with [`AgentError::InvalidConfiguration`] when no model was
-    /// set.
+    /// Fails with [`AgentError::InvalidConfiguration`] when no model or no
+    /// runtime was set.
     pub fn build(self) -> Result<Agent, AgentError> {
         let model = self.model.ok_or_else(|| AgentError::InvalidConfiguration {
             message: "a model is required".into(),
         })?;
+        let runtime = self
+            .runtime
+            .ok_or_else(|| AgentError::InvalidConfiguration {
+                message: "a runtime is required".into(),
+            })?;
         Ok(Agent {
+            runtime,
             model,
             tools: self.tools.into(),
             system_prompt: self.system_prompt,
             max_rounds: self.max_rounds.unwrap_or(DEFAULT_MAX_ROUNDS),
             default_timeout: None,
-            context: None,
         })
     }
 }
 
-/// A stateless agent configuration: model + tools + system prompt + budget.
-///
-/// Cloning is cheap (shared arcs). All run state lives inside a run; the
-/// same agent can drive many concurrent runs independently.
+/// The agent's configuration: model + tools + system prompt + budget, plus
+/// the runtime it lives in (ADR-0015: the agent knows its container; it
+/// holds no run state — every run's state lives inside the run, and the
+/// same agent can drive many concurrent runs independently).
 #[derive(Clone)]
 pub struct Agent {
+    runtime: SynonzRuntime,
     model: Arc<dyn Model>,
     tools: Arc<[Arc<dyn Tool>]>,
     system_prompt: Option<String>,
     max_rounds: u32,
     default_timeout: Option<Duration>,
-    context: Option<Arc<Context>>,
 }
 
 impl Agent {
@@ -218,13 +240,16 @@ impl Agent {
     /// Injects nothing — the default loop *is* the reasoning-acting loop,
     /// and this constructor exists so developers state the pattern
     /// explicitly. Register tools via the returned builder as usual.
-    pub fn react<M, I, T>(model: M, tools: I) -> AgentBuilder
+    pub fn react<M, I, T>(runtime: &SynonzRuntime, model: M, tools: I) -> AgentBuilder
     where
         M: Model + 'static,
         I: IntoIterator<Item = T>,
         T: Tool + 'static,
     {
-        AgentBuilder::new().model(model).tools(tools)
+        AgentBuilder::new()
+            .runtime(runtime)
+            .model(model)
+            .tools(tools)
     }
 
     /// The research pattern as a preset: multi-round search, verification,
@@ -247,13 +272,14 @@ impl Agent {
     /// answer and cite sources for factual claims. State uncertainty
     /// explicitly when evidence is thin or conflicting.
     /// ```
-    pub fn research<M, I, T>(model: M, tools: I) -> AgentBuilder
+    pub fn research<M, I, T>(runtime: &SynonzRuntime, model: M, tools: I) -> AgentBuilder
     where
         M: Model + 'static,
         I: IntoIterator<Item = T>,
         T: Tool + 'static,
     {
         AgentBuilder::new()
+            .runtime(runtime)
             .model(model)
             .tools(tools)
             .system_prompt(RESEARCH_SYSTEM_PROMPT)
@@ -278,26 +304,30 @@ impl Agent {
     /// produce the improved final answer. Deliver only the final answer
     /// unless the user asks to see the intermediate passes.
     /// ```
-    pub fn reflection<M: Model + 'static>(model: M) -> AgentBuilder {
+    pub fn reflection<M: Model + 'static>(runtime: &SynonzRuntime, model: M) -> AgentBuilder {
         AgentBuilder::new()
+            .runtime(runtime)
             .model(model)
             .system_prompt(REFLECTION_SYSTEM_PROMPT)
     }
 
     /// Runs the agent and returns the run handle: the full event narrative.
     ///
-    /// Await the handle for the final output ([`AgentOutput`]) or iterate it
-    /// for the complete event stream. Dropping it (or calling
-    /// [`Run::cancel`]) cancels the run — cooperative interruption at the
-    /// loop's await points.
     /// Runs the agent: the single execution face (ADR-0014).
     ///
     /// Returns an [`Execution`] — a three-in-one handle (narrative
     /// stream of [`ExecutionEvent`]s, final-output Future, controller).
     /// Dropping it (or calling [`Execution::cancel`]) cancels the run —
     /// cooperative interruption at the loop's await points.
+    ///
+    /// # Panics
+    ///
+    /// Panics when the conversation belongs to a different runtime than
+    /// the agent — cross-runtime mixing is a programmer error; build both
+    /// from the same [`SynonzRuntime`].
     pub fn run<'a>(&self, input: impl Into<TurnInput<'a>>) -> Execution<'a> {
         let (input, conv) = input.into().into_parts();
+        self.check_same_runtime(conv);
         let runner = self.spawn_runner(input, conv, CancelCore::new());
         Execution {
             runner,
@@ -310,12 +340,15 @@ impl Agent {
 
     /// Runs the agent with an externally owned cancellation token: when the
     /// token fires, the run cancels with [`CancelReason::UserRequested`].
+    ///
+    /// Panics on cross-runtime mixing, like [`Agent::run`].
     pub fn run_with<'a>(
         &self,
         input: impl Into<TurnInput<'a>>,
         token: CancellationToken,
     ) -> Execution<'a> {
         let (input, conv) = input.into().into_parts();
+        self.check_same_runtime(conv);
         let runner = self.spawn_runner(input, conv, CancelCore::child_of(&token));
         Execution {
             runner,
@@ -326,35 +359,33 @@ impl Agent {
     /// Sets a default time budget applied to every run started afterwards.
     ///
     /// The budget is enforced as a [`CancelReason::Timeout`] cancellation;
-    /// per-run [`Run::with_timeout`] overrides it.
+    /// per-run [`Execution::with_timeout`] overrides it.
     pub fn with_timeout(mut self, duration: Duration) -> Self {
         self.default_timeout = Some(duration);
         self
     }
 
-    /// Attaches the narrative background (a conversation's
-    /// [`Context`], from
-    /// [`Conversation::context`][crate::Conversation::context]): the agent
-    /// executes within it — the background makes the stateless agent
-    /// stateful.
-    ///
-    /// With a context, every `run` assembles the send view freshly
-    /// through the context's assembly strategy (memory layers). Without
-    /// one, the pre-memory behavior applies (the conversation's history,
-    /// verbatim).
-    pub fn with_context(mut self, context: Context) -> Self {
-        self.context = Some(Arc::new(context));
-        self
+    /// Rejects cross-runtime mixing loudly (a programmer error): the agent
+    /// and the conversation must come from the same [`SynonzRuntime`]
+    /// (ADR-0015 — "fatal and silent" became "mismatch reports loudly").
+    fn check_same_runtime(&self, conversation: &Conversation) {
+        assert_eq!(
+            self.runtime.id(),
+            conversation.runtime().id(),
+            "conversation '{}' belongs to a different runtime than the agent; \
+             build both from the same SynonzRuntime",
+            conversation.id()
+        );
     }
 
     /// Spawns the loop task and wraps its shared execution state in an
-    /// [`AgentRunner`]. Both `Run` and `Answer` are built on top of this —
-    /// they are peers over the same machinery, applying the agent's
-    /// default time budget when one is set.
+    /// [`AgentRunner`] — the machinery both `Execution` (now) and the
+    /// Observer bypass (ADR-0016) hang off. Applies the agent's default
+    /// time budget when one is set.
     fn spawn_runner(
         &self,
         input: AgentInput,
-        conv: Option<&Conversation>,
+        conv: &Conversation,
         core: Arc<CancelCore>,
     ) -> AgentRunner {
         let (sender, receiver) = mpsc::channel(1);
@@ -363,8 +394,7 @@ impl Agent {
             tools: Arc::clone(&self.tools),
             system_prompt: self.system_prompt.clone(),
             max_rounds: self.max_rounds,
-            conversation: conv.cloned(),
-            context: self.context.clone(),
+            conversation: conv.clone(),
         };
         tokio::spawn(task.execute(input, Arc::clone(&core), sender));
         let runner = AgentRunner {
@@ -516,6 +546,7 @@ fn execution_event(event: AgentEvent) -> Option<ExecutionEvent> {
             Some(ExecutionEvent::Cancelled(reason))
         }
         AgentEvent::Lifecycle(LifecycleEvent::Started { .. })
+        | AgentEvent::Lifecycle(LifecycleEvent::MemoryFlowFailed { .. })
         | AgentEvent::Model(ModelEvent::Requested { .. })
         | AgentEvent::Model(ModelEvent::Responded { .. }) => None,
     }
@@ -536,7 +567,7 @@ pub struct Execution<'a> {
     // Serialization guard: while the handle is alive the conversation
     // cannot start a competing turn (borrow checker). The turn write
     // itself happens inside the execution.
-    _conv: Option<&'a Conversation>,
+    _conv: &'a Conversation,
 }
 
 impl Execution<'_> {
@@ -611,8 +642,7 @@ struct AgentLoopTask {
     tools: Arc<[Arc<dyn Tool>]>,
     system_prompt: Option<String>,
     max_rounds: u32,
-    conversation: Option<Conversation>,
-    context: Option<Arc<Context>>,
+    conversation: Conversation,
 }
 
 impl AgentLoopTask {
@@ -622,46 +652,87 @@ impl AgentLoopTask {
         core: Arc<CancelCore>,
         sender: mpsc::Sender<AgentEvent>,
     ) {
-        // Emit helper: when the consumer is gone the run simply ends.
-        macro_rules! emit {
-            ($event:expr) => {
-                if sender.send($event).await.is_err() {
-                    return; // consumer dropped; nothing left to narrate
-                }
-            };
-        }
-
         let mut total_usage = TokenUsage::new(0, 0);
 
-        emit!(AgentEvent::Lifecycle(LifecycleEvent::Started {
-            input: input.clone(),
-        }));
+        // Started: a plain send. A consumer already gone here is caught by
+        // the cancelled check right after the turn's frame is built below.
+        let _ = sender
+            .send(AgentEvent::Lifecycle(LifecycleEvent::Started {
+                input: input.clone(),
+            }))
+            .await;
 
+        // The background engine, derived from the (mandatory) conversation.
+        let context = self.conversation.context();
+
+        // Moment 1: assemble. Memory reads that fail degrade the background
+        // visibly — the run continues with the layers that succeeded. (The
+        // failure events are plain sends: the turn's frame is not built yet;
+        // a consumer gone at this point is caught below.)
+        let assembled = context.assemble(&input.text).await;
+        for failure in &assembled.failures {
+            let _ = sender
+                .send(AgentEvent::Lifecycle(LifecycleEvent::MemoryFlowFailed {
+                    stage: failure.stage.clone(),
+                    detail: failure.detail.clone(),
+                }))
+                .await;
+        }
         let mut messages = Vec::new();
         if let Some(prompt) = &self.system_prompt {
             messages.push(Message::system(prompt.clone()));
         }
-        // Seed the narrative background: the attached context's assembly
-        // (fresh per ask), or the pre-memory fallback (history verbatim).
-        if let Some(context) = &self.context {
-            match context.assemble(&input.text).await {
-                Ok(assembled) => messages.extend(assembled),
-                Err(error) => {
-                    emit!(AgentEvent::Lifecycle(LifecycleEvent::Failed {
-                        error: crate::AgentError::InvalidConfiguration {
-                            message: format!("context assembly failed: {error}"),
-                        },
-                    }));
-                    return;
-                }
-            }
-        } else if let Some(conversation) = &self.conversation {
-            messages.extend(conversation.messages());
-        }
-        // Everything from here on belongs to this turn (recorded on
-        // completion; cancelled or failed runs record nothing).
+        messages.extend(assembled.messages);
+        // Everything from here on belongs to this turn (all outcomes enter
+        // the truth archive, marked; only success feeds the memory layers).
         let base_len = messages.len();
         messages.push(Message::user(input.text.clone()));
+
+        // Truth-archive helper: every outcome enters the history, marked
+        // (ADR-0015). Persistence failures surface as MemoryFlowFailed
+        // events — never silent.
+        macro_rules! record {
+            ($turn:expr) => {
+                if let Err(error) = self.conversation.push_turn($turn) {
+                    let _ = sender
+                        .send(AgentEvent::Lifecycle(LifecycleEvent::MemoryFlowFailed {
+                            stage: MemoryFlowStage::Archive,
+                            detail: format!("conversation auto-save failed: {error}"),
+                        }))
+                        .await;
+                }
+            };
+        }
+
+        // Cancelled before the loop (token/drop races with startup): the
+        // frame exists now, so the turn is archived and the terminal event
+        // still closes the stream (the terminal invariant holds even for a
+        // run that never reached the reasoning loop).
+        if core.is_cancelled() {
+            let outcome = core.cancelled().await;
+            record!(Turn::cancelled(
+                input.clone(),
+                messages[base_len..].to_vec(),
+                cancel_reason(outcome),
+            ));
+            let _ = sender.send(cancelled_event(outcome)).await;
+            return;
+        }
+
+        // Emit helper: when the consumer is gone (drop-cancel), the turn is
+        // archived before the run ends — then the loop simply stops.
+        macro_rules! emit {
+            ($event:expr) => {
+                if sender.send($event).await.is_err() {
+                    record!(Turn::cancelled(
+                        input.clone(),
+                        messages[base_len..].to_vec(),
+                        CancelReason::UserRequested,
+                    ));
+                    return; // consumer dropped; archive then stop narrating
+                }
+            };
+        }
 
         let tool_specs: Vec<ToolSpec> = self
             .tools
@@ -675,21 +746,29 @@ impl AgentLoopTask {
                 messages: messages.clone(),
             }));
 
-            let request =
-                ModelRequest::new(messages.clone(), tool_specs.clone(), ModelParams::default());
+            let request = ModelRequest::new(messages.clone(), tool_specs.clone());
 
             // Suspension point 1: starting the model call.
             let mut stream = tokio::select! {
                 outcome = core.cancelled() => {
+                    record!(Turn::cancelled(
+                        input.clone(),
+                        messages[base_len..].to_vec(),
+                        cancel_reason(outcome),
+                    ));
                     emit!(cancelled_event(outcome));
                     return;
                 }
                 result = self.model.stream(request) => match result {
                     Ok(stream) => stream,
                     Err(error) => {
-                        emit!(AgentEvent::Lifecycle(LifecycleEvent::Failed {
-                            error: AgentError::Model(error),
-                        }));
+                        let error = AgentError::Model(error);
+                        record!(Turn::failed(
+                            input.clone(),
+                            messages[base_len..].to_vec(),
+                            error.clone(),
+                        ));
+                        emit!(AgentEvent::Lifecycle(LifecycleEvent::Failed { error }));
                         return;
                     }
                 }
@@ -699,6 +778,11 @@ impl AgentLoopTask {
             let (message, usage) = loop {
                 let item = tokio::select! {
                     outcome = core.cancelled() => {
+                        record!(Turn::cancelled(
+                            input.clone(),
+                            messages[base_len..].to_vec(),
+                            cancel_reason(outcome),
+                        ));
                         emit!(cancelled_event(outcome));
                         return;
                     }
@@ -708,18 +792,26 @@ impl AgentLoopTask {
                             continue;
                         }
                         Some(ModelStreamItem::Failed(error)) => {
-                            emit!(AgentEvent::Lifecycle(LifecycleEvent::Failed {
-                                error: AgentError::Model(error),
-                            }));
+                            let error = AgentError::Model(error);
+                            record!(Turn::failed(
+                                input.clone(),
+                                messages[base_len..].to_vec(),
+                                error.clone(),
+                            ));
+                            emit!(AgentEvent::Lifecycle(LifecycleEvent::Failed { error }));
                             return;
                         }
                         Some(ModelStreamItem::Finish { message, usage }) => (message, usage),
                         None => {
-                            emit!(AgentEvent::Lifecycle(LifecycleEvent::Failed {
-                                error: AgentError::Model(ModelError::Api {
-                                    message: "model stream ended without a finish item".into(),
-                                }),
-                            }));
+                            let error = AgentError::Model(ModelError::Api {
+                                message: "model stream ended without a finish item".into(),
+                            });
+                            record!(Turn::failed(
+                                input.clone(),
+                                messages[base_len..].to_vec(),
+                                error.clone(),
+                            ));
+                            emit!(AgentEvent::Lifecycle(LifecycleEvent::Failed { error }));
                             return;
                         }
                     }
@@ -740,32 +832,23 @@ impl AgentLoopTask {
 
             if calls.is_empty() {
                 let output = AgentOutput::new(message, total_usage);
-                if let Some(conversation) = &self.conversation {
-                    conversation.push_turn(Turn::new(
-                        input.clone(),
+                // Truth archive: the completed turn.
+                record!(Turn::completed(
+                    input.clone(),
+                    messages[base_len..].to_vec(),
+                    output.clone(),
+                ));
+                // Moments 2 + 3: archive + compress the background. The
+                // summary call emits ContextManagement events before the
+                // terminal — visible, not magic.
+                context
+                    .on_turn_completed(
+                        &*self.model,
+                        &input.text,
                         messages[base_len..].to_vec(),
-                        output.clone(),
-                    ));
-                    // Post-turn memory flows (M11b): L1 write, topic
-                    // tracking, mandatory floors, stacked policies. The
-                    // summary call emits ContextManagement events before
-                    // the terminal event — visible, not magic.
-                    let runtime = conversation.runtime().clone();
-                    let policies = runtime.memory_policies();
-                    let detector = runtime.topic_detector();
-                    let _soft = crate::trigger::run_post_turn_flows(
-                        crate::trigger::PostTurn {
-                            model: &*self.model,
-                            conversation,
-                            policies: &policies,
-                            detector: &*detector,
-                            input: &input.text,
-                            messages: messages[base_len..].to_vec(),
-                        },
                         &sender,
                     )
                     .await;
-                }
                 emit!(AgentEvent::Lifecycle(LifecycleEvent::Completed {
                     response: output,
                 }));
@@ -780,8 +863,16 @@ impl AgentLoopTask {
             // events, deterministic call-order conversation.
             emit_all_requested(&sender, &calls).await;
             let results = match self.run_tools_parallel(&calls, &core, &sender).await {
-                Some(results) => results,
-                None => return, // cancelled while tools ran
+                Ok(results) => results,
+                Err(outcome) => {
+                    record!(Turn::cancelled(
+                        input.clone(),
+                        messages[base_len..].to_vec(),
+                        cancel_reason(outcome),
+                    ));
+                    emit!(cancelled_event(outcome));
+                    return;
+                }
             };
             for call in &calls {
                 let result = results
@@ -791,20 +882,26 @@ impl AgentLoopTask {
             }
         }
 
+        record!(Turn::failed(
+            input.clone(),
+            messages[base_len..].to_vec(),
+            AgentError::MaxRoundsExceeded,
+        ));
         emit!(AgentEvent::Lifecycle(LifecycleEvent::Failed {
             error: AgentError::MaxRoundsExceeded,
         }));
     }
 
     /// Executes all calls in parallel; emits `CallCompleted` in completion
-    /// order; returns results keyed by call id. Returns `None` when
-    /// cancelled mid-execution.
+    /// order; returns results keyed by call id. Returns `Err(outcome)` when
+    /// cancelled while tools ran (the caller records the turn and emits the
+    /// terminal event).
     async fn run_tools_parallel(
         &self,
         calls: &[ToolCall],
         core: &Arc<CancelCore>,
         sender: &mpsc::Sender<AgentEvent>,
-    ) -> Option<std::collections::HashMap<CallId, ToolResult>> {
+    ) -> Result<std::collections::HashMap<CallId, ToolResult>, CancelOutcome> {
         let mut set = tokio::task::JoinSet::new();
         for call in calls {
             let tool = self.tools.iter().find(|t| t.name() == call.name).cloned();
@@ -834,9 +931,7 @@ impl AgentLoopTask {
             let joined = tokio::select! {
                 outcome = core.cancelled() => {
                     set.abort_all();
-                    // Best effort: the consumer may already be gone.
-                    let _ = sender.send(cancelled_event(outcome)).await;
-                    return None;
+                    return Err(outcome);
                 }
                 joined = set.join_next() => joined,
             };
@@ -850,7 +945,9 @@ impl AgentLoopTask {
                         .await
                         .is_err()
                     {
-                        return None; // consumer gone
+                        // The consumer is gone: dropping the handle fired the
+                        // cancel signal, so this resolves as user-requested.
+                        return Err(CancelOutcome::Signal);
                     }
                     results.insert(call_id, result);
                 }
@@ -873,7 +970,7 @@ impl AgentLoopTask {
                             .await
                             .is_err()
                         {
-                            return None;
+                            return Err(CancelOutcome::Signal);
                         }
                         results.insert(call.call_id.clone(), result);
                     }
@@ -881,7 +978,7 @@ impl AgentLoopTask {
                 None => break, // set drained
             }
         }
-        Some(results)
+        Ok(results)
     }
 }
 
@@ -910,12 +1007,17 @@ fn tool_calls_of(message: &Message) -> Vec<ToolCall> {
         .collect()
 }
 
-fn cancelled_event(outcome: CancelOutcome) -> AgentEvent {
-    let reason = match outcome {
+fn cancel_reason(outcome: CancelOutcome) -> CancelReason {
+    match outcome {
         CancelOutcome::Timeout => CancelReason::Timeout,
         CancelOutcome::Signal => CancelReason::UserRequested,
-    };
-    AgentEvent::Lifecycle(LifecycleEvent::Cancelled { reason })
+    }
+}
+
+fn cancelled_event(outcome: CancelOutcome) -> AgentEvent {
+    AgentEvent::Lifecycle(LifecycleEvent::Cancelled {
+        reason: cancel_reason(outcome),
+    })
 }
 
 #[cfg(test)]
@@ -969,7 +1071,8 @@ mod preset_tests {
 
     #[test]
     fn react_is_the_bare_default() {
-        let builder = Agent::react(DummyModel, dummy_tools());
+        let runtime = crate::runtime::SynonzRuntime::builder().build();
+        let builder = Agent::react(&runtime, DummyModel, dummy_tools());
         assert_eq!(builder.system_prompt, None);
         assert_eq!(builder.max_rounds, None);
         assert_eq!(builder.tools.len(), 2);
@@ -977,7 +1080,8 @@ mod preset_tests {
 
     #[test]
     fn research_sets_prompt_and_round_budget() {
-        let builder = Agent::research(DummyModel, dummy_tools());
+        let runtime = crate::runtime::SynonzRuntime::builder().build();
+        let builder = Agent::research(&runtime, DummyModel, dummy_tools());
         assert_eq!(
             builder.system_prompt.as_deref(),
             Some(RESEARCH_SYSTEM_PROMPT)
@@ -988,7 +1092,8 @@ mod preset_tests {
 
     #[test]
     fn reflection_sets_prompt_without_tools() {
-        let builder = Agent::reflection(DummyModel);
+        let runtime = crate::runtime::SynonzRuntime::builder().build();
+        let builder = Agent::reflection(&runtime, DummyModel);
         assert_eq!(
             builder.system_prompt.as_deref(),
             Some(REFLECTION_SYSTEM_PROMPT)
@@ -1007,7 +1112,8 @@ mod preset_tests {
 
     #[test]
     fn extend_works_on_top_of_presets() {
-        let builder = Agent::research(DummyModel, dummy_tools())
+        let runtime = crate::runtime::SynonzRuntime::builder().build();
+        let builder = Agent::research(&runtime, DummyModel, dummy_tools())
             .extend_system_prompt("prefer chinese sources");
         assert_eq!(
             builder.system_prompt.as_deref(),
@@ -1017,7 +1123,8 @@ mod preset_tests {
 
     #[test]
     fn system_prompt_overrides_presets() {
-        let builder = Agent::research(DummyModel, dummy_tools()).system_prompt("custom");
+        let runtime = crate::runtime::SynonzRuntime::builder().build();
+        let builder = Agent::research(&runtime, DummyModel, dummy_tools()).system_prompt("custom");
         assert_eq!(builder.system_prompt.as_deref(), Some("custom"));
     }
 
@@ -1025,12 +1132,17 @@ mod preset_tests {
     #[tokio::test]
     async fn research_preset_drives_a_full_run() {
         use crate::mock::MockModel;
+        let runtime = crate::runtime::SynonzRuntime::builder().build();
+        let mut conv =
+            crate::Conversation::new(&runtime, &crate::Subject::of(crate::SubjectType::User, "u"));
         let model = MockModel::new(vec![vec![ModelStreamItem::Finish {
             message: Message::assistant_text("found the answer"),
             usage: TokenUsage::new(1, 1),
         }]]);
-        let agent = Agent::research(model, dummy_tools()).build().unwrap();
-        let output = agent.run("research x").await.unwrap();
+        let agent = Agent::research(&runtime, model, dummy_tools())
+            .build()
+            .unwrap();
+        let output = agent.run(conv.turn_input("research x")).await.unwrap();
         assert_eq!(output.text(), Some("found the answer"));
     }
 }

@@ -112,12 +112,21 @@ async fn main() {
     }
 
     // ... and hand it to an agent.
+    let runtime = synonz::SynonzRuntime::builder().build();
+    let mut conv = synonz::Conversation::new(
+        &runtime,
+        &synonz::Subject::of(synonz::SubjectType::User, "demo"),
+    );
     let agent = Agent::builder()
+        .runtime(&runtime)
         .model(ScriptedModel)
         .tools(tools)
         .build()
         .expect("model is set");
-    let output = agent.run("say hi").await.expect("run completes");
+    let output = agent
+        .run(conv.turn_input("say hi"))
+        .await
+        .expect("run completes");
     println!("agent run: {:?}", output.text());
 
     drop(bridge);

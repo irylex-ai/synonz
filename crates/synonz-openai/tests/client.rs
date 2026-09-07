@@ -24,11 +24,7 @@ const SSE_BODY: &str = concat!(
 );
 
 fn smoke_request() -> ModelRequest {
-    ModelRequest::new(
-        vec![Message::user("Reply with exactly: pong")],
-        vec![],
-        synonz::ModelParams::default().with_max_tokens(8),
-    )
+    ModelRequest::new(vec![Message::user("Reply with exactly: pong")], vec![])
 }
 
 #[tokio::test]

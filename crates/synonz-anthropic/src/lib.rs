@@ -25,12 +25,16 @@ pub const DEFAULT_MAX_TOKENS: u32 = 1024;
 pub const ANTHROPIC_VERSION: &str = "2023-06-01";
 
 /// An Anthropic Messages API client implementing [`Model`][synonz::Model].
+///
+/// Inference parameters are bound here (ADR-0015: parameters are model
+/// behavior); leave them unset for provider defaults.
 #[derive(Clone)]
 pub struct Client {
     http: reqwest::Client,
     base_url: String,
     model_name: String,
     api_key: String,
+    params: synonz::ModelParams,
 }
 
 impl Client {
@@ -48,7 +52,16 @@ impl Client {
             base_url: base_url.into(),
             model_name: model_name.into(),
             api_key: api_key.into(),
+            params: synonz::ModelParams::default(),
         }
+    }
+
+    /// Binds inference parameters (temperature, token budget). Unset
+    /// fields fall back to provider defaults (note: Anthropic requires
+    /// `max_tokens`; the documented default applies when unset).
+    pub fn params(mut self, params: synonz::ModelParams) -> Self {
+        self.params = params;
+        self
     }
 
     /// Creates a client from the environment.
@@ -78,7 +91,7 @@ impl synonz::Model for Client {
         request: synonz::ModelRequest,
     ) -> BoxFuture<'_, Result<ModelStream, ModelError>> {
         Box::pin(async move {
-            let body = translate::request_body(&self.model_name, &request)?;
+            let body = translate::request_body(&self.model_name, &request, &self.params)?;
             let response = self
                 .http
                 .post(self.endpoint("v1/messages"))

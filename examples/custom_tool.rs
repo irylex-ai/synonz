@@ -60,7 +60,13 @@ impl synonz::Model for ScriptedModel {
 
 #[tokio::main]
 async fn main() {
+    let runtime = synonz::SynonzRuntime::builder().build();
+    let mut conv = synonz::Conversation::new(
+        &runtime,
+        &synonz::Subject::of(synonz::SubjectType::User, "demo"),
+    );
     let agent = Agent::builder()
+        .runtime(&runtime)
         .model(ScriptedModel)
         .system_prompt("you are a weather assistant")
         .tool(Weather {
@@ -71,7 +77,7 @@ async fn main() {
 
     // `run` streams the product narrative: deltas, tool activity, and the
     // terminal event carrying the output.
-    let mut execution = agent.run("weather in beijing?");
+    let mut execution = agent.run(conv.turn_input("weather in beijing?"));
     while let Some(event) = execution.next().await {
         if let ExecutionEvent::Completed(output) = event {
             println!("completed: {:?}", output.text());
@@ -79,6 +85,9 @@ async fn main() {
     }
 
     // One-shot spelling: awaiting the handle resolves to the same output.
-    let output = agent.run("weather?").await.expect("run completes");
+    let output = agent
+        .run(conv.turn_input("weather?"))
+        .await
+        .expect("run completes");
     println!("run answer: {:?}", output.text());
 }

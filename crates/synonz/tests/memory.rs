@@ -1,15 +1,16 @@
-//! Acceptance tests for the memory & context system.
+//! Acceptance tests for the memory & context system (0.2.0 form).
 //!
 //! Verifies: layered assembly (L3 recall / L2 summaries / L1 window),
 //! post-turn memory flows (L1 write, TurnCount demotion with visible
 //! ContextManagement calls, L2Overflow distillation), ConversationEnd
-//! promotion, and topic tracking.
+//! promotion, topic tracking, custom strategy registration, and the
+//! never-silent memory-failure rule.
 
 #![cfg(feature = "test-util")]
 
 use synonz::{
-    Agent, Conversation, ConversationHistory, EventPolicy, MemoryPolicies, MockModel,
-    ModelStreamItem, Subject, SubjectType, SynonzRuntime,
+    Agent, AssemblyOutput, ContextAssembly, Conversation, EventPolicy, MemoryFlowStage,
+    MemoryPolicies, MockModel, ModelStreamItem, Subject, SubjectType, SynonzRuntime,
 };
 
 fn env() -> (SynonzRuntime, Subject) {
@@ -42,8 +43,12 @@ async fn post_turn_flow_writes_l1_and_demotes_on_turn_count() {
         .memory_policies(MemoryPolicies::new(1, 4))
         .build();
     let model = text_model(&["answer one", "summary", "answer two"]);
-    let agent = Agent::builder().model(model.clone()).build().unwrap();
     let mut conv = Conversation::with_id(&runtime, &subject, "conv-1");
+    let agent = Agent::builder()
+        .runtime(&runtime)
+        .model(model.clone())
+        .build()
+        .unwrap();
 
     let _ = agent.run(conv.turn_input("one")).await.unwrap();
     assert_eq!(conv.len(), 1);
@@ -75,8 +80,12 @@ async fn l2_overflow_distills_into_l3() {
         .build();
     // Scripts: turn answers + one summarization per demotion.
     let model = text_model(&["a1", "sum1", "a2", "sum2", "a3"]);
-    let agent = Agent::builder().model(model).build().unwrap();
     let mut conv = Conversation::with_id(&runtime, &subject, "conv-2");
+    let agent = Agent::builder()
+        .runtime(&runtime)
+        .model(model)
+        .build()
+        .unwrap();
 
     for text in ["one", "two", "three"] {
         let _ = agent.run(conv.turn_input(text)).await.unwrap();
@@ -95,8 +104,12 @@ async fn conversation_end_promotes_l2_into_l3() {
         .memory_policies(MemoryPolicies::new(1, 4).with_extra([EventPolicy::ConversationEnd]))
         .build();
     let model = text_model(&["a1", "sum1", "a2"]);
-    let agent = Agent::builder().model(model).build().unwrap();
     let mut conv = Conversation::with_id(&runtime, &subject, "conv-3");
+    let agent = Agent::builder()
+        .runtime(&runtime)
+        .model(model)
+        .build()
+        .unwrap();
 
     let _ = agent.run(conv.turn_input("one")).await.unwrap();
     let _ = agent.run(conv.turn_input("two")).await.unwrap();
@@ -150,87 +163,194 @@ async fn layered_assembly_reads_memory_layers() {
 
     let conv = Conversation::with_id(&runtime, &subject, "conv-4");
     let context = conv.context();
-    let assembled = context
-        .assemble("what does the user prefer?")
-        .await
-        .unwrap();
+    let assembled = context.assemble("what does the user prefer?").await;
+    assert!(assembled.failures.is_empty(), "clean reads, no degradation");
 
     // L3 recall first (independent System message).
-    assert!(assembled[0].blocks.iter().any(|b| {
+    assert!(assembled.messages[0].blocks.iter().any(|b| {
         matches!(b, synonz::ContentBlock::Text { text } if text.contains("Memory recall")
             && text.contains("prefers celsius"))
     }));
     // L2 summaries present.
-    assert!(assembled.iter().any(|m| m.blocks.iter().any(
+    assert!(assembled.messages.iter().any(|m| m.blocks.iter().any(
         |b| matches!(b, synonz::ContentBlock::Text { text } if text.contains("travel plans"))
     )));
     // L1 turns present (verbatim).
-    assert!(assembled.iter().any(|m| m.blocks.iter().any(
+    assert!(assembled.messages.iter().any(|m| m.blocks.iter().any(
         |b| matches!(b, synonz::ContentBlock::Text { text } if text.contains("what about beijing?"))
     )));
 }
 
-#[tokio::test]
-async fn conversation_history_strategy_is_the_pre_memory_behavior() {
-    let (runtime, subject) = env();
-    let conv = Conversation::with_id(&runtime, &subject, "conv-5");
-    conv.push_turn(synonz::Turn::new(
-        synonz::AgentInput::new("hi"),
-        vec![
-            synonz::Message::user("hi"),
-            synonz::Message::assistant_text("hello"),
-        ],
-        synonz::AgentOutput::new(
-            synonz::Message::assistant_text("hello"),
-            synonz::TokenUsage::new(0, 0),
-        ),
-    ));
+/// A custom strategy: the plugin contract survives the narrowing — it
+/// reads memory through the request and composes its own background.
+struct PrependStrategy;
 
-    // Custom assembly registered: the pre-memory strategy.
-    let runtime = SynonzRuntime::builder()
-        .register_assembly(ConversationHistory)
-        .build();
-    let conv = Conversation::with_id(&runtime, &subject, "conv-5");
-    conv.push_turn(synonz::Turn::new(
-        synonz::AgentInput::new("hi"),
-        vec![
-            synonz::Message::user("hi"),
-            synonz::Message::assistant_text("hello"),
-        ],
-        synonz::AgentOutput::new(
-            synonz::Message::assistant_text("hello"),
-            synonz::TokenUsage::new(0, 0),
-        ),
-    ));
-    let context = conv.context();
-    let assembled = context.assemble("follow up").await.unwrap();
-    assert_eq!(
-        assembled.len(),
-        2,
-        "full history, verbatim (no memory layers)"
-    );
+impl ContextAssembly for PrependStrategy {
+    fn assemble<'a>(
+        &'a self,
+        request: synonz::AssemblyRequest<'a>,
+    ) -> synonz::BoxFuture<'a, Result<AssemblyOutput, synonz::AssemblyError>> {
+        Box::pin(async move {
+            let mut output = AssemblyOutput::default();
+            output
+                .messages
+                .push(synonz::Message::system("custom strategy was here"));
+            for entry in request
+                .memory
+                .l1_window(request.subject, request.conversation_id)
+                .unwrap_or_default()
+            {
+                output.messages.extend(entry.messages);
+            }
+            Ok(output)
+        })
+    }
 }
 
 #[tokio::test]
-async fn with_context_path_drives_a_full_turn() {
-    let (runtime, subject) = env();
-    // One-shot via &str stays context-less and works.
-    let quick = Agent::builder()
-        .model(text_model(&["quick"]))
-        .build()
+async fn custom_strategy_registration_drives_assembly() {
+    let (_first, subject) = env();
+    let runtime = SynonzRuntime::builder()
+        .register_assembly(PrependStrategy)
+        .build();
+    // Seed L1 through the memory contract (the strategy reads memory).
+    runtime
+        .memory()
+        .l1_append(
+            &subject,
+            "conv-5",
+            &"chat".to_string(),
+            vec![synonz::Message::user("hi")],
+        )
         .unwrap();
-    let output = quick.run("1+1").await.unwrap();
-    assert_eq!(output.text(), Some("quick"));
 
-    let mut conv = Conversation::with_id(&runtime, &subject, "conv-6");
-    let ctx_agent = Agent::builder()
+    let conv = Conversation::with_id(&runtime, &subject, "conv-5");
+    let context = conv.context();
+    let assembled = context.assemble("follow up").await;
+    assert!(assembled.failures.is_empty());
+    assert_eq!(assembled.messages.len(), 2, "marker + seeded L1, verbatim");
+    assert!(assembled.messages[0].blocks.iter().any(
+        |b| matches!(b, synonz::ContentBlock::Text { text } if text == "custom strategy was here")
+    ));
+}
+
+/// A memory store whose reads fail — the degradation must be visible in
+/// the assembly output, never silent (ADR-0015 decision 6).
+struct BrokenMemory;
+
+impl synonz::MemoryStore for BrokenMemory {
+    fn l1_append(
+        &self,
+        _: &Subject,
+        _: &str,
+        _: &String,
+        _: Vec<synonz::Message>,
+    ) -> Result<(), synonz::MemoryStoreError> {
+        Err(synonz::MemoryStoreError::Storage("down".into()))
+    }
+    fn l1_window(
+        &self,
+        _: &Subject,
+        _: &str,
+    ) -> Result<Vec<synonz::L1Entry>, synonz::MemoryStoreError> {
+        Err(synonz::MemoryStoreError::Storage("down".into()))
+    }
+    fn l1_len(&self, _: &Subject, _: &str) -> Result<usize, synonz::MemoryStoreError> {
+        Err(synonz::MemoryStoreError::Storage("down".into()))
+    }
+    fn l1_pop_oldest(
+        &self,
+        _: &Subject,
+        _: &str,
+        _: usize,
+    ) -> Result<Vec<synonz::L1Entry>, synonz::MemoryStoreError> {
+        Err(synonz::MemoryStoreError::Storage("down".into()))
+    }
+    fn l2_append(
+        &self,
+        _: &Subject,
+        synonz::SummaryBlock { .. }: synonz::SummaryBlock,
+    ) -> Result<(), synonz::MemoryStoreError> {
+        Err(synonz::MemoryStoreError::Storage("down".into()))
+    }
+    fn l2_read(
+        &self,
+        _: &Subject,
+        _: &str,
+    ) -> Result<Vec<synonz::SummaryBlock>, synonz::MemoryStoreError> {
+        Err(synonz::MemoryStoreError::Storage("down".into()))
+    }
+    fn l2_len(&self, _: &Subject, _: &str) -> Result<usize, synonz::MemoryStoreError> {
+        Err(synonz::MemoryStoreError::Storage("down".into()))
+    }
+    fn l2_pop_oldest(
+        &self,
+        _: &Subject,
+        _: &str,
+        _: usize,
+    ) -> Result<Vec<synonz::SummaryBlock>, synonz::MemoryStoreError> {
+        Err(synonz::MemoryStoreError::Storage("down".into()))
+    }
+    fn l3_upsert(
+        &self,
+        _: &Subject,
+        _: synonz::KnowledgeFragment,
+    ) -> Result<(), synonz::MemoryStoreError> {
+        Err(synonz::MemoryStoreError::Storage("down".into()))
+    }
+    fn l3_retrieve(
+        &self,
+        _: &Subject,
+        _: &str,
+        _: &String,
+        _: usize,
+    ) -> Result<Vec<synonz::KnowledgeFragment>, synonz::MemoryStoreError> {
+        Err(synonz::MemoryStoreError::Storage("down".into()))
+    }
+    fn l3_len(&self, _: &Subject) -> Result<usize, synonz::MemoryStoreError> {
+        Err(synonz::MemoryStoreError::Storage("down".into()))
+    }
+}
+
+#[tokio::test]
+async fn assembly_memory_failures_are_visible_not_silent() {
+    // Override the default store with the failing one: the degradation
+    // must be visible in the assembly output, never silent (ADR-0015
+    // decision 6).
+    let runtime = SynonzRuntime::builder()
+        .register_memory(BrokenMemory)
+        .build();
+    let conv = Conversation::with_id(&runtime, &Subject::of(SubjectType::User, "u"), "conv-6");
+
+    let context = conv.context();
+    let assembled = context.assemble("anything").await;
+
+    // Every layer failed and every failure is reported — no silent
+    // "no memory" degradation.
+    let stages: Vec<&MemoryFlowStage> = assembled
+        .failures
+        .iter()
+        .map(|failure| &failure.stage)
+        .collect();
+    assert!(stages.contains(&&MemoryFlowStage::AssembleRead));
+    assert_eq!(stages.len(), 3, "l1, l2, l3 all report");
+    assert!(assembled.messages.is_empty());
+}
+
+#[tokio::test]
+async fn background_engine_drives_a_full_turn() {
+    let (runtime, subject) = env();
+    let mut conv = Conversation::with_id(&runtime, &subject, "conv-7");
+    let agent = Agent::builder()
+        .runtime(&runtime)
         .model(text_model(&["the answer"]))
         .build()
-        .unwrap()
-        .with_context(conv.context());
-    let output = ctx_agent.run(conv.turn_input("question")).await.unwrap();
+        .unwrap();
+
+    // The context is derived from the conversation at execution time; the
+    // completed turn lands in the truth archive AND in L1.
+    let output = agent.run(conv.turn_input("question")).await.unwrap();
     assert_eq!(output.text(), Some("the answer"));
     assert_eq!(conv.len(), 1);
-    // The turn landed in L1 (memory write after completion).
-    assert_eq!(runtime.memory().l1_len(&subject, "conv-6").unwrap(), 1);
+    assert_eq!(runtime.memory().l1_len(&subject, "conv-7").unwrap(), 1);
 }

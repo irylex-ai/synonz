@@ -30,10 +30,11 @@ use crate::tool::ToolSpec;
 /// The stream of items produced by one model call.
 pub type ModelStream = BoxStream<'static, ModelStreamItem>;
 
-/// Per-request inference parameters (minimal, provider-neutral set).
+/// Inference parameters (minimal, provider-neutral set).
 ///
-/// Provider-specific configuration belongs at client construction, not per
-/// request.
+/// ADR-0015: parameters are **model behavior** — they are bound where the
+/// model adapter is constructed, never carried per request. Provider-
+/// specific configuration belongs to each adapter's own builder.
 #[non_exhaustive]
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 pub struct ModelParams {
@@ -57,7 +58,11 @@ impl ModelParams {
     }
 }
 
-/// A request to a model: the conversation, available tools, and parameters.
+/// A request to a model: the conversation and available tools.
+///
+/// Model tuning (temperature, token budgets) is **model behavior** — it is
+/// bound where the model adapter is constructed (ADR-0015), not carried
+/// per request.
 #[non_exhaustive]
 #[derive(Debug, Clone, PartialEq)]
 pub struct ModelRequest {
@@ -65,18 +70,12 @@ pub struct ModelRequest {
     pub messages: Vec<Message>,
     /// Tools the model may call.
     pub tools: Vec<ToolSpec>,
-    /// Per-request parameters.
-    pub params: ModelParams,
 }
 
 impl ModelRequest {
     /// Creates a request from its parts.
-    pub fn new(messages: Vec<Message>, tools: Vec<ToolSpec>, params: ModelParams) -> Self {
-        Self {
-            messages,
-            tools,
-            params,
-        }
+    pub fn new(messages: Vec<Message>, tools: Vec<ToolSpec>) -> Self {
+        Self { messages, tools }
     }
 }
 
@@ -174,9 +173,6 @@ mod tests {
         ModelRequest::new(
             vec![Message::user("hi")],
             vec![ToolSpec::new("echo", "echoes", json!({"type": "object"}))],
-            ModelParams::default()
-                .with_temperature(0.5)
-                .with_max_tokens(64),
         )
     }
 

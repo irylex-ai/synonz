@@ -22,14 +22,18 @@ impl synonz::Model for HangingModel {
 
 #[tokio::main]
 async fn main() {
+    let runtime = synonz::SynonzRuntime::builder().build();
     let agent = Agent::builder()
+        .runtime(&runtime)
         .model(HangingModel)
         .build()
         .expect("model is set");
+    let subject = synonz::Subject::of(synonz::SubjectType::User, "demo");
 
     // Entry 1: an external token cancels with `UserRequested`.
     let token = CancellationToken::new();
-    let mut run = agent.run_with("go", token.clone());
+    let mut conv = synonz::Conversation::new(&runtime, &subject);
+    let mut run = agent.run_with(conv.turn_input("go"), token.clone());
     tokio::spawn(async move {
         tokio::time::sleep(Duration::from_millis(50)).await;
         token.cancel();
@@ -43,7 +47,10 @@ async fn main() {
     }
 
     // Entry 2: the time budget cancels with `Timeout`.
-    let mut run = agent.run("go").with_timeout(Duration::from_millis(50));
+    let mut conv2 = synonz::Conversation::new(&runtime, &subject);
+    let mut run = agent
+        .run(conv2.turn_input("go"))
+        .with_timeout(Duration::from_millis(50));
     while let Some(event) = run.next().await {
         if let Some(reason) = terminal(&event) {
             println!("timeout entry cancelled the run: {reason:?}");
@@ -53,7 +60,8 @@ async fn main() {
     }
 
     // Entry 3: dropping the handle cancels the run (cooperative teardown).
-    let run = agent.run("go");
+    let mut conv3 = synonz::Conversation::new(&runtime, &subject);
+    let run = agent.run(conv3.turn_input("go"));
     drop(run);
     println!("drop entry: the run handle was dropped and torn down");
 }
