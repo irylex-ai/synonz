@@ -1,6 +1,7 @@
 # Synonz v1 实现计划
 
 - 状态: VERIFIED（2026-08-28 全部里程碑 M0-M8 完成；实现与文档一致性核对通过）
+- 接续: 0.2.0 起由 `docs/design/implementation-plan-0.2.0.zh-CN.md` 接续（M12-M15）
 - 日期: 2026-08-28
 - 依据: ADR-0001 ~ ADR-0009（均 APPROVED）、架构设计文档 v1（APPROVED）
 - 性质: 开发文档（中文优先）——实现阶段的执行次序、验收基准与工程基线；
