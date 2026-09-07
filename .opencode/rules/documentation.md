@@ -295,7 +295,9 @@ Before creating a new document, agents must:
 
 1. search existing documentation;
 2. confirm whether an equivalent document already exists;
-3. prefer updating existing documents over creating duplicates.
+3. prefer updating existing documents over creating duplicates;
+4. re-read this rule before drafting, in particular the lifecycle states
+   in Section 3.
 
 When creating or modifying documentation, agents should:
 
@@ -311,3 +313,8 @@ When creating or modifying documentation, agents should:
 Agents must record the document lifecycle state honestly and must not mark a
 document `VERIFIED`, `PUBLISHED`, or `RELEASED` unless the corresponding
 checks have actually been performed.
+
+The lifecycle state machine in Section 3 is closed. A recorded state must be
+one of the six states, copied verbatim — `DRAFT`, `APPROVED`, `IMPLEMENTING`,
+`VERIFIED`, `PUBLISHED`, `RELEASED`. Do not invent states, synonyms, or
+informal status labels (for example, "PROPOSED" is not a state).

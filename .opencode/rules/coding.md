@@ -91,7 +91,54 @@ migration path where practical. Public API surface should be minimal and
 intentional; implementation details should remain private unless there is a
 strong reason to expose them.
 
-## 5. Module and Crate Design
+## 5. Naming Discipline
+
+Naming is part of the public contract. Names must be evaluated with the
+criteria below at introduction time; renaming later is a breaking change.
+
+### Verbs and Nouns
+
+- Methods are named with verbs (`run`, `cancel`, `spawn`).
+- Types are named with referential nouns that denote a thing
+  (`Execution`, `Conversation`, `AgentOutput`).
+- Do not repurpose a verb as a type name. A method/handle pair follows the
+  standard Rust pattern where the names differ (`tokio::spawn` →
+  `JoinHandle`), not stutter (`run()` → `Run`).
+
+### Semantic Neutrality
+
+- A public name must be neutral across all supported use cases of the
+  concept, not bound to one scenario. A name bound to conversation
+  ("ask", "Answer") misfits task execution, background work, and pipelines.
+- For domain-standard actions, prefer the verb the wider ecosystem already
+  uses; survey ecosystem conventions before deciding (for agent execution,
+  `run` is the industry convention).
+
+### Collision Checks
+
+Before adopting a name, verify it does not collide with:
+
+- existing public types in the workspace — each public concept owns exactly
+  one name, and one name must not serve two concepts;
+- vocabulary that already means something else in the framework (for
+  example, `Turn` is a recorded conversation turn; a live handle must not
+  take that name);
+- near-synonyms of existing names that would blur two distinct concepts
+  (a streaming handle named `Response` next to a result type named
+  `AgentOutput`).
+
+### Evaluation Checklist
+
+When discussing a new public name, check:
+
+1. referential quality — does the name denote a thing, not an action?
+2. neutrality — does it fit every intended use case of the concept?
+3. collisions — existing types, planned types, ecosystem conventions?
+4. call-site reading — does `let x = ...` read naturally, without stutter?
+5. derivability — do related names follow mechanically (handle
+   `Execution` → event `ExecutionEvent`)?
+
+## 6. Module and Crate Design
 
 - Clear responsibility boundaries.
 - Avoid circular dependencies.
@@ -103,7 +150,7 @@ serve multiple unrelated concerns, that is a signal to reconsider its
 boundaries rather than to accumulate more responsibilities. Circular
 dependencies are a design defect, not a build problem to work around.
 
-## 6. Async Programming Principles
+## 7. Async Programming Principles
 
 Agent systems commonly require asynchronous execution. Observe the following
 rules:
@@ -119,7 +166,7 @@ rules:
 Avoid introducing async complexity without necessity. A synchronous path that
 is correct and clear is preferable to an async path added speculatively.
 
-## 7. Dependency Management
+## 8. Dependency Management
 
 Before adding a dependency, consider:
 
@@ -137,7 +184,7 @@ solve substantially overlapping problems. Dependency introduction that affects
 architecture or public APIs should be validated through the architecture
 process (see `.opencode/rules/architecture.md`).
 
-## 8. Testing Expectations
+## 9. Testing Expectations
 
 - New functionality should include appropriate tests.
 - Bug fixes should include regression tests when applicable.
@@ -148,7 +195,7 @@ This section defines coding-level expectations only. The full testing strategy,
 including test levels, proportionality, and determinism rules, belongs to the
 Testing Rule and is not duplicated here.
 
-## 9. Coding Agent Workflow
+## 10. Coding Agent Workflow
 
 The Coding Agent should follow:
 
@@ -173,7 +220,7 @@ flag the conflict rather than silently resolving it. Significant implementation
 decisions that were not anticipated by the architecture should be raised, not
 absorbed.
 
-## 10. Change Scope Control
+## 11. Change Scope Control
 
 Code changes should remain within the intended scope of the request. The
 Coding Agent must optimize for correctness, focused changes, and minimal
@@ -215,7 +262,7 @@ It should not silently include those changes in the current implementation.
 Findings that touch architecture or public APIs must be routed through the
 Architecture Rule, not absorbed into a coding change.
 
-## 11. Refactoring Principles
+## 12. Refactoring Principles
 
 - Prefer incremental changes.
 - Avoid unrelated modifications in the same change.
@@ -228,7 +275,7 @@ behavior changes in a way that obscures review. Significant refactors that affec
 public APIs, ownership models, or async boundaries must be explained and
 justified.
 
-## 12. Code Review Checklist
+## 13. Code Review Checklist
 
 ### Correctness
 
@@ -264,7 +311,7 @@ justified.
 - Does the implementation follow approved architecture decisions?
 - Are deviations explicitly flagged?
 
-## 13. Relationship With Other Rules
+## 14. Relationship With Other Rules
 
 ### Architecture Rule
 
