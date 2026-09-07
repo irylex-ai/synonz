@@ -1,6 +1,10 @@
 # ADR-0016: Observer 可观测契约——旁路事件派发
 
 - 状态: APPROVED（2026-09-07，irylex 人工评审通过）
+- 评审修订: `EventContext` → `ObserverContext`、`Dispatcher` →
+  `ObserverDispatcher`（v3 架构文档评审期命名修正，实施前落地；
+  与 ToolContext 先例同构——命名接收方子系统，消除 Event* 前缀
+  混淆与无指代命名）
 - 日期: 2026-09-07
 - 决策者: irylex（人类确认）
 - 性质: 新增公开扩展契约（非破坏）——可观测性从消费面解耦为旁路
@@ -43,12 +47,12 @@ run 可达 Runtime 注册表**；并立法"**记忆流失败不得静默**"，�
 pub trait Observer: Send + Sync + 'static {
     /// 每个事件投递一次（全量 AgentEvent，含输入侧载荷）。
     /// 实现必须快速返回——重活（批量、网络导出）自行内部排队。
-    fn on_event(&self, ctx: &EventContext, event: &AgentEvent);
+    fn on_event(&self, ctx: &ObserverContext, event: &AgentEvent);
 
-    /// 观测队列溢出发生丢弃后，派发器追上时调用一次，
+    /// 观测队列溢出发生丢弃后，观察者派发器追上时调用一次，
     /// `dropped` 为本次 run 累计丢弃数。默认空实现；
     /// 关注数据完整性的录制型观察者必须覆写。
-    fn on_lagged(&self, ctx: &EventContext, dropped: u64) {}
+    fn on_lagged(&self, ctx: &ObserverContext, dropped: u64) {}
 }
 ```
 
@@ -57,7 +61,7 @@ pub trait Observer: Send + Sync + 'static {
   （tracing 的 `Layer::on_event` 同款）；
 - **非阻塞契约写入 trait 文档**：实现快速返回是义务，不是建议。
 
-### 二、派发器架构：同步回调、异步投递
+### 二、观察者派发器架构：同步回调、异步投递
 
 ```
 AgentLoopTask（执行热路径，永不等待观测）
@@ -65,15 +69,15 @@ AgentLoopTask（执行热路径，永不等待观测）
           └─ ② try_send → 有界观测队列（固定容量；满→丢弃+计数，
                                           O(1) 永不阻塞）
                               │
-             Dispatcher（每 run 一个后台任务，tokio::spawn）
+             ObserverDispatcher（每 run 一个后台投递任务，tokio::spawn）
                按序取出 → catch_unwind → 逐个调用已启用观察者
 ```
 
 - 热路径成本 = 一次 `try_send`——"同步回调的里面是异步执行"：
   回调签名同步（`dyn` 兼容），投递在独立任务，执行方永不等待；
-- **通道内有序**：观测通道内部严格保持发射序（单派发器 FIFO）；
+- **通道内有序**：观测通道内部严格保持发射序（单观察者派发器 FIFO）；
   与叙事流的跨通道时序不承诺同步；
-- **收尾保证**：执行结束、通道关闭后，派发器**清空队列才退出**——
+- **收尾保证**：执行结束、通道关闭后，观察者派发器**清空队列才退出**——
   终态事件绝不因观察者存在而截断丢失；
 - 观察者看到的是**全量 `AgentEvent`**（含 `Requested` 装配消息、
   `Responded` 快照）——工程观测面；产品叙事面（`ExecutionEvent`）
@@ -88,16 +92,16 @@ AgentBuilder::observability(bool)                    // 默认 false
 ```
 
 - 开关语义：`false` = 零派发零开销；`true` 且注册表非空 → 该
-  agent 的每次 run 启动派发器。可观测通常由独立服务/进程承接，
+  agent 的每次 run 启动观察者派发器。可观测通常由独立服务/进程承接，
   因此**不默认开启**（irylex 判断）；
 - Agent 经自身持有的 runtime（ADR-0015）读取注册表——**全量 run
   覆盖，无边界例外**（0015 已消灭无会话 run）。
 
-### 四、执行标识：EventContext 信封
+### 四、执行标识：ObserverContext 信封
 
 ```rust
 #[non_exhaustive]
-pub struct EventContext {
+pub struct ObserverContext {
     /// 进程内自增的执行标识（每次 run 分配）。
     pub execution_id: u64,
 }
@@ -111,13 +115,13 @@ pub struct EventContext {
 ### 五、故障隔离
 
 - 每次投递 `catch_unwind`：观察者 panic → **该观察者本次 run 内
-  熔断**（不再被调用），执行与派发器均不受影响；
+  熔断**（不再被调用），执行与观察者派发器均不受影响；
 - 框架当前无日志栈（AGENTS.md §16 推迟选型）——panic 的记录钩子
   随观测栈选型落地，当前仅熔断（诚实标注：可见性有限，机制后置）。
 
 ### 六、丢弃可见性：on_lagged
 
-- 队列满 → 丢弃事件 + 累计计数；派发器追上进度时以
+- 队列满 → 丢弃事件 + 累计计数；观察者派发器追上进度时以
   `on_lagged(ctx, dropped)` 显式告知——**丢弃不是静默的**
   （0015 "失败不得静默"立法的观测域延伸）。
 
@@ -125,7 +129,7 @@ pub struct EventContext {
 
 - 记忆流（归档/压缩）失败以**事件**进入事件流：`LifecycleEvent`
   新增变体（`#[non_exhaustive]`，字段为阶段标识 + 详情，具体形状
-  实施时定）——失败经派发器同样流向观察者，与"装配失败走既有
+  实施时定）——失败经观察者派发器同样流向观察者，与"装配失败走既有
   Failed 硬失败路径"（已可见）分工明确；
 - 由此 0015 的静默回退消单（装配三层吞错、压缩全文转写、
   soft_errors 无终点）获得统一的可见性出口。
@@ -169,7 +173,7 @@ pub struct EventContext {
   演进）；
 - 无日志栈期间观察者 panic 的可见性有限（熔断即处理，记录钩子
   后置）——诚实标注；
-- 派发器为每 run 一个后台任务：实现含注册表扩展、开关与 spawn
+- 观察者派发器为每 run 一个后台任务：实现含注册表扩展、开关与 spawn
   管道、有界队列、收尾清空语义，测试覆盖投递顺序 / 丢弃计数 /
   熔断 / 收尾不丢终态；
 - 实施顺序 **0014 → 0015 → 0016**，同发 0.2.0。
