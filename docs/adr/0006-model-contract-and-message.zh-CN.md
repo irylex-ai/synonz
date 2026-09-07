@@ -1,6 +1,9 @@
 # ADR-0006: Model 抽象与规范消息形态
 
 - 状态: APPROVED（2026-08-28，irylex 人工评审通过）
+- 修订关系: "无状态 Agent"的引用语境由 ADR-0015（Agent 持有
+  Runtime）更新，Arc<dyn Model> 决策不变；ModelRequest 瘦身与
+  params 归位见 ADR-0015 决策八
 - 日期: 2026-08-28
 - 决策者: irylex（人类确认）
 

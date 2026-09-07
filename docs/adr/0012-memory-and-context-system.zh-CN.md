@@ -1,6 +1,10 @@
 # ADR-0012: 记忆与上下文系统
 
 - 状态: APPROVED（2026-08-29，irylex 人工评审通过；含评审修订：主体身份 (SubjectType, id) 二元组）
+- 取代关系: 四项被 ADR-0015 取代——"Agent 零环境知识"原则、
+  ConversationHistory 收编、裸路径保留（§10）、with_context 挂载
+  模式；触发体系、三兄弟契约、装配格式不变；Context 职责升格
+  （组装/归档/压缩三行为）见 ADR-0015 决策三
 - 日期: 2026-08-29
 - 决策者: irylex（人类确认）
 - 性质: 系统级 ADR——原 S2b（ContextManager）与 S2c（Memory）的旧切分

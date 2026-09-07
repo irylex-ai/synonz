@@ -1,6 +1,11 @@
 # ADR-0011: S2 会话模型
 
 - 状态: APPROVED（2026-08-29，irylex 人工评审通过）
+- 取代关系: ask/run 双语义与句柄家族经 ADR-0013 → ADR-0014 演进；
+  TurnInput 三来源、落账语义（仅 Completed 入史）、行为面
+  （truncate_last/clear/fork）、push_turn 公开性、执行体自落账
+  机制被 ADR-0015 取代（会话必选、全入史 + outcome、API 收敛、
+  归档归 Context）
 - 日期: 2026-08-29
 - 决策者: irylex（人类确认）
 

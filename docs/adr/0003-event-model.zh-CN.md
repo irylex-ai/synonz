@@ -1,6 +1,10 @@
 # ADR-0003: 事件模型与可观测契约
 
 - 状态: APPROVED（2026-08-28，irylex 人工评审通过）
+- 取代关系: "ask 便捷层/双层 API"表述被 ADR-0014（单一执行面
+  run → Execution）取代；"事件流是唯一信息通道"的旁路扩展见
+  ADR-0016；CallPurpose::Classification 与 CancelReason::Parent
+  维持预留并补触发条件（ADR-0015 决策九）
 - 日期: 2026-08-28
 - 决策者: irylex（人类确认）
 

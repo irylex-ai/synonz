@@ -1,6 +1,8 @@
 # ADR-0008: Workspace 与 crate 结构
 
 - 状态: APPROVED（2026-08-28，irylex 人工评审通过）
+- 修订关系: "S2/S3 作为新 crate 叠加"的增长原则由实际演进取代——
+  S2 落位核心 synonz crate（ADR-0011/0012），增长以模块边界为准
 - 日期: 2026-08-28
 - 决策者: irylex（人类确认）
 
