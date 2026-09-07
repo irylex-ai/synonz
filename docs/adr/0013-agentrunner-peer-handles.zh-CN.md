@@ -1,6 +1,9 @@
 # ADR-0013: AgentRunner 平级句柄架构
 
 - 状态: APPROVED（2026-08-29，irylex 人工评审通过）
+- 取代关系: Answer/Run 双面执行面格局已被 ADR-0014 取代（单一执行面
+  `run` → `Execution`）；AgentRunner 内部结构与 AgentLoopTask 命名
+  继续沿用
 - 日期: 2026-08-29
 - 决策者: irylex（人类确认）
 - 性质: 内部架构修正——公开 API 签名不变，纠正 ADR-0011 实现中的
