@@ -1,6 +1,7 @@
 # Synonz 0.2.0 实现计划
 
-- 状态: APPROVED（2026-09-07，irylex 人工评审通过）
+- 状态: VERIFIED（2026-09-08 全部里程碑 M12-M15 完成；实现与 ADR-0014/
+  0015/0016 决策落点核对通过）
 - 日期: 2026-09-07
 - 依据: ADR-0014 / ADR-0015 / ADR-0016（均 APPROVED）、架构设计文档
   v3（APPROVED）
@@ -156,7 +157,7 @@ DRAFT →（irylex 评审）APPROVED → M12 起转 IMPLEMENTING → 全部里�
 
 | 里程碑 | 状态 | 完成日期 | 交付摘要 |
 |---|---|---|---|
-| M12 单一执行面 | ⏳ 待实施 | — | — |
-| M13 执行契约封闭 | ⏳ 待实施 | — | — |
-| M14 Observer 契约 | ⏳ 待实施 | — | — |
-| M15 迁移收尾与文档同步 | ⏳ 待实施 | — | — |
+| M12 单一执行面 | ✅ 完成 | 2026-09-08 | Execution/ExecutionEvent（d661bd6）：六变体叙事流 + 流自足 + 终态不变量；删 ask/Answer/旧 Run；测试/示例迁移 |
+| M13 执行契约封闭 | ✅ 完成 | 2026-09-08 | 九子项（1ad3abd）：会话必选、Agent 持 Runtime + ptr_eq 校验、Context 三行为升格、装配锁死 + ConversationHistory 删除、Turn.outcome 全入史、MemoryFlowFailed 事件立法、API 收敛、ModelParams 归位、sweep_stale 修复 |
+| M14 Observer 契约 | ✅ 完成 | 2026-09-08 | Observer/ObserverContext/派发器（3114cc8）：Runtime 注册 + Agent 开关、EventTap 旁路、六项专项测试（顺序/丢弃/熔断/收尾/开关/归属） |
+| M15 迁移收尾与文档同步 | ✅ 完成 | 2026-09-08 | README 0.2.0 形态、events.rs 观测旁路演示、CHANGELOG 0.2.0 全条目（a853533）；126 测试全绿 + clippy 零警告 |
