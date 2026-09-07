@@ -10,6 +10,28 @@ versions follow [Semantic Versioning](https://semver.org/).
 
 - Multi-agent orchestration (S3) — planned.
 
+## [0.1.2] - 2026-09-07
+
+Internal quality release. No public API changes and no behavior changes;
+`ask` and `run` resolve to identical results before and after.
+
+### Changed
+
+- `Answer` and `Run` are now peer handles, each wrapping its own internal
+  `AgentRunner` (ADR-0013) — `Answer` is no longer a filtered view over
+  `Run`. Public API signatures are unchanged.
+- The agent's default time budget is applied uniformly inside the shared
+  spawn path (`run` / `run_with` / `ask` behave identically); `Answer`
+  holds the conversation serialization guard directly instead of
+  inheriting it through `Run`.
+
+## [0.1.1] - 2026-08-29
+
+### Fixed
+
+- Crates now ship their README, so crates.io pages render it instead of
+  reporting "no README.md file" (packaging-only fix; no code changes).
+
 ## [0.1.0] - 2026-08-29
 
 Initial release. Pre-1.0: APIs are stable in intent but not yet committed;
@@ -64,4 +86,6 @@ expect breaking changes between 0.x versions.
 
 ## Version history
 
+- 0.1.2 — internal refactor: `Answer`/`Run` as peer handles (ADR-0013).
+- 0.1.1 — README packaging fix.
 - 0.1.0 — first release (S1 + S2 complete; M0–M11 milestones).
