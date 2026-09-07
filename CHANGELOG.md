@@ -10,6 +10,89 @@ versions follow [Semantic Versioning](https://semver.org/).
 
 - Multi-agent orchestration (S3) — planned.
 
+## [0.2.0] - 2026-09-08
+
+The contract-convergence release: a single execution face, closed
+execution contracts, the full background engine, the complete truth
+archive, and the observation bypass. Breaking changes are concentrated
+(pre-1.0); every change is recorded below with its migration.
+
+### Summary
+
+0.2.0 implements ADR-0014 (single execution face), ADR-0015 (execution
+contract closure and S2 convergence), and ADR-0016 (Observer contract).
+The dual ask/run API is replaced by one `run` returning an `Execution`
+handle; every execution belongs to a conversation; the agent knows its
+runtime; the Context engine owns assemble/archive/compress; all turns —
+including failures and cancellations — enter the truth archive; and the
+full event stream is available to community observers on a bypass that
+never touches the hot path.
+
+### Highlights
+
+- **Single execution face (ADR-0014)**: `agent.run(...)` returns
+  `Execution` — a three-in-one handle (narrative stream of
+  `ExecutionEvent`, final-output Future, controller). The terminal
+  `Completed` event carries the output (stream self-sufficiency).
+- **Observation bypass (ADR-0016)**: implement `Observer`, register it
+  on the runtime, open the per-agent switch — and receive the **full**
+  event stream (including input-side payloads) in emission order,
+  panic-isolated, with overflow reported. The hot path pays one
+  non-blocking `try_send`.
+- **Truth archive (ADR-0015)**: every turn enters the conversation
+  history marked with its outcome (`Completed` / `Failed` /
+  `Cancelled`) — failures keep their audit trail; only success turns
+  feed the memory layers.
+- **Background engine**: `Context` owns assemble / archive / compress;
+  assembly strategies read **memory only** (type-locked request);
+  memory-flow failures are events, never silent.
+
+### Breaking Changes
+
+- `Agent::ask` / `Answer` removed — use `agent.run(...)` (await
+  semantics identical).
+- The old event-consumption `Run` removed — iterate `ExecutionEvent` on
+  `Execution`; the full `AgentEvent` stream moved to the Observer
+  bypass.
+- Bare-string executions removed — every execution is
+  `agent.run(conv.turn_input(...))`; there is no conversation-less run.
+- `Agent::builder().runtime(&runtime)` required; presets take the
+  runtime first (`Agent::react(&runtime, model, tools)`, etc.).
+- `Agent::with_context` removed — the background is derived from the
+  conversation.
+- `Turn` gained `outcome` (`Completed` / `Failed` / `Cancelled`);
+  failed and cancelled turns are recorded (previously they were not).
+- `Conversation::truncate_last` / `clear` / `fork` removed;
+  `push_turn` is internal.
+- `ConversationHistory` strategy removed — memory is the sole assembly
+  source; the default is `LayeredMemory`.
+- `ModelRequest` lost `params` — bind inference parameters on the
+  adapter (`Client::new(...).params(...)`, `temperature` / `max_tokens`).
+- `Conversation::end` returns typed failures
+  (`Vec<(MemoryFlowStage, String)>`).
+- `LifecycleEvent::MemoryFlowFailed` added (non-terminal; memory-flow
+  failures surface as events).
+
+### Migration Guidance
+
+| 0.1.x | 0.2.0 |
+|---|---|
+| `agent.ask(x).await?` | `agent.run(conv.turn_input(x)).await?` |
+| `agent.run("text")` | `agent.run(conv.turn_input("text"))` |
+| iterate `AgentEvent` on `Run` | iterate `ExecutionEvent` on `Execution` (full stream → `Observer`) |
+| `agent.run_with(x, token)` | `agent.run_with(conv.turn_input(x), token)` |
+| `with_context(conv.context())` | delete — the background is derived |
+| register `ConversationHistory` | default `LayeredMemory` (or a custom strategy) |
+| `truncate_last` / `clear` / `fork` | removed (window management lives in the background engine) |
+| `ModelRequest { .., params }` | `ModelRequest { messages, tools }`; params on the adapter |
+
+### Fixed
+
+- `sweep_stale` never worked: the persisted subject identity was
+  reconstructed with a second wrapping (every conversation was silently
+  skipped) and the subject type was hardcoded. Fixed with symmetric
+  encode/decode covering both subject types.
+
 ## [0.1.2] - 2026-09-07
 
 Internal quality release. No public API changes and no behavior changes;
@@ -86,6 +169,8 @@ expect breaking changes between 0.x versions.
 
 ## Version history
 
+- 0.2.0 — contract convergence: single execution face, closed execution
+  contracts, truth archive with outcomes, Observer bypass (M12–M15).
 - 0.1.2 — internal refactor: `Answer`/`Run` as peer handles (ADR-0013).
 - 0.1.1 — README packaging fix.
 - 0.1.0 — first release (S1 + S2 complete; M0–M11 milestones).

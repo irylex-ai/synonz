@@ -11,17 +11,23 @@ first-class citizen), and built-in observability (execution *is* an event
 stream).
 
 ```rust
-use synonz::Agent;
+use synonz::{Subject, SubjectType, SynonzRuntime};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let agent = Agent::builder()
+    let runtime = SynonzRuntime::builder().build();
+    let mut conv = synonz::Conversation::new(
+        &runtime,
+        &Subject::of(SubjectType::User, "demo"),
+    );
+    let agent = synonz::Agent::builder()
+        .runtime(&runtime)
         .model(synonz_openai::Client::from_env()?)
         .system_prompt("you are a helpful assistant")
         .build()?;
 
-    let answer = agent.ask("hello!").await?;
-    println!("{}", answer.text().unwrap_or_default());
+    let output = agent.run(conv.turn_input("hello!")).await?;
+    println!("{}", output.text().unwrap_or_default());
     Ok(())
 }
 ```
@@ -52,9 +58,10 @@ Run them with `cargo run -p synonz-examples --bin <name>`:
 ## Documentation
 
 - Architecture decisions: `docs/adr/` (ADR-0001 and onward)
-- Architecture overview: `docs/architecture/s2.zh-CN.md` (current; the v1
-  document is retained as the S1-era snapshot)
-- Implementation plan: `docs/design/implementation-plan-v1.zh-CN.md`
+- Architecture overview: `docs/architecture/v3.zh-CN.md` (0.2.0 form; the
+  s2 and v1 documents are retained as era snapshots)
+- Implementation plan: `docs/design/implementation-plan-0.2.0.zh-CN.md`
+  (the v1 plan is retained for the M0-M11 record)
 
 ## Status
 
