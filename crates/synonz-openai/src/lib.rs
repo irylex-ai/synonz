@@ -24,7 +24,7 @@ pub const DEFAULT_BASE_URL: &str = "https://api.openai.com/v1";
 /// An OpenAI-compatible chat-completions client implementing
 /// [`Model`][synonz::Model].
 ///
-/// Inference parameters are bound here (ADR-0015: parameters are model
+/// Inference parameters are bound here: parameters are model
 /// behavior); leave them unset for provider defaults.
 #[derive(Clone)]
 pub struct Client {

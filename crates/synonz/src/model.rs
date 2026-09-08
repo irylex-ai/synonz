@@ -32,7 +32,7 @@ pub type ModelStream = BoxStream<'static, ModelStreamItem>;
 
 /// Inference parameters (minimal, provider-neutral set).
 ///
-/// ADR-0015: parameters are **model behavior** — they are bound where the
+/// Parameters are **model behavior** — they are bound where the
 /// model adapter is constructed, never carried per request. Provider-
 /// specific configuration belongs to each adapter's own builder.
 #[non_exhaustive]
@@ -61,7 +61,7 @@ impl ModelParams {
 /// A request to a model: the conversation and available tools.
 ///
 /// Model tuning (temperature, token budgets) is **model behavior** — it is
-/// bound where the model adapter is constructed (ADR-0015), not carried
+/// bound where the model adapter is constructed, not carried
 /// per request.
 #[non_exhaustive]
 #[derive(Debug, Clone, PartialEq)]

@@ -81,7 +81,7 @@ pub enum LifecycleEvent {
     },
     /// Non-terminal: a memory-flow failure (archive, topic, compression,
     /// or assembly read). Memory failures are **visible, never silent**
-    /// (ADR-0015) and do not abort the run.
+    /// (never silent) and do not abort the run.
     MemoryFlowFailed {
         /// Which stage of the background lifecycle failed.
         stage: MemoryFlowStage,
@@ -90,7 +90,7 @@ pub enum LifecycleEvent {
     },
 }
 
-/// Which stage of the background lifecycle failed (ADR-0015 decision 6).
+/// Which stage of the background lifecycle failed.
 #[non_exhaustive]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -229,7 +229,7 @@ pub enum ToolEvent {
     },
 }
 
-/// The product-narrative event of the execution face (ADR-0014).
+/// The product-narrative event of the execution face.
 ///
 /// A filtered projection of [`AgentEvent`]: input-side payloads
 /// (`Started` / `Requested` / `Responded`) stay on the observation

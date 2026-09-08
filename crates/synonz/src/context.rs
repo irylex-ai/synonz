@@ -1,8 +1,8 @@
 //! The context engine: the narrative background of a conversation.
 //!
 //! `Context` is the background engine — the third persistent object. It
-//! owns the **three behaviors** of the conversation's narrative background
-//! (ADR-0015): **assemble** (what the model sees before a call), **archive**
+//! owns the **three behaviors** of the conversation's narrative background:
+//! **assemble** (what the model sees before a call), **archive**
 //! (what a completed turn leaves in the L1 layer and the topic state), and
 //! **compress** (the L1→L2 / L2→L3 flows fired by the trigger policies).
 //!
@@ -22,7 +22,7 @@ use crate::subject::Subject;
 use futures::future::BoxFuture;
 
 /// The inputs an assembly strategy consumes — the minimal sufficient set.
-/// Deliberately narrow (ADR-0015): a strategy reads **memory**, plus the
+/// Deliberately narrow: a strategy reads **memory**, plus the
 /// identity and topic needed to query it; reading the conversation entity
 /// is not expressible.
 #[non_exhaustive]
@@ -40,7 +40,7 @@ pub struct AssemblyRequest<'a> {
 }
 
 /// One degraded read: the stage that failed and why. Surfaced as a
-/// `MemoryFlowFailed` event by the caller — never silent (ADR-0015).
+/// `MemoryFlowFailed` event by the caller — never silent.
 #[non_exhaustive]
 #[derive(Debug, Clone, PartialEq)]
 pub struct AssemblyFailure {
@@ -91,7 +91,7 @@ pub trait ContextAssembly: Send + Sync + 'static {
 ///
 /// Cloning shares the same background. Derived from the conversation
 /// (`Conversation::context`) at execution time — there is no manual
-/// mounting (ADR-0015: derivation kills the background/turn split).
+/// mounting (derivation kills the background/turn split).
 #[derive(Clone)]
 pub struct Context {
     conversation: Conversation,
@@ -102,7 +102,7 @@ impl Context {
     pub(crate) fn for_conversation(conversation: &Conversation) -> Self {
         Self {
             conversation: conversation.clone(),
-            assembly: conversation.assembly(),
+            assembly: conversation.context_assembly(),
         }
     }
 
@@ -111,11 +111,11 @@ impl Context {
     ///
     /// Memory reads that fail are reported in
     /// [`AssemblyOutput::failures`] and the run continues with the layers
-    /// that succeeded — degraded, never silent (ADR-0015 decision 6).
+    /// that succeeded — degraded, never silent.
     pub async fn assemble(&self, input: &str) -> AssemblyOutput {
         let topic = self.conversation.topic().unwrap_or_default();
         let request = AssemblyRequest {
-            memory: &*self.conversation.memory(),
+            memory: &*self.conversation.memory_store(),
             subject: self.conversation.subject(),
             conversation_id: self.conversation.id(),
             topic: &topic,
@@ -142,7 +142,7 @@ impl Context {
     /// memory layers.
     ///
     /// Flow failures are emitted as `MemoryFlowFailed` events through the
-    /// event tap — visible, never silent (ADR-0015 decision 6); they do
+    /// event tap — visible, never silent; they do
     /// not abort the run.
     pub(crate) async fn on_turn_completed(
         &self,
@@ -152,14 +152,14 @@ impl Context {
         tap: &EventTap,
     ) {
         let runtime = self.conversation.runtime();
-        let policies = runtime.memory_policies();
-        let detector = runtime.topic_detector();
+        let memory_policies = runtime.memory_policies();
+        let topic_detector = runtime.topic_detector();
         let (topic, soft_errors) = crate::trigger::run_post_turn_flows(
             crate::trigger::PostTurn {
                 model,
                 conversation: &self.conversation,
-                policies: &policies,
-                detector: &*detector,
+                memory_policies: &memory_policies,
+                topic_detector: &*topic_detector,
                 input,
                 messages,
             },

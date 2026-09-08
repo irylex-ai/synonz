@@ -7,7 +7,7 @@
 //!
 //! # Interaction
 //!
-//! The single execution face (ADR-0014): [`Agent::run`] returns an
+//! The single execution face: [`Agent::run`] returns an
 //! [`Execution`] — a three-in-one handle (narrative stream of
 //! [`ExecutionEvent`]s, final-output Future, controller). Dropping it
 //! cancels the run.
@@ -127,7 +127,7 @@ impl AgentBuilder {
         self
     }
 
-    /// Enables the observation bypass for this agent's runs (ADR-0016):
+    /// Enables the observation bypass for this agent's runs:
     /// every event is tapped to the runtime's registered observers on a
     /// side queue — the hot path never waits. Default **off**: the
     /// observation face is closed unless explicitly opened (it is
@@ -227,7 +227,7 @@ impl AgentBuilder {
 }
 
 /// The agent's configuration: model + tools + system prompt + budget, plus
-/// the runtime it lives in (ADR-0015: the agent knows its container; it
+/// the runtime it lives in (the agent knows its container; it
 /// holds no run state — every run's state lives inside the run, and the
 /// same agent can drive many concurrent runs independently).
 #[derive(Clone)]
@@ -326,7 +326,7 @@ impl Agent {
 
     /// Runs the agent and returns the run handle: the full event narrative.
     ///
-    /// Runs the agent: the single execution face (ADR-0014).
+    /// Runs the agent: the single execution face.
     ///
     /// Returns an [`Execution`] — a three-in-one handle (narrative
     /// stream of [`ExecutionEvent`]s, final-output Future, controller).
@@ -380,7 +380,7 @@ impl Agent {
 
     /// Rejects cross-runtime mixing loudly (a programmer error): the agent
     /// and the conversation must come from the same [`SynonzRuntime`]
-    /// (ADR-0015 — "fatal and silent" became "mismatch reports loudly").
+    /// (mixing them would otherwise fail silently, far from the mistake).
     fn check_same_runtime(&self, conversation: &Conversation) {
         assert_eq!(
             self.runtime.id(),
@@ -393,7 +393,7 @@ impl Agent {
 
     /// Spawns the loop task and wraps its shared execution state in an
     /// [`AgentRunner`] — the machinery both `Execution` (now) and the
-    /// Observer bypass (ADR-0016) hang off. Applies the agent's default
+    /// Observer bypass hang off. Applies the agent's default
     /// time budget when one is set.
     fn spawn_runner(
         &self,
@@ -402,7 +402,7 @@ impl Agent {
         core: Arc<CancelCore>,
     ) -> AgentRunner {
         let (sender, receiver) = mpsc::channel(1);
-        // The observation bypass (ADR-0016): when the switch is on and the
+        // The observation bypass: when the switch is on and the
         // runtime has observers, events are tapped into a bounded side
         // queue; a per-run dispatcher delivers them off the hot path.
         let observation = if self.observability && !self.runtime.observers().is_empty() {
@@ -553,7 +553,7 @@ impl AgentRunner {
     }
 }
 
-/// Projects an internal event onto the execution face (ADR-0014):
+/// Projects an internal event onto the execution face:
 /// input-side payloads (`Started` / `Requested` / `Responded`) stay on
 /// the observation bypass; everything a product consumer renders
 /// surfaces as an [`ExecutionEvent`].
@@ -584,7 +584,7 @@ fn execution_event(event: AgentEvent) -> Option<ExecutionEvent> {
 
 /// The handle to one in-flight execution: the product-narrative face.
 ///
-/// Three-in-one (ADR-0014): iterate it ([`Stream`] of
+/// Three-in-one: iterate it ([`Stream`] of
 /// [`ExecutionEvent`]) for the narrative — text deltas, tool cards,
 /// status, terminal outcome — await it for the final [`AgentOutput`]
 /// (stream self-sufficiency: the terminal `Completed` event already
@@ -716,8 +716,8 @@ impl AgentLoopTask {
         let base_len = messages.len();
         messages.push(Message::user(input.text.clone()));
 
-        // Truth-archive helper: every outcome enters the history, marked
-        // (ADR-0015). Persistence failures surface as MemoryFlowFailed
+        // Truth-archive helper: every outcome enters the history, marked.
+        // Persistence failures surface as MemoryFlowFailed
         // events — never silent.
         macro_rules! record {
             ($turn:expr) => {

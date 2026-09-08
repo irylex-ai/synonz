@@ -54,7 +54,7 @@ async fn post_turn_flow_writes_l1_and_demotes_on_turn_count() {
     assert_eq!(conv.len(), 1);
 
     // After turn one, L1 holds one entry (within window).
-    let memory = runtime.memory();
+    let memory = runtime.memory_store();
     assert_eq!(memory.l1_len(&subject, "conv-1").unwrap(), 1);
 
     // Turn two overflows: the flow demotes the oldest into L2 (the
@@ -90,7 +90,7 @@ async fn l2_overflow_distills_into_l3() {
     for text in ["one", "two", "three"] {
         let _ = agent.run(conv.turn_input(text)).await.unwrap();
     }
-    let memory = runtime.memory();
+    let memory = runtime.memory_store();
     assert_eq!(memory.l1_len(&subject, "conv-2").unwrap(), 1);
     // L2 capped at 1; the rest distilled into L3.
     assert_eq!(memory.l2_len(&subject, "conv-2").unwrap(), 1);
@@ -113,7 +113,7 @@ async fn conversation_end_promotes_l2_into_l3() {
 
     let _ = agent.run(conv.turn_input("one")).await.unwrap();
     let _ = agent.run(conv.turn_input("two")).await.unwrap();
-    let memory = runtime.memory();
+    let memory = runtime.memory_store();
     assert_eq!(memory.l2_len(&subject, "conv-3").unwrap(), 1);
 
     conv.end();
@@ -129,7 +129,7 @@ async fn conversation_end_promotes_l2_into_l3() {
 async fn layered_assembly_reads_memory_layers() {
     let (runtime, subject) = env();
     // Seed L1/L2/L3 directly through the memory contract.
-    let memory = runtime.memory();
+    let memory = runtime.memory_store();
     memory
         .l1_append(
             &subject,
@@ -211,11 +211,11 @@ impl ContextAssembly for PrependStrategy {
 async fn custom_strategy_registration_drives_assembly() {
     let (_first, subject) = env();
     let runtime = SynonzRuntime::builder()
-        .register_assembly(PrependStrategy)
+        .context_assembly(PrependStrategy)
         .build();
     // Seed L1 through the memory contract (the strategy reads memory).
     runtime
-        .memory()
+        .memory_store()
         .l1_append(
             &subject,
             "conv-5",
@@ -235,7 +235,7 @@ async fn custom_strategy_registration_drives_assembly() {
 }
 
 /// A memory store whose reads fail — the degradation must be visible in
-/// the assembly output, never silent (ADR-0015 decision 6).
+/// the assembly output, never silent.
 struct BrokenMemory;
 
 impl synonz::MemoryStore for BrokenMemory {
@@ -315,11 +315,8 @@ impl synonz::MemoryStore for BrokenMemory {
 #[tokio::test]
 async fn assembly_memory_failures_are_visible_not_silent() {
     // Override the default store with the failing one: the degradation
-    // must be visible in the assembly output, never silent (ADR-0015
-    // decision 6).
-    let runtime = SynonzRuntime::builder()
-        .register_memory(BrokenMemory)
-        .build();
+    // must be visible in the assembly output, never silent.
+    let runtime = SynonzRuntime::builder().memory_store(BrokenMemory).build();
     let conv = Conversation::with_id(&runtime, &Subject::of(SubjectType::User, "u"), "conv-6");
 
     let context = conv.context();
@@ -352,5 +349,8 @@ async fn background_engine_drives_a_full_turn() {
     let output = agent.run(conv.turn_input("question")).await.unwrap();
     assert_eq!(output.text(), Some("the answer"));
     assert_eq!(conv.len(), 1);
-    assert_eq!(runtime.memory().l1_len(&subject, "conv-7").unwrap(), 1);
+    assert_eq!(
+        runtime.memory_store().l1_len(&subject, "conv-7").unwrap(),
+        1
+    );
 }

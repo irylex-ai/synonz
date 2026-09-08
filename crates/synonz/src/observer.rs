@@ -1,5 +1,4 @@
-//! The observation bypass: the `Observer` contract and its dispatcher
-//! (ADR-0016).
+//! The observation bypass: the `Observer` contract and its dispatcher.
 //!
 //! Observability is a property of the execution, not of a consumption
 //! face: every event emitted by a run's loop is tapped into a bounded
@@ -54,7 +53,7 @@ impl ObserverContext {
 /// - A panicking observer is disabled for the remainder of that run —
 ///   the execution is never affected by observation failures.
 /// - Queue overflow drops events (counted); the drop is surfaced via
-///   [`Observer::on_lagged`] — visible, never silent (ADR-0015).
+///   [`Observer::on_lagged`] — visible, never silent.
 pub trait Observer: Send + Sync + 'static {
     /// Delivers one event, in emission order.
     fn on_event(&self, ctx: &ObserverContext, event: &AgentEvent);

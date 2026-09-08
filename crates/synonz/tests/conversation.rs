@@ -153,7 +153,7 @@ async fn cancelled_turns_enter_the_history_marked() {
     drop(execution); // cancel via drop
     tokio::time::sleep(Duration::from_millis(50)).await;
 
-    // ADR-0015: the truth archive keeps the full audit trail — the
+    // The truth archive keeps the full audit trail — the
     // cancelled turn is recorded, marked with its outcome.
     let turns = conv.turns();
     assert_eq!(turns.len(), 1, "the cancelled turn enters the history");
@@ -203,7 +203,7 @@ async fn failed_turns_enter_the_history_marked() {
     // write L1).
     assert_eq!(
         runtime
-            .memory()
+            .memory_store()
             .l1_len(&subject, conv.id())
             .expect("l1 len"),
         0

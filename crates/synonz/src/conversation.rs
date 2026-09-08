@@ -74,7 +74,7 @@ pub trait ConversationStore: Send + Sync + 'static {
 }
 
 /// How a turn ended. Every turn enters the history, marked with its
-/// outcome (ADR-0015: the truth archive keeps the full audit trail —
+/// outcome (the truth archive keeps the full audit trail —
 /// failures and cancellations are as much a part of the record as
 /// successes).
 #[non_exhaustive]
@@ -243,13 +243,13 @@ impl Conversation {
     }
 
     /// The registered (or default) memory store for this conversation.
-    pub(crate) fn memory(&self) -> Arc<dyn crate::memory::MemoryStore> {
-        self.runtime.memory()
+    pub(crate) fn memory_store(&self) -> Arc<dyn crate::memory::MemoryStore> {
+        self.runtime.memory_store()
     }
 
-    /// The registered (or default) assembly strategy.
-    pub(crate) fn assembly(&self) -> Arc<dyn crate::context::ContextAssembly> {
-        self.runtime.assembly()
+    /// The registered (or default) context assembly strategy.
+    pub(crate) fn context_assembly(&self) -> Arc<dyn crate::context::ContextAssembly> {
+        self.runtime.context_assembly()
     }
 
     /// The narrative background of this conversation: the third persistent
@@ -322,8 +322,8 @@ impl Conversation {
             .push(turn);
         // Auto-save (High Level persistence): the state lands in the
         // registered store so `of` can restore it later. The in-process
-        // default store keeps this cheap. Failures surface (ADR-0015:
-        // persistence failures are never silent).
+        // default store keeps this cheap. Failures surface to the caller —
+        // persistence failures are never silent.
         self.persist()
     }
 
@@ -342,7 +342,7 @@ impl Conversation {
     /// Serializes the conversation state (JSON) for application-side
     /// storage.
     ///
-    /// Boundary (ADR-0015): what migrates is the **truth record** — the
+    /// Boundary: what migrates is the **truth record** — the
     /// turns. The memory layers (L2/L3) and topic state are the
     /// `MemoryStore`'s own transactions and do not travel with an export;
     /// restoration goes through [`Conversation::of`] with a store that
@@ -374,8 +374,7 @@ impl std::fmt::Debug for Conversation {
 /// to (the parameter-object pattern).
 ///
 /// Constructed only by [`Conversation::turn_input`] — every execution
-/// belongs to a conversation; there is no conversation-less execution
-/// (ADR-0015).
+/// belongs to a conversation; there is no conversation-less execution.
 pub struct TurnInput<'a> {
     input: AgentInput,
     conv: &'a Conversation,

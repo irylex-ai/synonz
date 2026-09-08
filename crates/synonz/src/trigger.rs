@@ -120,8 +120,8 @@ impl TopicDetector for FirstSegmentDetector {
 pub(crate) struct PostTurn<'a> {
     pub model: &'a dyn Model,
     pub conversation: &'a Conversation,
-    pub policies: &'a MemoryPolicies,
-    pub detector: &'a dyn TopicDetector,
+    pub memory_policies: &'a MemoryPolicies,
+    pub topic_detector: &'a dyn TopicDetector,
     /// The turn's user input (topic detection).
     pub input: &'a str,
     /// The turn's messages (the L1 entry's content).
@@ -132,7 +132,7 @@ pub(crate) struct PostTurn<'a> {
 /// floors, and stacked event policies. Emits `ContextManagement` events
 /// for summarization calls into `emit`; returns the current topic plus
 /// the typed soft errors (surfaced by the caller as `MemoryFlowFailed`
-/// events — degraded but never silent, ADR-0015 decision 6).
+/// events — degraded but never silent).
 ///
 /// Failures of the *flows* are non-fatal (memory is auxiliary): they do
 /// not fail the run (the run's own terminal event is emitted by the
@@ -144,8 +144,8 @@ pub(crate) async fn run_post_turn_flows(
     let PostTurn {
         model,
         conversation,
-        policies,
-        detector,
+        memory_policies,
+        topic_detector,
         input,
         messages,
     } = ctx;
@@ -153,10 +153,10 @@ pub(crate) async fn run_post_turn_flows(
     let mut soft_errors = Vec::new();
 
     // 1. Topic state machine.
-    let decision = detector.detect(input, conversation.topic().as_deref());
+    let decision = topic_detector.detect(input, conversation.topic().as_deref());
     conversation.set_topic(&decision.topic);
 
-    let memory = conversation.memory();
+    let memory = conversation.memory_store();
 
     // 2. L1 write: the turn's messages, tagged with the topic.
     if let Err(e) = memory.l1_append(
@@ -169,7 +169,7 @@ pub(crate) async fn run_post_turn_flows(
     }
 
     // 3. TopicShift policy: flush pre-shift turns into L2.
-    let topic_shift_enabled = policies.extra.contains(&EventPolicy::TopicShift);
+    let topic_shift_enabled = memory_policies.extra.contains(&EventPolicy::TopicShift);
     if topic_shift_enabled && decision.shifted {
         match memory.l1_len(conversation.subject(), conversation.id()) {
             Ok(l1_len) if l1_len > 0 => {
@@ -189,8 +189,8 @@ pub(crate) async fn run_post_turn_flows(
 
     // 4. TurnCount floor: L1 overflow demotes oldest turns into L2.
     match memory.l1_len(conversation.subject(), conversation.id()) {
-        Ok(l1_len) if l1_len > policies.l1_window => {
-            let overflow = l1_len - policies.l1_window;
+        Ok(l1_len) if l1_len > memory_policies.l1_window => {
+            let overflow = l1_len - memory_policies.l1_window;
             if let Err(e) =
                 flush_l1_into_l2(model, conversation, memory.as_ref(), overflow, tap).await
             {
@@ -206,8 +206,8 @@ pub(crate) async fn run_post_turn_flows(
 
     // 5. L2Overflow floor: distill oldest summary blocks into L3.
     match memory.l2_len(conversation.subject(), conversation.id()) {
-        Ok(l2_len) if l2_len > policies.l2_cap => {
-            let overflow = l2_len - policies.l2_cap;
+        Ok(l2_len) if l2_len > memory_policies.l2_cap => {
+            let overflow = l2_len - memory_policies.l2_cap;
             match memory.l2_pop_oldest(conversation.subject(), conversation.id(), overflow) {
                 Ok(popped) => {
                     for block in popped {
@@ -275,12 +275,15 @@ async fn flush_l1_into_l2(
 /// fallback both land here). No model call is required.
 pub(crate) fn run_end_flows(
     conversation: &Conversation,
-    policies: &MemoryPolicies,
+    memory_policies: &MemoryPolicies,
 ) -> Vec<(MemoryFlowStage, String)> {
-    if !policies.extra.contains(&EventPolicy::ConversationEnd) {
+    if !memory_policies
+        .extra
+        .contains(&EventPolicy::ConversationEnd)
+    {
         return Vec::new();
     }
-    let memory = conversation.memory();
+    let memory = conversation.memory_store();
     let mut soft_errors = Vec::new();
     let l2_len = match memory.l2_len(conversation.subject(), conversation.id()) {
         Ok(len) => len,
@@ -375,8 +378,8 @@ async fn summarize_l1(
         }
         Err(error) => {
             // Lossless degradation: the raw transcript becomes the L2
-            // content — and the degradation is VISIBLE (ADR-0015 decision
-            // 6: memory-flow failures are never silent).
+            // content — and the degradation is VISIBLE (memory-flow
+            // failures are never silent).
             let _ = tap
                 .emit(AgentEvent::Lifecycle(LifecycleEvent::MemoryFlowFailed {
                     stage: MemoryFlowStage::Summarize,

@@ -138,6 +138,23 @@ When discussing a new public name, check:
 5. derivability — do related names follow mechanically (handle
    `Execution` → event `ExecutionEvent`)?
 
+### Builder Setters
+
+Builder methods are field setters: name them with the plain noun of the
+field they set (`model`, `memory`, `observer`, `idle_timeout`). No
+`set_` / `register_` / `with_` prefixes — the registration or "wiring"
+semantics belongs in the type's documentation, not in method names. The
+same applies to chainable modifiers on built values.
+
+### API Comments Are a Separate Layer
+
+Rustdoc comments document behavior and contracts in plain language;
+they do **not** cite ADR numbers or internal decision records. A reader
+of the API docs has no obligation to know the ADR corpus. Design
+history and rationale live in `docs/adr/` and design documents; the
+same applies to test and example comments — explain the why in words,
+never by reference number.
+
 ## 6. Module and Crate Design
 
 - Clear responsibility boundaries.

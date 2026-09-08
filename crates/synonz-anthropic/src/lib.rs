@@ -26,7 +26,7 @@ pub const ANTHROPIC_VERSION: &str = "2023-06-01";
 
 /// An Anthropic Messages API client implementing [`Model`][synonz::Model].
 ///
-/// Inference parameters are bound here (ADR-0015: parameters are model
+/// Inference parameters are bound here: parameters are model
 /// behavior); leave them unset for provider defaults.
 #[derive(Clone)]
 pub struct Client {

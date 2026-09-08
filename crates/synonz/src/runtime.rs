@@ -26,11 +26,11 @@ static RUNTIME_COUNTER: AtomicU64 = AtomicU64::new(0);
 #[derive(Default)]
 pub struct RuntimeBuilder {
     conversation_store: Option<Arc<dyn ConversationStore>>,
-    memory: Option<Arc<dyn MemoryStore>>,
-    assembly: Option<Arc<dyn ContextAssembly>>,
+    memory_store: Option<Arc<dyn MemoryStore>>,
+    context_assembly: Option<Arc<dyn ContextAssembly>>,
     observers: Vec<Arc<dyn crate::observer::Observer>>,
-    policies: MemoryPolicies,
-    detector: Option<Arc<dyn TopicDetector>>,
+    memory_policies: MemoryPolicies,
+    topic_detector: Option<Arc<dyn TopicDetector>>,
     idle_timeout: Option<Duration>,
 }
 
@@ -40,28 +40,28 @@ impl RuntimeBuilder {
         Self::default()
     }
 
-    /// Registers a conversation store (default: in-process).
-    pub fn register_conversation_store(mut self, store: impl ConversationStore) -> Self {
+    /// Sets the conversation store (default: in-process).
+    pub fn conversation_store(mut self, store: impl ConversationStore) -> Self {
         self.conversation_store = Some(Arc::new(store));
         self
     }
 
-    /// Registers a memory store (default: in-process).
-    pub fn register_memory(mut self, memory: impl MemoryStore) -> Self {
-        self.memory = Some(Arc::new(memory));
+    /// Sets the memory store (default: in-process).
+    pub fn memory_store(mut self, memory_store: impl MemoryStore) -> Self {
+        self.memory_store = Some(Arc::new(memory_store));
         self
     }
 
-    /// Registers an assembly strategy (default: `LayeredMemory`).
-    pub fn register_assembly(mut self, assembly: impl ContextAssembly) -> Self {
-        self.assembly = Some(Arc::new(assembly));
+    /// Sets the context assembly strategy (default: `LayeredMemory`).
+    pub fn context_assembly(mut self, context_assembly: impl ContextAssembly) -> Self {
+        self.context_assembly = Some(Arc::new(context_assembly));
         self
     }
 
-    /// Registers an observer of the full event stream (ADR-0016). Unlike
-    /// the other services there is **no default** — with no observer
-    /// registered, the observation face is fully closed. Observability is
-    /// additionally gated per agent (`AgentBuilder::observability`).
+    /// Registers an observer of the full event stream. Unlike the other
+    /// services there is **no default** — with no observer registered, the
+    /// observation face is fully closed. Observability is additionally
+    /// gated per agent (`AgentBuilder::observability`).
     pub fn observer(mut self, observer: impl crate::observer::Observer) -> Self {
         self.observers.push(Arc::new(observer));
         self
@@ -69,14 +69,14 @@ impl RuntimeBuilder {
 
     /// Sets the memory policies (the resource floors always apply;
     /// `extra` stacks event policies on top).
-    pub fn memory_policies(mut self, policies: MemoryPolicies) -> Self {
-        self.policies = policies;
+    pub fn memory_policies(mut self, memory_policies: MemoryPolicies) -> Self {
+        self.memory_policies = memory_policies;
         self
     }
 
-    /// Registers a topic detector (default: first-segment heuristic).
-    pub fn register_topic_detector(mut self, detector: impl TopicDetector) -> Self {
-        self.detector = Some(Arc::new(detector));
+    /// Sets the topic detector (default: first-segment heuristic).
+    pub fn topic_detector(mut self, topic_detector: impl TopicDetector) -> Self {
+        self.topic_detector = Some(Arc::new(topic_detector));
         self
     }
 
@@ -96,14 +96,16 @@ impl RuntimeBuilder {
             conversation_store: self
                 .conversation_store
                 .unwrap_or_else(|| Arc::new(InProcessConversationStore::default())),
-            memory: self
-                .memory
+            memory_store: self
+                .memory_store
                 .unwrap_or_else(|| Arc::new(InProcessMemoryStore::default())),
-            assembly: self.assembly.unwrap_or_else(|| Arc::new(LayeredMemory)),
+            context_assembly: self
+                .context_assembly
+                .unwrap_or_else(|| Arc::new(LayeredMemory)),
             observers: self.observers.into(),
-            policies: self.policies,
-            detector: self
-                .detector
+            memory_policies: self.memory_policies,
+            topic_detector: self
+                .topic_detector
                 .unwrap_or_else(|| Arc::new(FirstSegmentDetector)),
             idle_timeout: self.idle_timeout,
         }
@@ -121,14 +123,14 @@ impl RuntimeBuilder {
 pub struct SynonzRuntime {
     /// Process-unique identity: clones share it; separate `build()` calls
     /// never do. The execution entry compares this between the agent and
-    /// the conversation to reject cross-runtime mixing (ADR-0015).
+    /// the conversation to reject cross-runtime mixing.
     id: u64,
     conversation_store: Arc<dyn ConversationStore>,
-    memory: Arc<dyn MemoryStore>,
-    assembly: Arc<dyn ContextAssembly>,
+    memory_store: Arc<dyn MemoryStore>,
+    context_assembly: Arc<dyn ContextAssembly>,
     observers: Arc<[Arc<dyn crate::observer::Observer>]>,
-    policies: MemoryPolicies,
-    detector: Arc<dyn TopicDetector>,
+    memory_policies: MemoryPolicies,
+    topic_detector: Arc<dyn TopicDetector>,
     idle_timeout: Option<Duration>,
 }
 
@@ -153,13 +155,13 @@ impl SynonzRuntime {
     /// Public for the Low Level track: direct store access (diagnostics,
     /// custom stores, explicit operations) alongside the framework's own
     /// orchestration.
-    pub fn memory(&self) -> Arc<dyn MemoryStore> {
-        Arc::clone(&self.memory)
+    pub fn memory_store(&self) -> Arc<dyn MemoryStore> {
+        Arc::clone(&self.memory_store)
     }
 
-    /// The registered (or default) assembly strategy.
-    pub(crate) fn assembly(&self) -> Arc<dyn ContextAssembly> {
-        Arc::clone(&self.assembly)
+    /// The registered (or default) context assembly strategy.
+    pub(crate) fn context_assembly(&self) -> Arc<dyn ContextAssembly> {
+        Arc::clone(&self.context_assembly)
     }
 
     /// The registered observers (empty = the observation face is closed).
@@ -169,12 +171,12 @@ impl SynonzRuntime {
 
     /// The memory policies (floors always apply).
     pub(crate) fn memory_policies(&self) -> MemoryPolicies {
-        self.policies.clone()
+        self.memory_policies.clone()
     }
 
     /// The topic detector.
     pub(crate) fn topic_detector(&self) -> Arc<dyn TopicDetector> {
-        Arc::clone(&self.detector)
+        Arc::clone(&self.topic_detector)
     }
 
     /// Sweeps conversations with no activity past the idle timeout,
@@ -204,8 +206,9 @@ impl SynonzRuntime {
         let mut ended = 0;
         for state in stale {
             // Rebuild the subject from the stored full identity (encode and
-            // decode are symmetric — ADR-0015 fixed the reconstruction bug
-            // that silently skipped every conversation).
+            // decode are symmetric — the reconstruction previously wrapped
+            // the display string a second time, silently skipping every
+            // conversation).
             let Some(subject) = crate::Subject::parse(&state.subject_id) else {
                 continue;
             };

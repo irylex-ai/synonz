@@ -23,7 +23,7 @@ use synonz::{
 // ────────────────────────── helpers ──────────────────────────
 
 /// A runtime + subject: every execution belongs to a conversation on a
-/// runtime (ADR-0015).
+/// runtime (every execution belongs to a conversation on a runtime).
 fn fixture() -> (SynonzRuntime, Subject) {
     let runtime = SynonzRuntime::builder().build();
     let subject = Subject::of(SubjectType::User, "u-test");
@@ -432,7 +432,7 @@ async fn max_rounds_exceeded_fails_explicitly() {
         synonz::TurnOutcome::Failed(AgentError::MaxRoundsExceeded)
     ));
     // The memory layers were NOT fed from the failed turn.
-    let memory = runtime.memory();
+    let memory = runtime.memory_store();
     assert_eq!(memory.l1_len(&subject, conv.id()).expect("l1 len"), 0);
     let retried = agent.run(conv.turn_input("weather everywhere")).await;
     assert!(matches!(retried, Err(AgentError::MaxRoundsExceeded)));

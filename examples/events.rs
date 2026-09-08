@@ -1,5 +1,5 @@
 //! `events`: the observation bypass — a recording Observer watching the
-//! full event stream of a run (ADR-0016).
+//! full event stream of a run.
 //!
 //! The observer sees everything, including the input-side payloads
 //! (Started / Requested / Responded) that the product narrative face

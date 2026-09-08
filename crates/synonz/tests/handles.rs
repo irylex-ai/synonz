@@ -15,7 +15,7 @@ use synonz::{
 };
 
 /// A fresh runtime + conversation: every execution belongs to a
-/// conversation (ADR-0015).
+/// conversation (every execution belongs to a conversation).
 fn fixture() -> (SynonzRuntime, Conversation) {
     let runtime = SynonzRuntime::builder().build();
     let conv = Conversation::new(&runtime, &Subject::of(SubjectType::User, "u-test"));
