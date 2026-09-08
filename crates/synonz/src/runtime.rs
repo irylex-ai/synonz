@@ -10,7 +10,6 @@
 //! environments.
 
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use crate::context::{ContextAssembly, LayeredMemory};
@@ -18,8 +17,6 @@ use crate::conversation::{Conversation, ConversationStore};
 use crate::inprocess::{InProcessConversationStore, InProcessMemoryStore};
 use crate::memory::MemoryStore;
 use crate::trigger::{FirstSegmentDetector, MemoryPolicies, TopicDetector};
-
-static RUNTIME_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 /// The startup registry: every service has an in-process default;
 /// registration replaces it. Resolution can never fail.
@@ -92,7 +89,6 @@ impl RuntimeBuilder {
     /// Builds the runtime with registered or default implementations.
     pub fn build(self) -> SynonzRuntime {
         SynonzRuntime {
-            id: RUNTIME_COUNTER.fetch_add(1, Ordering::Relaxed),
             conversation_store: self
                 .conversation_store
                 .unwrap_or_else(|| Arc::new(InProcessConversationStore::default())),
@@ -121,10 +117,6 @@ impl RuntimeBuilder {
 /// itself (factory attribution: the product type owns its construction).
 #[derive(Clone)]
 pub struct SynonzRuntime {
-    /// Process-unique identity: clones share it; separate `build()` calls
-    /// never do. The execution entry compares this between the agent and
-    /// the conversation to reject cross-runtime mixing.
-    id: u64,
     conversation_store: Arc<dyn ConversationStore>,
     memory_store: Arc<dyn MemoryStore>,
     context_assembly: Arc<dyn ContextAssembly>,
@@ -138,11 +130,6 @@ impl SynonzRuntime {
     /// Starts building a runtime.
     pub fn builder() -> RuntimeBuilder {
         RuntimeBuilder::new()
-    }
-
-    /// The runtime's process-unique identity.
-    pub(crate) fn id(&self) -> u64 {
-        self.id
     }
 
     /// The registered (or default) conversation store.
@@ -213,7 +200,7 @@ impl SynonzRuntime {
                 continue;
             };
             if let Ok(conversation) = Conversation::of(self, &subject, &state.id) {
-                let soft_errors = conversation.end();
+                let soft_errors = conversation.end(self);
                 if soft_errors.is_empty() {
                     ended += 1;
                 }

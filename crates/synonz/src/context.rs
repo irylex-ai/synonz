@@ -10,14 +10,13 @@
 //! engine comes from (identity, handles, timing), never what it reads. The
 //! strategy decides what is sent; the framework owns when.
 
-use std::sync::Arc;
-
 use crate::conversation::Conversation;
 use crate::event::{AgentEvent, LifecycleEvent, MemoryFlowStage};
 use crate::memory::MemoryStore;
 use crate::message::Message;
 use crate::model::Model;
 use crate::observer::EventTap;
+use crate::runtime::SynonzRuntime;
 use crate::subject::Subject;
 use futures::future::BoxFuture;
 
@@ -89,20 +88,21 @@ pub trait ContextAssembly: Send + Sync + 'static {
 
 /// The session-scoped background engine (the third persistent object).
 ///
-/// Cloning shares the same background. Derived from the conversation
-/// (`Conversation::context`) at execution time — there is no manual
-/// mounting (derivation kills the background/turn split).
+/// Cloning shares the same background. Constructed from the conversation
+/// (identity) plus the operating runtime (services) at execution time —
+/// there is no manual mounting (derivation kills the background/turn
+/// split).
 #[derive(Clone)]
 pub struct Context {
     conversation: Conversation,
-    assembly: Arc<dyn ContextAssembly>,
+    runtime: SynonzRuntime,
 }
 
 impl Context {
-    pub(crate) fn for_conversation(conversation: &Conversation) -> Self {
+    pub(crate) fn for_conversation(conversation: &Conversation, runtime: &SynonzRuntime) -> Self {
         Self {
             conversation: conversation.clone(),
-            assembly: conversation.context_assembly(),
+            runtime: runtime.clone(),
         }
     }
 
@@ -114,14 +114,15 @@ impl Context {
     /// that succeeded — degraded, never silent.
     pub async fn assemble(&self, input: &str) -> AssemblyOutput {
         let topic = self.conversation.topic().unwrap_or_default();
+        let memory = self.runtime.memory_store();
         let request = AssemblyRequest {
-            memory: &*self.conversation.memory_store(),
+            memory: &*memory,
             subject: self.conversation.subject(),
             conversation_id: self.conversation.id(),
             topic: &topic,
             input,
         };
-        match self.assembly.assemble(request).await {
+        match self.runtime.context_assembly().assemble(request).await {
             Ok(output) => output,
             Err(error) => AssemblyOutput {
                 messages: Vec::new(),
@@ -151,13 +152,14 @@ impl Context {
         messages: Vec<Message>,
         tap: &EventTap,
     ) {
-        let runtime = self.conversation.runtime();
-        let memory_policies = runtime.memory_policies();
-        let topic_detector = runtime.topic_detector();
+        let memory_policies = self.runtime.memory_policies();
+        let topic_detector = self.runtime.topic_detector();
+        let memory = self.runtime.memory_store();
         let (topic, soft_errors) = crate::trigger::run_post_turn_flows(
             crate::trigger::PostTurn {
                 model,
                 conversation: &self.conversation,
+                memory: &*memory,
                 memory_policies: &memory_policies,
                 topic_detector: &*topic_detector,
                 input,

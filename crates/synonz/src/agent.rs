@@ -37,7 +37,6 @@
 //! # async fn demo() {
 //! let runtime = SynonzRuntime::builder().build();
 //! let mut conv = synonz::Conversation::new(
-//!     &runtime,
 //!     &Subject::of(SubjectType::User, "demo"),
 //! );
 //! let agent = Agent::builder()
@@ -331,16 +330,11 @@ impl Agent {
     /// Returns an [`Execution`] — a three-in-one handle (narrative
     /// stream of [`ExecutionEvent`]s, final-output Future, controller).
     /// Dropping it (or calling [`Execution::cancel`]) cancels the run —
-    /// cooperative interruption at the loop's await points.
-    ///
-    /// # Panics
-    ///
-    /// Panics when the conversation belongs to a different runtime than
-    /// the agent — cross-runtime mixing is a programmer error; build both
-    /// from the same [`SynonzRuntime`].
+    /// cooperative interruption at the loop's await points. All runtime
+    /// services (memory, persistence, policies) flow from the agent's
+    /// own runtime.
     pub fn run<'a>(&self, input: impl Into<TurnInput<'a>>) -> Execution<'a> {
         let (input, conv) = input.into().into_parts();
-        self.check_same_runtime(conv);
         let runner = self.spawn_runner(input, conv, CancelCore::new());
         Execution {
             runner,
@@ -353,15 +347,12 @@ impl Agent {
 
     /// Runs the agent with an externally owned cancellation token: when the
     /// token fires, the run cancels with [`CancelReason::UserRequested`].
-    ///
-    /// Panics on cross-runtime mixing, like [`Agent::run`].
     pub fn run_with<'a>(
         &self,
         input: impl Into<TurnInput<'a>>,
         token: CancellationToken,
     ) -> Execution<'a> {
         let (input, conv) = input.into().into_parts();
-        self.check_same_runtime(conv);
         let runner = self.spawn_runner(input, conv, CancelCore::child_of(&token));
         Execution {
             runner,
@@ -376,19 +367,6 @@ impl Agent {
     pub fn with_timeout(mut self, duration: Duration) -> Self {
         self.default_timeout = Some(duration);
         self
-    }
-
-    /// Rejects cross-runtime mixing loudly (a programmer error): the agent
-    /// and the conversation must come from the same [`SynonzRuntime`]
-    /// (mixing them would otherwise fail silently, far from the mistake).
-    fn check_same_runtime(&self, conversation: &Conversation) {
-        assert_eq!(
-            self.runtime.id(),
-            conversation.runtime().id(),
-            "conversation '{}' belongs to a different runtime than the agent; \
-             build both from the same SynonzRuntime",
-            conversation.id()
-        );
     }
 
     /// Spawns the loop task and wraps its shared execution state in an
@@ -419,6 +397,7 @@ impl Agent {
             crate::observer::EventTap::consumer_only(sender)
         };
         let task = AgentLoopTask {
+            runtime: self.runtime.clone(),
             model: Arc::clone(&self.model),
             tools: Arc::clone(&self.tools),
             system_prompt: self.system_prompt.clone(),
@@ -666,8 +645,11 @@ impl Future for Execution<'_> {
     }
 }
 
-/// The per-run task: everything the loop needs, all owned.
+/// The per-run task: everything the loop needs, all owned. The runtime is
+/// the agent's — the single source for every service the execution uses
+/// (memory, persistence, policies, assembly).
 struct AgentLoopTask {
+    runtime: SynonzRuntime,
     model: Arc<dyn Model>,
     tools: Arc<[Arc<dyn Tool>]>,
     system_prompt: Option<String>,
@@ -690,8 +672,9 @@ impl AgentLoopTask {
             }))
             .await;
 
-        // The background engine, derived from the (mandatory) conversation.
-        let context = self.conversation.context();
+        // The background engine: the conversation's identity plus the
+        // operating runtime's services (explicitly wired, top-down).
+        let context = crate::context::Context::for_conversation(&self.conversation, &self.runtime);
 
         // Moment 1: assemble. Memory reads that fail degrade the background
         // visibly — the run continues with the layers that succeeded. (The
@@ -717,11 +700,16 @@ impl AgentLoopTask {
         messages.push(Message::user(input.text.clone()));
 
         // Truth-archive helper: every outcome enters the history, marked.
-        // Persistence failures surface as MemoryFlowFailed
-        // events — never silent.
+        // Persistence runs through the operating runtime — failures
+        // surface as MemoryFlowFailed events, never silent.
         macro_rules! record {
-            ($turn:expr) => {
-                if let Err(error) = self.conversation.push_turn($turn) {
+            ($turn:expr) => {{
+                self.conversation.push_turn($turn);
+                if let Err(error) = self
+                    .runtime
+                    .conversation_store()
+                    .save(self.conversation.state())
+                {
                     let _ = tap
                         .emit(AgentEvent::Lifecycle(LifecycleEvent::MemoryFlowFailed {
                             stage: MemoryFlowStage::Archive,
@@ -729,7 +717,7 @@ impl AgentLoopTask {
                         }))
                         .await;
                 }
-            };
+            }};
         }
 
         // Cancelled before the loop (token/drop races with startup): the
@@ -1154,8 +1142,7 @@ mod preset_tests {
     async fn research_preset_drives_a_full_run() {
         use crate::mock::MockModel;
         let runtime = crate::runtime::SynonzRuntime::builder().build();
-        let mut conv =
-            crate::Conversation::new(&runtime, &crate::Subject::of(crate::SubjectType::User, "u"));
+        let mut conv = crate::Conversation::new(&crate::Subject::of(crate::SubjectType::User, "u"));
         let model = MockModel::new(vec![vec![ModelStreamItem::Finish {
             message: Message::assistant_text("found the answer"),
             usage: TokenUsage::new(1, 1),

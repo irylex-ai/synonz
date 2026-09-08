@@ -81,7 +81,7 @@ impl Observer for RecordingObserver {
 async fn main() {
     let observer = RecordingObserver::default();
     let runtime = SynonzRuntime::builder().observer(observer).build();
-    let mut conv = synonz::Conversation::new(&runtime, &Subject::of(SubjectType::User, "demo"));
+    let mut conv = synonz::Conversation::new(&Subject::of(SubjectType::User, "demo"));
     let agent = Agent::builder()
         .runtime(&runtime)
         .observability(true) // open the observation face for this agent

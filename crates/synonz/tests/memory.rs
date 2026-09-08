@@ -43,7 +43,7 @@ async fn post_turn_flow_writes_l1_and_demotes_on_turn_count() {
         .memory_policies(MemoryPolicies::new(1, 4))
         .build();
     let model = text_model(&["answer one", "summary", "answer two"]);
-    let mut conv = Conversation::with_id(&runtime, &subject, "conv-1");
+    let mut conv = Conversation::with_id(&subject, "conv-1");
     let agent = Agent::builder()
         .runtime(&runtime)
         .model(model.clone())
@@ -80,7 +80,7 @@ async fn l2_overflow_distills_into_l3() {
         .build();
     // Scripts: turn answers + one summarization per demotion.
     let model = text_model(&["a1", "sum1", "a2", "sum2", "a3"]);
-    let mut conv = Conversation::with_id(&runtime, &subject, "conv-2");
+    let mut conv = Conversation::with_id(&subject, "conv-2");
     let agent = Agent::builder()
         .runtime(&runtime)
         .model(model)
@@ -104,7 +104,7 @@ async fn conversation_end_promotes_l2_into_l3() {
         .memory_policies(MemoryPolicies::new(1, 4).with_extra([EventPolicy::ConversationEnd]))
         .build();
     let model = text_model(&["a1", "sum1", "a2"]);
-    let mut conv = Conversation::with_id(&runtime, &subject, "conv-3");
+    let mut conv = Conversation::with_id(&subject, "conv-3");
     let agent = Agent::builder()
         .runtime(&runtime)
         .model(model)
@@ -116,7 +116,7 @@ async fn conversation_end_promotes_l2_into_l3() {
     let memory = runtime.memory_store();
     assert_eq!(memory.l2_len(&subject, "conv-3").unwrap(), 1);
 
-    conv.end();
+    conv.end(&runtime);
     assert_eq!(
         memory.l2_len(&subject, "conv-3").unwrap(),
         0,
@@ -161,8 +161,8 @@ async fn layered_assembly_reads_memory_layers() {
         )
         .unwrap();
 
-    let conv = Conversation::with_id(&runtime, &subject, "conv-4");
-    let context = conv.context();
+    let conv = Conversation::with_id(&subject, "conv-4");
+    let context = conv.context(&runtime);
     let assembled = context.assemble("what does the user prefer?").await;
     assert!(assembled.failures.is_empty(), "clean reads, no degradation");
 
@@ -224,8 +224,8 @@ async fn custom_strategy_registration_drives_assembly() {
         )
         .unwrap();
 
-    let conv = Conversation::with_id(&runtime, &subject, "conv-5");
-    let context = conv.context();
+    let conv = Conversation::with_id(&subject, "conv-5");
+    let context = conv.context(&runtime);
     let assembled = context.assemble("follow up").await;
     assert!(assembled.failures.is_empty());
     assert_eq!(assembled.messages.len(), 2, "marker + seeded L1, verbatim");
@@ -317,9 +317,9 @@ async fn assembly_memory_failures_are_visible_not_silent() {
     // Override the default store with the failing one: the degradation
     // must be visible in the assembly output, never silent.
     let runtime = SynonzRuntime::builder().memory_store(BrokenMemory).build();
-    let conv = Conversation::with_id(&runtime, &Subject::of(SubjectType::User, "u"), "conv-6");
+    let conv = Conversation::with_id(&Subject::of(SubjectType::User, "u"), "conv-6");
 
-    let context = conv.context();
+    let context = conv.context(&runtime);
     let assembled = context.assemble("anything").await;
 
     // Every layer failed and every failure is reported — no silent
@@ -337,7 +337,7 @@ async fn assembly_memory_failures_are_visible_not_silent() {
 #[tokio::test]
 async fn background_engine_drives_a_full_turn() {
     let (runtime, subject) = env();
-    let mut conv = Conversation::with_id(&runtime, &subject, "conv-7");
+    let mut conv = Conversation::with_id(&subject, "conv-7");
     let agent = Agent::builder()
         .runtime(&runtime)
         .model(text_model(&["the answer"]))

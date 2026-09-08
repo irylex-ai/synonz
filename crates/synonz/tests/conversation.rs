@@ -87,7 +87,7 @@ fn weather_agent(runtime: &SynonzRuntime, scripts: usize) -> Agent {
 async fn multi_turn_conversation_remembers_history() {
     let (runtime, subject) = env();
     let agent = weather_agent(&runtime, 2);
-    let mut conv = Conversation::new(&runtime, &subject);
+    let mut conv = Conversation::new(&subject);
 
     // Turn 1 (two model rounds inside one run): tool call + answer.
     let output = agent
@@ -125,7 +125,7 @@ async fn multi_turn_conversation_remembers_history() {
 async fn conversation_flat_history_replays_into_the_model() {
     let (runtime, subject) = env();
     let agent = weather_agent(&runtime, 2);
-    let mut conv = Conversation::new(&runtime, &subject);
+    let mut conv = Conversation::new(&subject);
 
     let _ = agent.run(conv.turn_input("one")).await.unwrap();
     let _ = agent.run(conv.turn_input("two")).await.unwrap();
@@ -147,7 +147,7 @@ async fn cancelled_turns_enter_the_history_marked() {
         .model(MockModel::hanging())
         .build()
         .unwrap();
-    let mut conv = Conversation::new(&runtime, &subject);
+    let mut conv = Conversation::new(&subject);
 
     let execution = agent.run(conv.turn_input("starts then cancels"));
     drop(execution); // cancel via drop
@@ -184,7 +184,7 @@ async fn failed_turns_enter_the_history_marked() {
         .model(FailingModel)
         .build()
         .unwrap();
-    let mut conv = Conversation::new(&runtime, &subject);
+    let mut conv = Conversation::new(&subject);
 
     let result = agent.run(conv.turn_input("fails")).await;
     assert!(matches!(
@@ -222,7 +222,7 @@ async fn multiple_agents_continue_one_conversation() {
         .build()
         .unwrap();
 
-    let mut conv = Conversation::new(&runtime, &subject);
+    let mut conv = Conversation::new(&subject);
     let first = researcher
         .run(conv.turn_input("research the weather"))
         .await
@@ -236,8 +236,8 @@ async fn multiple_agents_continue_one_conversation() {
 
 #[test]
 fn export_round_trips_the_truth_record() {
-    let (runtime, subject) = env();
-    let conv = Conversation::with_id(&runtime, &subject, "exported");
+    let subject = Subject::of(SubjectType::User, "test-user");
+    let conv = Conversation::with_id(&subject, "exported");
     let turns_before = conv.export().expect("export");
 
     // The export holds the truth record; restoration goes through a store

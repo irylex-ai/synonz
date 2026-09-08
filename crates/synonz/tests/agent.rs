@@ -30,10 +30,9 @@ fn fixture() -> (SynonzRuntime, Subject) {
     (runtime, subject)
 }
 
-/// A fresh conversation on `runtime` (each test builds its own runtime, so
-/// the in-process stores never collide across tests).
-fn fresh_conv(runtime: &SynonzRuntime) -> Conversation {
-    Conversation::new(runtime, &Subject::of(SubjectType::User, "u-test"))
+/// A fresh conversation (pure data — no runtime needed).
+fn fresh_conv() -> Conversation {
+    Conversation::new(&Subject::of(SubjectType::User, "u-test"))
 }
 
 /// A tool with a scripted outcome and optional delay.
@@ -180,7 +179,7 @@ fn assert_terminal_invariant(events: &[ExecutionEvent]) {
 #[tokio::test]
 async fn single_round_completes() {
     let (runtime, subject) = fixture();
-    let mut conv = Conversation::new(&runtime, &subject);
+    let mut conv = Conversation::new(&subject);
     let agent = Agent::builder()
         .runtime(&runtime)
         .model(MockModel::finishing_with_text("beijing is sunny, 28C."))
@@ -204,7 +203,7 @@ async fn single_round_completes() {
 #[tokio::test]
 async fn run_returns_final_output() {
     let (runtime, subject) = fixture();
-    let mut conv = Conversation::new(&runtime, &subject);
+    let mut conv = Conversation::new(&subject);
     let agent = Agent::builder()
         .runtime(&runtime)
         .model(MockModel::finishing_with_text("sunny, 28C."))
@@ -219,7 +218,7 @@ async fn run_returns_final_output() {
 #[tokio::test]
 async fn tool_loop_feeds_results_back() {
     let (runtime, subject) = fixture();
-    let mut conv = Conversation::new(&runtime, &subject);
+    let mut conv = Conversation::new(&subject);
     let model = MockModel::new(vec![
         vec![finish_with_call("x1", "weather", "beijing")],
         vec![finish_text("beijing is sunny, 28C.")],
@@ -265,7 +264,7 @@ async fn tool_loop_feeds_results_back() {
 #[tokio::test]
 async fn parallel_tools_pair_by_call_id_and_keep_conversation_order() {
     let (runtime, subject) = fixture();
-    let mut conv = Conversation::new(&runtime, &subject);
+    let mut conv = Conversation::new(&subject);
     let model = MockModel::new(vec![
         vec![ModelStreamItem::Finish {
             message: synonz::Message::new(
@@ -324,7 +323,7 @@ async fn parallel_tools_pair_by_call_id_and_keep_conversation_order() {
 #[tokio::test]
 async fn soft_failure_is_fed_back_not_fatal() {
     let (runtime, subject) = fixture();
-    let mut conv = Conversation::new(&runtime, &subject);
+    let mut conv = Conversation::new(&subject);
     let model = MockModel::new(vec![
         vec![finish_with_call("x1", "broken", "{}")],
         vec![finish_text("recovered")],
@@ -370,7 +369,7 @@ async fn soft_failure_is_fed_back_not_fatal() {
 #[tokio::test]
 async fn unknown_tool_is_soft_failure() {
     let (runtime, subject) = fixture();
-    let mut conv = Conversation::new(&runtime, &subject);
+    let mut conv = Conversation::new(&subject);
     let model = MockModel::new(vec![
         vec![finish_with_call("x1", "nonexistent", "{}")],
         vec![finish_text("ok, skipping that")],
@@ -398,7 +397,7 @@ async fn unknown_tool_is_soft_failure() {
 #[tokio::test]
 async fn max_rounds_exceeded_fails_explicitly() {
     let (runtime, subject) = fixture();
-    let mut conv = Conversation::new(&runtime, &subject);
+    let mut conv = Conversation::new(&subject);
     // The model always wants another tool call; the budget must stop it.
     let model = MockModel::new(vec![
         vec![finish_with_call("x1", "weather", "beijing")],
@@ -441,7 +440,7 @@ async fn max_rounds_exceeded_fails_explicitly() {
 #[tokio::test]
 async fn cancel_by_external_token() {
     let (runtime, subject) = fixture();
-    let mut conv = Conversation::new(&runtime, &subject);
+    let mut conv = Conversation::new(&subject);
     let token = CancellationToken::new();
     let agent = Agent::builder()
         .runtime(&runtime)
@@ -483,7 +482,7 @@ async fn cancel_by_external_token() {
 #[tokio::test]
 async fn cancel_by_timeout() {
     let (runtime, subject) = fixture();
-    let mut conv = Conversation::new(&runtime, &subject);
+    let mut conv = Conversation::new(&subject);
     let agent = Agent::builder()
         .runtime(&runtime)
         .model(MockModel::hanging())
@@ -562,7 +561,7 @@ async fn cancel_by_drop_reaches_inflight_model_stream() {
     }
 
     let (runtime, subject) = fixture();
-    let mut conv = Conversation::new(&runtime, &subject);
+    let mut conv = Conversation::new(&subject);
     let dropped = Arc::new(AtomicBool::new(false));
     let agent = Agent::builder()
         .runtime(&runtime)
@@ -610,7 +609,7 @@ async fn model_failure_fails_the_run() {
         .build()
         .unwrap();
 
-    let mut conv = fresh_conv(&runtime);
+    let mut conv = fresh_conv();
     let mut stream = agent.run(conv.turn_input("go"));
     let mut events = Vec::new();
     while let Some(event) = stream.next().await {
@@ -630,7 +629,7 @@ async fn model_failure_fails_the_run() {
 async fn event_narrative_is_replayable() {
     // A full run's narrative survives a JSON round-trip (record/replay).
     let (runtime, _subject) = fixture();
-    let mut conv = fresh_conv(&runtime);
+    let mut conv = fresh_conv();
     let model = MockModel::new(vec![
         vec![finish_with_call("x1", "weather", "beijing")],
         vec![finish_text("sunny")],
@@ -675,26 +674,10 @@ async fn build_without_runtime_is_invalid_configuration() {
 }
 
 #[tokio::test]
-#[should_panic(expected = "belongs to a different runtime")]
-async fn cross_runtime_mixing_panics_loudly() {
-    let (runtime_a, _subject_a) = fixture();
-    let runtime_b = SynonzRuntime::builder().build();
-    let agent = Agent::builder()
-        .runtime(&runtime_a)
-        .model(MockModel::finishing_with_text("hi"))
-        .build()
-        .unwrap();
-    let mut conv_b = fresh_conv(&runtime_b);
-    // Mixing the conversation of runtime B into an agent of runtime A is a
-    // programmer error — it must fail loudly, not silently.
-    let _execution = agent.run(conv_b.turn_input("hi"));
-}
-
-#[tokio::test]
 async fn concurrent_runs_of_one_agent_are_independent() {
     let (runtime, _subject) = fixture();
-    let mut conv_a = fresh_conv(&runtime);
-    let mut conv_b = fresh_conv(&runtime);
+    let mut conv_a = fresh_conv();
+    let mut conv_b = fresh_conv();
     let model = MockModel::new(vec![
         vec![finish_text("answer-1")],
         vec![finish_text("answer-2")],

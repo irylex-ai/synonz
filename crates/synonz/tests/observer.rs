@@ -85,7 +85,7 @@ impl Observer for Recorder {
 async fn observer_receives_the_full_stream_in_emission_order() {
     let recorder = Recorder::default();
     let runtime = runtime_with(recorder.clone());
-    let mut conv = Conversation::new(&runtime, &synonz::Subject::of(SubjectType::User, "u"));
+    let mut conv = Conversation::new(&synonz::Subject::of(SubjectType::User, "u"));
     let agent = Agent::builder()
         .runtime(&runtime)
         .observability(true)
@@ -157,7 +157,7 @@ async fn lag_is_reported_when_the_queue_overflows() {
 
     let recorder = SlowRecorder::default();
     let runtime = runtime_with(recorder.clone());
-    let mut conv = Conversation::new(&runtime, &synonz::Subject::of(SubjectType::User, "u"));
+    let mut conv = Conversation::new(&synonz::Subject::of(SubjectType::User, "u"));
     // One call flooding 300 deltas: far beyond the 256-capacity queue.
     let mut script = Vec::new();
     for i in 0..300 {
@@ -224,7 +224,7 @@ async fn panicking_observer_is_circuit_broken_without_harming_others() {
         .observer(panicking)
         .observer(recorder.clone())
         .build();
-    let mut conv = Conversation::new(&runtime, &synonz::Subject::of(SubjectType::User, "u"));
+    let mut conv = Conversation::new(&synonz::Subject::of(SubjectType::User, "u"));
     let agent = Agent::builder()
         .runtime(&runtime)
         .observability(true)
@@ -253,7 +253,7 @@ async fn switch_off_closes_the_observation_face() {
     let recorder = Recorder::default();
     // The runtime HAS an observer — but the agent's switch is off (default).
     let runtime = runtime_with(recorder.clone());
-    let mut conv = Conversation::new(&runtime, &synonz::Subject::of(SubjectType::User, "u"));
+    let mut conv = Conversation::new(&synonz::Subject::of(SubjectType::User, "u"));
     let agent = Agent::builder()
         .runtime(&runtime)
         .model(text_model(&["done"]))
@@ -279,8 +279,8 @@ async fn execution_ids_attribute_concurrent_runs() {
         .model(text_model(&["a", "b"]))
         .build()
         .unwrap();
-    let mut conv_a = Conversation::new(&runtime, &synonz::Subject::of(SubjectType::User, "a"));
-    let mut conv_b = Conversation::new(&runtime, &synonz::Subject::of(SubjectType::User, "b"));
+    let mut conv_a = Conversation::new(&synonz::Subject::of(SubjectType::User, "a"));
+    let mut conv_b = Conversation::new(&synonz::Subject::of(SubjectType::User, "b"));
 
     let (ra, rb) = tokio::join!(
         agent.run(conv_a.turn_input("q1")),

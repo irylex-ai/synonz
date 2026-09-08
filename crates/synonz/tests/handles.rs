@@ -18,7 +18,7 @@ use synonz::{
 /// conversation (every execution belongs to a conversation).
 fn fixture() -> (SynonzRuntime, Conversation) {
     let runtime = SynonzRuntime::builder().build();
-    let conv = Conversation::new(&runtime, &Subject::of(SubjectType::User, "u-test"));
+    let conv = Conversation::new(&Subject::of(SubjectType::User, "u-test"));
     (runtime, conv)
 }
 

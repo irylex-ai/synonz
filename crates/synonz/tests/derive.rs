@@ -181,10 +181,7 @@ async fn derived_tool_drives_a_full_agent_run() {
         }],
     ]);
     let runtime = synonz::SynonzRuntime::builder().build();
-    let mut conv = synonz::Conversation::new(
-        &runtime,
-        &synonz::Subject::of(synonz::SubjectType::User, "u"),
-    );
+    let mut conv = synonz::Conversation::new(&synonz::Subject::of(synonz::SubjectType::User, "u"));
     let agent = Agent::builder()
         .runtime(&runtime)
         .model(model)

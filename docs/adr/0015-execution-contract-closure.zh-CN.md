@@ -1,6 +1,12 @@
 # ADR-0015: 执行契约封闭与 S2 收敛
 
 - 状态: APPROVED（2026-09-07，irylex 人工评审通过）
+- 评审修订: "执行入口同源校验"被**结构性消除**取代——会话改为纯数据
+  实体（identity + turns + topic，不持有 runtime），跨 runtime 混用
+  在结构上无法造成分裂写入，校验、`belongs_to` 谓词与 panic 路径一
+  并删除；持久化由执行链（agent 的 runtime）显式驱动，`end` /
+  `context` 操作由调用方显式传入 runtime（2026-09-08，0.2.0 实施
+  期修订，未发布）
 - 日期: 2026-09-07
 - 决策者: irylex（人类确认）
 - 性质: 公开 API 重构（破坏性，0.2.0）——执行契约封闭、Context 职责

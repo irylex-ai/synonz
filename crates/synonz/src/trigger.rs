@@ -120,6 +120,9 @@ impl TopicDetector for FirstSegmentDetector {
 pub(crate) struct PostTurn<'a> {
     pub model: &'a dyn Model,
     pub conversation: &'a Conversation,
+    /// The memory store the flows operate on (explicitly injected — the
+    /// trigger never reaches for it).
+    pub memory: &'a dyn MemoryStore,
     pub memory_policies: &'a MemoryPolicies,
     pub topic_detector: &'a dyn TopicDetector,
     /// The turn's user input (topic detection).
@@ -144,6 +147,7 @@ pub(crate) async fn run_post_turn_flows(
     let PostTurn {
         model,
         conversation,
+        memory,
         memory_policies,
         topic_detector,
         input,
@@ -155,8 +159,6 @@ pub(crate) async fn run_post_turn_flows(
     // 1. Topic state machine.
     let decision = topic_detector.detect(input, conversation.topic().as_deref());
     conversation.set_topic(&decision.topic);
-
-    let memory = conversation.memory_store();
 
     // 2. L1 write: the turn's messages, tagged with the topic.
     if let Err(e) = memory.l1_append(
@@ -173,9 +175,7 @@ pub(crate) async fn run_post_turn_flows(
     if topic_shift_enabled && decision.shifted {
         match memory.l1_len(conversation.subject(), conversation.id()) {
             Ok(l1_len) if l1_len > 0 => {
-                if let Err(e) =
-                    flush_l1_into_l2(model, conversation, memory.as_ref(), l1_len, tap).await
-                {
+                if let Err(e) = flush_l1_into_l2(model, conversation, memory, l1_len, tap).await {
                     soft_errors.push((MemoryFlowStage::Summarize, e));
                 }
             }
@@ -191,9 +191,7 @@ pub(crate) async fn run_post_turn_flows(
     match memory.l1_len(conversation.subject(), conversation.id()) {
         Ok(l1_len) if l1_len > memory_policies.l1_window => {
             let overflow = l1_len - memory_policies.l1_window;
-            if let Err(e) =
-                flush_l1_into_l2(model, conversation, memory.as_ref(), overflow, tap).await
-            {
+            if let Err(e) = flush_l1_into_l2(model, conversation, memory, overflow, tap).await {
                 soft_errors.push((MemoryFlowStage::Summarize, e));
             }
         }
@@ -276,6 +274,7 @@ async fn flush_l1_into_l2(
 pub(crate) fn run_end_flows(
     conversation: &Conversation,
     memory_policies: &MemoryPolicies,
+    memory: &dyn MemoryStore,
 ) -> Vec<(MemoryFlowStage, String)> {
     if !memory_policies
         .extra
@@ -283,7 +282,6 @@ pub(crate) fn run_end_flows(
     {
         return Vec::new();
     }
-    let memory = conversation.memory_store();
     let mut soft_errors = Vec::new();
     let l2_len = match memory.l2_len(conversation.subject(), conversation.id()) {
         Ok(len) => len,

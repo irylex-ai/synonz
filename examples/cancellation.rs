@@ -32,7 +32,7 @@ async fn main() {
 
     // Entry 1: an external token cancels with `UserRequested`.
     let token = CancellationToken::new();
-    let mut conv = synonz::Conversation::new(&runtime, &subject);
+    let mut conv = synonz::Conversation::new(&subject);
     let mut run = agent.run_with(conv.turn_input("go"), token.clone());
     tokio::spawn(async move {
         tokio::time::sleep(Duration::from_millis(50)).await;
@@ -47,7 +47,7 @@ async fn main() {
     }
 
     // Entry 2: the time budget cancels with `Timeout`.
-    let mut conv2 = synonz::Conversation::new(&runtime, &subject);
+    let mut conv2 = synonz::Conversation::new(&subject);
     let mut run = agent
         .run(conv2.turn_input("go"))
         .with_timeout(Duration::from_millis(50));
@@ -60,7 +60,7 @@ async fn main() {
     }
 
     // Entry 3: dropping the handle cancels the run (cooperative teardown).
-    let mut conv3 = synonz::Conversation::new(&runtime, &subject);
+    let mut conv3 = synonz::Conversation::new(&subject);
     let run = agent.run(conv3.turn_input("go"));
     drop(run);
     println!("drop entry: the run handle was dropped and torn down");

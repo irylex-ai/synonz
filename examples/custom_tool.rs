@@ -61,10 +61,8 @@ impl synonz::Model for ScriptedModel {
 #[tokio::main]
 async fn main() {
     let runtime = synonz::SynonzRuntime::builder().build();
-    let mut conv = synonz::Conversation::new(
-        &runtime,
-        &synonz::Subject::of(synonz::SubjectType::User, "demo"),
-    );
+    let mut conv =
+        synonz::Conversation::new(&synonz::Subject::of(synonz::SubjectType::User, "demo"));
     let agent = Agent::builder()
         .runtime(&runtime)
         .model(ScriptedModel)

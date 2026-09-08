@@ -56,6 +56,11 @@ never touches the hot path.
   bypass.
 - Bare-string executions removed — every execution is
   `agent.run(conv.turn_input(...))`; there is no conversation-less run.
+- `Conversation` is a pure data entity (no runtime field):
+  `Conversation::new(&subject)` / `with_id(&subject, id)` no longer take
+  the runtime; `end(&runtime)` and `context(&runtime)` take it
+  explicitly; persistence is driven by the operating runtime. Cross-
+  runtime mixing is structurally impossible instead of rejected.
 - `Agent::builder().runtime(&runtime)` required; presets take the
   runtime first (`Agent::react(&runtime, model, tools)`, etc.).
 - `Agent::with_context` removed — the background is derived from the
