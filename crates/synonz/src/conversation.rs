@@ -255,8 +255,8 @@ impl Conversation {
     /// The narrative background of this conversation: the third persistent
     /// object (session-scoped runtime), produced by the conversation
     /// (factory attribution: the conversation owns the background's
-    /// identity). Attach it to an agent with
-    /// [`Agent::with_context`][crate::Agent::with_context].
+    /// identity). The execution derives it from the conversation at run
+    /// time — the background cannot be mounted on the agent.
     pub fn context(&self) -> crate::context::Context {
         crate::context::Context::for_conversation(self)
     }
