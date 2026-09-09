@@ -3,6 +3,13 @@
 - 状态: DRAFT（待 irylex 评审）
 - 日期: 2026-09-09
 - 决策者: irylex（人类逐点确认）
+- 评审修订（DRAFT 期开放项决议落地，实施前）：①创建签名统一带
+  runtime，`ConversationCreated` 升在册；②`TopicShifted` 升在册
+  （EventSource=Curator）；③`round: Option<usize>`（None=循环外
+  维护调用）；④Memory 存储契约拆三层独立位（`MemoryL1Store`/
+  `MemoryL2Store`/`MemoryL3Store`，L1 默认内置内存实现）+ `Memory`
+  聚合视图（使用侧一体）；⑤`SynonzEvent: Serialize + Deserialize`
+  立法（两级 tag，延续 ADR-0003）
 - 性质: 反应扩展性地基——新增总线设施与 Curator 契约，重整事件
   词汇表（含既有类型改名与迁移），破坏性变化随 0.3.0 单波发布
 - 关联: 承接并修订 ADR-0015（记忆流触发形态）、ADR-0016（旁路
@@ -105,6 +112,11 @@ EventSource ──emit──→ EventBus（Runtime 持有）
   拒绝非框架事件（结构性封闭，同 `AssemblyRequest` 类型锁死
   先例；"哪怕长得像也无法上总线"）。下游自定义事件进推迟表；
   新事件变体 = 新版本特性（版本化的特性发布节奏）。
+- **序列化立法**：`SynonzEvent: Serialize + Deserialize`（延续
+  ADR-0003"事件可序列化"立法）——审计落盘、事件导出、未来的
+  跨进程观测都依赖此契约承诺。tag 结构两级（顶层 `type`=实体
+  族、族内 `event`=变体，与现有模式一致）；版本演化遵守 serde
+  兼容性惯例（加字段带默认值，不删不改名）。
 - **交付/订阅分离**：EventTap 回归纯交付零件（实施期正名），
   与总线无隶属关系；发射顺序立法保留（总线先感知，订阅者
   不落后于交付）。
@@ -137,8 +149,8 @@ pub trait MemoryCurator: Send + Sync + 'static {
   统一向量库）的下游零门槛。
 - **契约中立第二课**：时序工程（后台化、顺序保证、延迟优化）
   不下沉契约——那是实现的家务，框架无需 join 点知识。
-- 载荷：`TurnContext`（conversation/input/messages/memory/model/
-  events——自 `PostTurn` 参数对象正名公开，字段锁死）；
+- 载荷：`TurnContext`（conversation/input/messages/`Memory<'_>`
+  聚合/model/events——自 `PostTurn` 参数对象正名公开，字段锁死）；
   `MemoryPolicies` 与 `TopicDetector` 下沉为默认实现的私有依赖
   （自定义 Curator 有自己的策略体系，不被迫继承）。
 - 依赖注入方向：Curator 从 Runtime 取——但取的主体是总线派发器
@@ -171,6 +183,57 @@ pub trait MemoryCurator: Send + Sync + 'static {
 `memory_policies`/`topic_detector`（默认便捷位；设置 curator 后
 被忽略，文档写明）。
 
+**Memory 存储契约（三层独立位 + 聚合视图）**：
+
+扩展性需求（irylex）与现实铁律：分层存储天然异构——常规部署
+L1 纯内存、L2 内存+Redis、L3 向量库/图库。一体契约违反接口
+隔离原则（想换 L3 被迫重写 L1/L2 的实现——"包三层"的适配器
+脏活）。按层拆分为独立契约位，每层伴随自己的存储扩展：
+
+```rust
+// 存储侧：三个独立契约位，RuntimeBuilder 各一个注册位
+pub trait MemoryL1Store: Send + Sync + 'static {
+    fn append(&self, ..) -> Result<..>;  // 逐层 CRUD（方法名不重复层名）
+    fn len(&self, ..) -> Result<usize>;
+    fn pop_oldest(&self, ..) -> Result<..>;
+}
+pub trait MemoryL2Store: Send + Sync + 'static { /* append/len/pop_oldest */ }
+pub trait MemoryL3Store: Send + Sync + 'static { /* upsert/query */ }
+
+// 使用侧：Memory 聚合视图——领域概念的落位
+pub struct Memory<'a> {
+    pub l1: &'a dyn MemoryL1Store,
+    pub l2: &'a dyn MemoryL2Store,
+    pub l3: &'a dyn MemoryL3Store,
+}
+impl Memory<'_> {
+    // 现有调用形态保持（转发到对应层位）
+    pub fn l1_append(&self, ..) -> Result<..> { self.l1.append(..) }
+    pub fn l2_append(&self, ..) -> Result<..> { self.l2.append(..) }
+    pub fn l3_upsert(&self, ..) -> Result<..> { self.l3.upsert(..) }
+    // …
+}
+// Curator/Assembly 拿到聚合：memory.l1_append(..) —— 调用侧零改动
+```
+
+- **合题**：领域概念在使用侧聚合（Memory 视图——"Memory 是
+  一个对象"），工程拆分在存储侧独立（三契约位——"扩展伴随
+  每层存储"）。概念完整与独立替换兼得：只换 L3 时 L1/L2 纹丝
+  不动。
+- **L1 低延迟归宿**：`MemoryL1Store` 默认 = 框架内置进程内存
+  实现（结构上默认即内存）；换 L1 位理论上可能但无现实动机
+  （纯内存是工作记忆的唯一合理介质）——"可换但没人换"的自然
+  状态，不立法禁止。L2/L3 位的替换是真实场景。
+- 感知延迟梯度（L1 即时 > L2 近期 > L3 长期；记忆感知延迟=
+  记忆产生后 Agent 感知到它的速度）为分层设计核心 rationale
+  ——写入各层 rustdoc 的性能特征引导（插件自带非功能特征
+  责任，同 Model/Tool 插件原则），非框架结构约束。
+- `MemoryStore`（统一三层契约）**退役**——拆分为三契约位；
+  现有 `InMemoryStore` 拆分为各层默认实现。
+- 跨层流转（压缩 L1→L2、蒸馏 L2→L3、促进）由 Curator 编排
+  （聚合视图持全部三个句柄）——压缩改序（摘要→append→pop）
+  已消除跨层原子性需求。**边界立法不变：存储位不得策展**。
+
 ### 5. Conversation 生命周期（双层主权）
 
 > 状态主权在 Conversation（内聚自管理），用例编排与事件触发权
@@ -179,25 +242,30 @@ pub trait MemoryCurator: Send + Sync + 'static {
 
 ```
 Conversation（实体层 · 状态主权）
-  new/with_id 构造（创建自由，不收口）
+  new(runtime, subject) / with_id(runtime, subject, id)
+      ★ 签名统一带 runtime（与 of/end 一致——环境见证），
+        三通用动作：构造 + 初始 state 落库（目录立即一致，
+        目录洞消除）+ emit ConversationCreated（通知总线）
   end(&runtime) -> EndOutcome   ★ async 化，三通用动作：
       ① 幂等标记 ended（is_ended/state 扩展——与 topic 同构：
          内部 Arc<Mutex>、state() 导出、of() 恢复）
       ② 自持久化（ended 入 state——环境设施正当使用）
-      ③ emit LifecycleEvent::ConversationEnded（通知总线）
+      ③ emit ConversationEnded（通知总线）
       不做：任何记忆业务
 ```
 
 - 两终结时机：`EndReason::{Explicit, IdleSwept}`（用户主动 /
   程序兜底）。Explicit 调用者在场（EndOutcome 返回值携带行动
   车道软失败——返回值即事实）；IdleSwept 无人在场（失败经总线
-  `Memory::FlowFailed` 上报——sweep 四层静默黑洞就此修复）。
+  `MemoryEvent::FlowFailed` 上报——sweep 四层静默黑洞就此修复）。
 - `Runtime::end_conversation` **不设立**（讨论否决——它使 Runtime
   长出"终结要促进记忆"的业务知识，边界模糊）；runtime 只是
   sweep 兜底的**调用者**（调 `conv.end(self)`），非编排者。
-- `ConversationCreated` 记开放项（自由构造保留，创建时 runtime
-  不在场，无发射源；目录洞经检验无害——sweep 靠 last_active
-  判 stale 不受影响，审计列表=活跃过的会话）。
+- 创建路径的统一论证（评审修订）：`of`（恢复）与 `end`（终结）
+  均带环境，`new` 不带是不一致；补齐后三个生命周期入口同构
+  （构造/终结都是"标记 + 持久化 + 发事件"的环境见证——与纯
+  数据会话不冲突：见证不是服务编排）。`ConversationCreated`
+  升在册。
 - ended 状态门（拒绝终结后续写）仍推迟，状态依据已就位。
 - **Curator 派发的时序语义**：总线行动车道同步 await
   `on_conversation_ended`（end 返回即促进完成——Explicit 场景
@@ -226,18 +294,28 @@ pub enum SynonzEvent {
 | Model | `Requested`/`StreamDelta`/`Responded` |
 | Tool | `CallRequested`/`CallCompleted` |
 
-Model/Tool 子族**全量携带 `round`**（推理循环序号，1-based；
-命名避开关键字 `loop`，沿用既有术语 round）——载荷自足原则
-强化（修订现有 "rounds are derived by consumers, not stored"
-文档为 stored in the payload）；推理调用带所在循环序号，工具
-事件带触发它的模型响应所在循环，辅助调用（ContextManagement 等）
-的 round 归属实施期精化。
+Model/Tool 子族**全量携带 `round: Option<usize>`**（推理循环
+序号，1-based；`Some(n)`=第 n 轮循环内，`None`=循环外的维护/辅助
+调用——与 `purpose` 互证：`ContextManagement` ↔ `None`；命名避开
+关键字 `loop`，沿用既有术语 round）——载荷自足原则强化（修订
+现有 "rounds are derived by consumers, not stored" 文档为 stored
+in the payload）；推理调用带所在循环序号，工具事件带触发它的
+模型响应所在循环。
 
-**Conversation 族**（平铺变体，子族为文档分组）：
+**Conversation 族**（平铺变体，子族为文档分组）——生命周期
+两事件入册：
 
-`Ended { conversation_id, subject_id, reason: EndReason }`（在册）；
-候选：`Created`、`TopicShifted { from, to }`（EventSource=Curator
-判定漂移时通知）。
+| 事件 | 载荷 | EventSource |
+|---|---|---|
+| `Created` | conversation_id, subject_id | `Conversation::new`/`with_id`（带 runtime 三动作） |
+| `Ended` | conversation_id, subject_id, reason: EndReason::{Explicit, IdleSwept} | `Conversation::end` / sweep |
+
+`TopicShifted { conversation_id, from, to }`（在册）——
+EventSource=Curator（`advance_topic` 判定漂移时通知）。装配侧
+联动无需事件驱动：`AssemblyRequest.topic` 每轮现读（既有机制），
+漂移后下一轮装配自然切换检索焦点；记忆侧反应归 Curator 策略
+（TopicShift 冲刷）；本事件只承担观察可见性（IDE 话题切换
+提示、审计）。
 
 **Memory 族**（平铺；流转即记忆条目的生命周期）：
 
@@ -261,8 +339,10 @@ AtConversationEnd, Background} }`（在册——所有 run 外记忆失败
 | EventSource | emit | 观察位 | 行动位 | 交付 |
 |---|---|---|---|---|
 | 执行循环 | Turn 三子族 | ✅ | — | ✅ ExecutionEvent 投影 |
-| 执行循环（同步段失败） | Memory::FlowFailed{AfterTurn} | ✅ | — | — |
-| `Conversation::end`/sweep | Conversation::Ended | ✅ | ✅ `on_conversation_ended` | — |
+| 执行循环（同步段失败） | MemoryEvent::FlowFailed{AfterTurn} | ✅ | — | — |
+| `Conversation::new`/`with_id` | ConversationEvent::Created | ✅ | — | — |
+| `Conversation::end`/sweep | ConversationEvent::Ended | ✅ | ✅ `on_conversation_ended` | — |
+| Curator（`advance_topic` 判定漂移） | ConversationEvent::TopicShifted | ✅ | — | — |
 | Curator 各流转/失败回收 | Memory 四流转/FlowFailed | ✅ | — | — |
 
 治理原则：行动位只对生命周期事实反应（记忆业务边界）；Turn
@@ -277,7 +357,7 @@ AtConversationEnd, Background} }`（在册——所有 run 外记忆失败
 | `Tool` | 模型请求时（并行） | 结果回喂，影响本轮后续 | 软失败回喂 |
 | `ContextAssembly` | 每 run 装配 await | 决定模型看到什么 | 降级可见 |
 | `ConversationStore` | record! 时刻 | 真相持久化 | 软失败可见 |
-| `MemoryStore` | 被 Curator/Assembly 调用 | 跟随调用者时序 | Memory::FlowFailed |
+| `MemoryL1/L2/L3Store`（经 `Memory` 聚合） | 被 Curator/Assembly 调用 | 跟随调用者时序 | MemoryEvent::FlowFailed |
 | `TopicDetector` | Curator 同步段内 | 主题标签 | 纯计算无失败 |
 | `Observer` | 事件 emit 时 | 永不影响执行 | 熔断+lag |
 | `MemoryCurator::on_turn_completed` | 终态事件前 await | 同步段=下一轮必见；后台段=滞后 | 同步段返回值；后台段经总线 |
@@ -317,12 +397,26 @@ FlowFailed{moment: Background}`——对工程管道（观察位）可见，
 8. **`AgentEvent` 保留原名**：被否——事件非 Agent 实体叙事
    （Agent 生灭无框架时刻；irylex：Agent 事件是初始化/运行中/
    消失），实为 Turn 叙事，词汇归位为 `TurnEvent`。
-9. **Conversation::new 收口到 runtime 工厂**（创建即注册）：被否
-   ——创建是实体最纯粹的自管理（OO 内聚）；目录洞经检验无害；
-   Created 事件记开放项。
+9. **Runtime 级创建工厂**（`Runtime::new_conversation` 收口）：
+    被否——Runtime 长出生成职责，与 `end_conversation` 同款边界
+    模糊。终选（评审修订）：实体构造器带环境（`Conversation::
+    new(runtime, subject)`——与 `of`/`end` 同构的环境见证），见
+    §5。
 10. **Hook 划分照搬 trigger.rs 步骤为 trait 方法**：被否——伪
     代码先行暴露的错误（实现哲学焊进契约）；修正为"契约锚定
     生命周期事实，分层哲学住默认实现"。
+11. **Memory 一体契约**（三层 CRUD 同一 trait）：被否——违反
+    接口隔离原则；异构存储现实（L1 纯内存/L2 Redis/L3 向量库）
+    下强迫插件"包三层"适配器，想换 L3 被迫重写 L1/L2。
+12. **L1 切给框架 + 契约瘦身**（MemoryStore 只剩 L2/L3，L1 为
+    Runtime 内置工作记忆）：被否——割裂 Memory 领域对象、
+    框架/插件边界生硬（irylex：架构不清晰）。
+13. **抽象类模拟**（`L1Core` 内核 + `l1_core()` 访问器 + trait
+    默认方法，L1 可覆盖）：被否——Rust 无继承，插件必须手写
+    "可继承成员变量"（字段+访问器样板）；且 L1 可覆盖自由度与
+    低延迟结构保障相矛盾（覆盖即破坏感知延迟梯度），危险自由
+    度多于价值。终选：三契约位 + 聚合视图（每层独立替换、
+    L1 默认内置内存）。
 
 ## Consequences（后果）
 
@@ -334,11 +428,12 @@ FlowFailed{moment: Background}`——对工程管道（观察位）可见，
   黑洞（总线上报）、run 外事实不可见（Memory/Conversation 族）、
   生命周期状态无居所（ended 入 state）。
 - 记忆两面对称：写入面 Curator ↔ 读取面 ContextAssembly，中间
-  MemoryStore 中立存储。**边界立法：Store 不得策展**——存储插件
-  不得在 append 时压缩/蒸馏（策展时机由生命周期事实驱动，
-  Store 感知不到；可见性立法在 Curator 层，Store 内策展会绕过
-  never-silent）。两个扩展轴正交：换策展哲学改 Curator，
-  换存储后端改 Store，互不影响。
+  三层独立存储位（`Memory` 聚合视图统一使用侧）。**边界立法：
+  存储位不得策展**——存储插件不得在 append 时压缩/蒸馏（策展
+  时机由生命周期事实驱动，存储位感知不到；可见性立法在
+  Curator 层，存储位内策展会绕过 never-silent）。扩展轴正交：
+  换策展哲学改 Curator，逐层换存储改对应 `MemoryL*Store` 位，
+  互不影响。
 - 载荷自足强化：round 显式入载荷，消费者免除推导（不再数
   Requested、不再处理辅助调用干扰）。
 - 术语边界清晰：交付/订阅分离，"事件驱动"有且仅有总线一义。
@@ -360,42 +455,41 @@ FlowFailed{moment: Background}`——对工程管道（观察位）可见，
 
 1. `AgentEvent` → `TurnEvent` 改名；`MemoryFlowFailed` 迁
    `MemoryEvent::FlowFailed`（moment 载荷）；Model/Tool 载荷
-   加 round。
+   加 `round: Option<usize>`。
 2. Observer 契约签名改 `on_event(&SynonzEvent)`；per-run 派发器
    与常驻通道合一为总线派发器（观察位语义全套继承：保序/
    熔断/lag/终态 drain）。
 3. `EventBus` 设施（双车道、订阅位制、`SynonzEvent` 类型锁死、
-   emit 非阻塞）。
-4. trigger.rs → `DefaultCurator` 主体化搬移（配置面/步骤面/
+   emit 非阻塞、`Serialize + Deserialize` 两级 tag）。
+4. `MemoryStore` → 三契约位拆分（`MemoryL1/L2/L3Store`，方法名
+   去层前缀）+ `Memory<'_>` 聚合视图（转发保持调用形态）+
+   `RuntimeBuilder::l1_store/l2_store/l3_store` 三个注册位 +
+   `InMemoryStore` 拆为各层默认实现（L1 默认内置内存）。
+5. trigger.rs → `DefaultCurator` 主体化搬移（配置面/步骤面/
    后台队列与 drain/压缩改序）；`TurnContext`/`ConversationEndContext`
-   公开；`MemoryFlowError` typed 失败类型。
-5. `Conversation::end` 三动作改造（async、幂等 ended、is_ended、
-   state 扩展）；`ConversationState` 加 ended 字段。
-6. `sweep_stale` 重写（调 `conv.end`、失败经总线、ended 过滤、
+   公开（memory 字段为 `Memory<'_>` 聚合）；`MemoryFlowError`
+   typed 失败类型；`ConversationEvent::TopicShifted` 发射。
+6. `Conversation` 生命周期改造：`new`/`with_id` 签名带 runtime
+   （构造+初始 state 落库+emit Created）；`end` 三动作（async、
+   幂等 ended、is_ended、state 扩展）；`ConversationState` 加
+   ended 字段。
+7. `sweep_stale` 重写（调 `conv.end`、失败经总线、ended 过滤、
    返回值语义保留）。
-7. EventTap 正名（纯交付零件）与瘦身。
-8. Context 内部化（`Conversation::context()` 删除、`Context` 降
+8. EventTap 正名（纯交付零件）与瘦身。
+9. Context 内部化（`Conversation::context()` 删除、`Context` 降
    pub(crate)——既定决策并波次）。
-9. v4 架构文档（承载本 ADR 全部决策 + v3 §6 生命周期与编程范式
-   章节修正迁入；扩展点时序表进文档）。
-10. CHANGELOG 0.3.0（破坏项+迁移指引）；ADR-0015/0016 补修订
+10. v4 架构文档（承载本 ADR 全部决策 + v3 §6 生命周期与编程范式
+    章节修正迁入；扩展点时序表进文档）。
+11. CHANGELOG 0.3.0（破坏项+迁移指引）；ADR-0015/0016 补修订
     注记（APPROVED 时）。
 
 ## 开放项
 
-- `ConversationCreated`：发射源未解（自由构造时 runtime 不在场）；
-  多会话集中审计推模式需求出现时再立。
-- `TopicShifted { from, to }`：候选；EventSource=Curator 判定
-  漂移时通知总线。
-- 辅助调用（ContextManagement）的 round 归属规则：实施期精化
-  （候选：挂当前已进入循环/维护哨兵值）。
-- L1 内置为框架工作记忆（MemoryStore 瘦身为 L2/L3）：讨论搁置
-  ——记忆契约现状不动，Curator 基于既有契约调用。感知延迟
-  梯度（L1 即时 > L2 近期 > L3 长期；记忆感知延迟=记忆产生后
-  Agent 感知到它的速度）作为分层设计的核心 rationale 记录于
-  此，供未来该决策引用。
 - ended 状态门（终结后拒绝续写）：状态依据已就位，场景出现时
   带 ADR 立法。
-- 事件序列化（serde）在总线层的透传形态：实施期定。
 - 控制流影响（middleware/拦截）：③ 工作另立 ADR，暂无场景。
 - S3 Agent 间通信：④ 工作另立 ADR，总线词汇表为其留缝。
+
+（原开放项 1/2/3/4/6 已在本轮评审决议中闭合并落入 Decision
+相应小节：Created/TopicShifted 升在册、round: Option、Memory
+三契约位+聚合视图、serde 立法——见头部评审修订注记。）
