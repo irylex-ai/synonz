@@ -10,7 +10,97 @@ versions follow [Semantic Versioning](https://semver.org/).
 
 - Multi-agent orchestration (S3) — planned.
 
-## [0.2.0] - 2026-09-08
+## [0.3.0] - unreleased
+
+The reaction-architecture release: the event bus, the Agent-level
+Context state engine, the three-slot memory storage, and the complete
+conversation lifecycle. **Single-wave publication** — this version ships
+everything since 0.1.2, including all work originally staged for the
+unpublished 0.2.0 (its full record follows below).
+
+### Highlights
+
+- **Event bus (ADR-0017)**: one dual-lane dispatch facility on the
+  runtime. The **observation lane** (bounded queue, non-blocking
+  try_send, drop+lag reporting, panic isolation, in-order delivery)
+  carries the unified [`SynonzEvent`] vocabulary — three entity families
+  (`Turn` / `Conversation` / `Memory`). Registered observers see every
+  run unconditionally; the delivery (product narrative) is a separate
+  point-to-point pipeline with backpressure — never event-driven.
+- **Agent-level Context state engine**: the context is the agent's
+  state — `trait Context` with two methods (materialization +
+  maintenance), registered per agent. Three strategy slots
+  (`ContextAssembler` / `MemorySummarizer` / `ConversationTopicDetector`)
+  carry the extension axes; floor parameters (`l1_window` / `l2_cap`)
+  are builder values; the whole philosophy replaces via `impl Context`.
+  Maintenance runs as one background job per turn (compaction in the
+  race-free order summarize → append → pop, then distillation), facts
+  ride the bus, and the conversation-end teardown (drain + mechanical
+  L2→L3 promotion) is runtime structural behavior.
+- **Three-slot memory storage**: `MemoryL1Store` / `MemoryL2Store` /
+  `MemoryL3Store` — heterogeneous backends per layer (in-process
+  memory / Redis / vector stores), each slot replaced independently.
+  [`Memory`] is the first-class domain object: the three slots behind
+  one coherent facade, assembled by the runtime (`runtime.memory()` is
+  the single authority).
+- **Complete conversation lifecycle**: `new` / `with_id` / `of` / `end`
+  all take the environment and share one shape (mark, persist, notify).
+  `new` persists the initial state from birth (no directory hole) and
+  emits `Created`; `end` is idempotent, persists the `ended` state, and
+  emits `Ended { reason }` (`Explicit` / `IdleSwept`); the sweep
+  structurally skips ended conversations.
+
+### Breaking Changes (event-bus wave)
+
+- `AgentEvent` → `TurnEvent`, delivered inside the `SynonzEvent`
+  envelope (`Turn` / `Conversation` / `Memory` entity families;
+  three-level tags `type` / `kind` / `event`).
+- `Observer::on_event` takes `&SynonzEvent`;
+  `ObserverContext.execution_id` is `Option<u64>`; observation is
+  unconditional — `AgentBuilder::observability` retired.
+- `MemoryStore` (unified three-layer contract) retired → the three
+  per-layer contracts + the `Memory` facade; `RuntimeBuilder::memory_store`
+  → `memory_l1_store` / `memory_l2_store` / `memory_l3_store`;
+  `runtime.memory_store()` → `runtime.memory()`.
+- `ContextAssembly` / `AssemblyRequest` / `AssemblyOutput` →
+  `ContextAssembler` / `ContextAssemblerInput` / `ContextAssemblerOutput`;
+  assembly is an engine slot (`DefaultContext::with_assembler`), not a
+  runtime slot; `Conversation::context()` removed.
+- `EventPolicy` / `MemoryPolicies` retired: compaction-on-shift and
+  end-promotion are structural behaviors; the floors are engine builder
+  values.
+- `LifecycleEvent::MemoryFlowFailed` → `MemoryEvent::FlowFailed`
+  (stage + detail + moment: `AfterTurn` / `AtConversationEnd` /
+  `Background` / `Creation`).
+- Model/tool events carry `round: Option<usize>` (1-based reasoning
+  round; `None` = off-loop maintenance calls).
+- `Conversation::new` / `with_id` take the runtime again (the lifecycle
+  entry persists the initial state); `end` is `async` and idempotent;
+  `ConversationState` gained `ended`.
+- `RuntimeBuilder::idle_timeout` → `conversation_idle_timeout`
+  (transitional — the automatic monitoring story lands in the Monitor
+  ADR).
+
+### Migration Guidance (event-bus wave)
+
+| 0.2.0 (internal stage) | 0.3.0 |
+|---|---|
+| `AgentEvent` (match `Lifecycle`/`Model`/`Tool`) | `SynonzEvent::Turn(TurnEvent)`; conversation/memory facts in `Conversation` / `Memory` |
+| `Observer::on_event(&AgentEvent)` | `on_event(&SynonzEvent)`; run attribution via `ctx.execution_id` |
+| `.observability(true)` on the agent | delete — registered observers see every run |
+| `runtime.memory_store()` / `RuntimeBuilder::memory_store` | `runtime.memory()` (facade) / `memory_l1_store` + `memory_l2_store` + `memory_l3_store` |
+| `ContextAssembly` impl + `RuntimeBuilder::context_assembly` | `ContextAssembler` impl + `Agent::builder().context(DefaultContext::new().with_assembler(..))` |
+| `Conversation::new(&subject)` / `with_id(&subject, id)` | `Conversation::new(&runtime, &subject)` / `with_id(&runtime, &subject, id)` |
+| `conv.context(&runtime)` | delete — assembly lives in the agent's engine |
+| `MemoryPolicies::new(w, c)` / `EventPolicy` | `DefaultContext::new().l1_window(w).l2_cap(c)`; the end promotion is structural |
+| `LifecycleEvent::MemoryFlowFailed { stage, detail }` | `MemoryEvent::FlowFailed { stage, detail, moment }` |
+| `conv.end(&runtime)` (sync) | `conv.end(&runtime).await` (idempotent; emits `Ended`) |
+
+## [0.2.0] - not published (all changes ship in 0.3.0)
+
+Historical record of the internal implementation stage (ADR-0014/0015/
+0016). Some items were superseded by the 0.3.0 event-bus wave above —
+this section is retained as the stage's record.
 
 The contract-convergence release: a single execution face, closed
 execution contracts, the full background engine, the complete truth

@@ -79,8 +79,8 @@ pub enum Role {
 
 /// A capability invocation requested by the model.
 ///
-/// Carried by [`ContentBlock::ToolCall`] in assistant messages and echoed by
-/// [`AgentEvent::Tool`][crate::AgentEvent] events.
+/// Carried by [`ContentBlock::ToolCall`] in assistant messages and echoed
+/// by [`ToolEvent::CallRequested`][crate::ToolEvent] events.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ToolCall {
     /// Correlation id pairing this call with its result.

@@ -402,9 +402,9 @@ impl Conversation {
     ///
     /// Boundary: what migrates is the **truth record** — the
     /// turns. The memory layers (L2/L3) and topic state are the
-    /// `MemoryStore`'s own transactions and do not travel with an export;
-    /// restoration goes through [`Conversation::of`] with a store that
-    /// holds the state.
+    /// `Memory` facade's own transactions and do not travel with an
+    /// export; restoration goes through [`Conversation::of`] with a
+    /// store that holds the state.
     pub fn export(&self) -> Result<Vec<u8>, serde_json::Error> {
         serde_json::to_vec(&self.state())
     }
