@@ -279,7 +279,7 @@ Conversation（实体层 · 状态主权）
       不做：任何记忆业务
 ```
 
-- 两终结时机：`EndReason::{Explicit, IdleSwept}`（用户主动 /
+- 两终结时机：`ConversationEndReason::{Explicit, IdleSwept}`（用户主动 /
   程序兜底）。Explicit 调用者在场（EndOutcome 返回值携带行动
   车道软失败——返回值即事实）；IdleSwept 无人在场（失败经总线
   `MemoryEvent::FlowFailed` 上报——sweep 四层静默黑洞就此修复）。
@@ -333,7 +333,7 @@ in the payload）；推理调用带所在循环序号，工具事件带触发它
 | 事件 | 载荷 | EventSource |
 |---|---|---|
 | `Created` | conversation_id, subject_id | `Conversation::new`/`with_id`（带 runtime 三动作） |
-| `Ended` | conversation_id, subject_id, reason: EndReason::{Explicit, IdleSwept} | `Conversation::end` / sweep |
+| `Ended` | conversation_id, subject_id, reason: ConversationEndReason::{Explicit, IdleSwept} | `Conversation::end` / sweep |
 
 `TopicShifted { conversation_id, from, to }`（在册）——
 EventSource=Curator（`advance_topic` 判定漂移时通知）。装配侧
@@ -345,7 +345,7 @@ EventSource=Curator（`advance_topic` 判定漂移时通知）。装配侧
 **Memory 族**（平铺；流转即记忆条目的生命周期）：
 
 `TurnArchived`/`Compacted`/`Distilled`/`Promoted`（在册）、
-`FlowFailed { stage, detail, moment: FlowMoment::{AfterTurn,
+`FlowFailed { stage, detail, moment: MemoryFlowFailedMoment::{AfterTurn,
 AtConversationEnd, Background} }`（在册——所有 run 外记忆失败
 一个出口；run 内同步段失败维持 Turn 族叙事内表述）。
 
