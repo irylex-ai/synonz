@@ -1,6 +1,6 @@
 # ADR-0017: 事件总线与反应架构——EventBus、MemoryCurator 与 SynonzEvent
 
-- 状态: DRAFT（待 irylex 评审）
+- 状态: APPROVED（2026-09-09，irylex 人工评审通过）
 - 日期: 2026-09-09
 - 决策者: irylex（人类逐点确认）
 - 评审修订（DRAFT 期开放项决议落地，实施前）：①创建签名统一带

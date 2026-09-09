@@ -1,6 +1,14 @@
 # ADR-0016: Observer 可观测契约——旁路事件派发
 
 - 状态: APPROVED（2026-09-07，irylex 人工评审通过）
+- 被修订（ADR-0017，2026-09-09 APPROVED）：本 ADR 立法的旁路
+  派发**全部语义（保序/熔断/lag/终态 drain）升格为总线观察车道
+  的通用语义**——per-run `ObserverDispatcher` 与常驻通道合一为
+  总线常驻派发器；Observer 契约签名改为 `on_event(&SynonzEvent)`
+  （目击范围从 run 事件扩展到全实体族：Turn/Conversation/
+  Memory）；EventTap 回归纯交付零件（与总线无隶属关系）。旁路
+  立法（绝不拖慢执行、故障隔离、丢弃显式）逐条不变，承载设施
+  由总线统一。
 - 评审修订: `EventContext` → `ObserverContext`、`Dispatcher` →
   `ObserverDispatcher`（v3 架构文档评审期命名修正，实施前落地；
   与 ToolContext 先例同构——命名接收方子系统，消除 Event* 前缀

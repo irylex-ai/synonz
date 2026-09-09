@@ -1,6 +1,14 @@
 # ADR-0015: 执行契约封闭与 S2 收敛
 
 - 状态: APPROVED（2026-09-07，irylex 人工评审通过）
+- 被修订（ADR-0017，2026-09-09 APPROVED）：记忆流触发形态由
+  本 ADR 的内联 trigger 引擎升级为**事件总线 + MemoryCurator
+  契约**——`EventPolicy`（TopicShift/ConversationEnd 内联条件
+  调用）由 Curator 两锚点契约与总线行动车道取代；`Conversation::
+  end` 的内联 L2→L3 促进由总线派发给 Curator；`MemoryStore`
+  统一三层契约拆分为 `MemoryL1/L2/L3Store` 三独立位 + `Memory`
+  聚合视图；记忆失败统一 `MemoryEvent::FlowFailed`（moment 载荷）。
+  never-silent 立法（决策六）不变，可见性机制由总线承接。
 - 评审修订: "执行入口同源校验"被**结构性消除**取代——会话改为纯数据
   实体（identity + turns + topic，不持有 runtime），跨 runtime 混用
   在结构上无法造成分裂写入，校验、`belongs_to` 谓词与 panic 路径一
