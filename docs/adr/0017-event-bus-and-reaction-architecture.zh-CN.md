@@ -18,10 +18,14 @@
   `on_conversation_ended` 从契约删除，终结 = Runtime 结构行为
   （drain 会话维护表 + 机械促进 L2→L3，init 模式）；自定义终结走
   观察位（订阅 `ConversationEvent::Ended`）；总线行动车道立法保留
-  （S3 预留，0.3.0 无派发点）；⑧**EventPolicy 退役**（被总线体系
+  （S3 预留，0.3.0 无派发点）；sweep_stale / conversation_idle_timeout
+  维持现状为过渡态——框架内无自动调用方构成生命周期完备性缺口，
+  系统级自动监控归 **Monitor 机制**（独立 ADR-0018，0.3.0 实施后
+  启动）；⑧**EventPolicy 退役**（被总线体系
   结构性吸收：终结促进 = 结构行为、漂移冲刷 = 漂移的语义后果默认）
   与 **MemoryPolicies 退役**（楼层参数化）——RuntimeBuilder 收敛
-  五主位（conversation_store / l1 / l2 / l3 / observer）、零便捷位；
+  五主位（conversation_store / memory_l1_store / memory_l2_store /
+  memory_l3_store / observer，方法名 = 类型指代名）、零便捷位；
   ⑨**Memory 一等持有对象**（Runtime build() 组装三存储位、唯一持有、
   `runtime.memory()` 唯一出口；行为与数据分离——引擎经载荷接收，
   Runtime 为编排点；后台任务登记 Runtime 会话维护表，引擎无实例
