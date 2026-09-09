@@ -12,7 +12,7 @@
 
 use crate::conversation::Conversation;
 use crate::event::MemoryFlowStage;
-use crate::memory::MemoryStore;
+use crate::memory::Memory;
 use crate::message::Message;
 use crate::model::Model;
 use crate::runtime::SynonzRuntime;
@@ -25,8 +25,8 @@ use futures::future::BoxFuture;
 /// is not expressible.
 #[non_exhaustive]
 pub struct AssemblyRequest<'a> {
-    /// The memory store (the sole data source).
-    pub memory: &'a dyn MemoryStore,
+    /// The memory (the sole data source).
+    pub memory: &'a Memory,
     /// The subject owning the memory.
     pub subject: &'a Subject,
     /// The conversation whose layers are assembled.
@@ -113,9 +113,9 @@ impl Context {
     /// that succeeded — degraded, never silent.
     pub async fn assemble(&self, input: &str) -> AssemblyOutput {
         let topic = self.conversation.topic().unwrap_or_default();
-        let memory = self.runtime.memory_store();
+        let memory = self.runtime.memory();
         let request = AssemblyRequest {
-            memory: &*memory,
+            memory: &memory,
             subject: self.conversation.subject(),
             conversation_id: self.conversation.id(),
             topic: &topic,
@@ -153,12 +153,12 @@ impl Context {
     ) {
         let memory_policies = self.runtime.memory_policies();
         let topic_detector = self.runtime.topic_detector();
-        let memory = self.runtime.memory_store();
+        let memory = self.runtime.memory();
         let (topic, soft_errors) = crate::trigger::run_post_turn_flows(
             crate::trigger::PostTurn {
                 model,
                 conversation: &self.conversation,
-                memory: &*memory,
+                memory: &memory,
                 memory_policies: &memory_policies,
                 topic_detector: &*topic_detector,
                 input,
@@ -198,12 +198,10 @@ impl ContextAssembly for LayeredMemory {
             // L3 recall: independent System message (persona/memory
             // separation, P2).
             let topic = request.topic.to_string();
-            match request.memory.l3_retrieve(
-                request.subject,
-                request.input,
-                &topic,
-                DEFAULT_L3_BUDGET,
-            ) {
+            match request
+                .memory
+                .l3_query(request.subject, request.input, &topic, DEFAULT_L3_BUDGET)
+            {
                 Ok(l3) if !l3.is_empty() => {
                     let recall = l3
                         .iter()

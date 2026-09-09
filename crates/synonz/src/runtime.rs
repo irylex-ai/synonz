@@ -15,8 +15,11 @@ use std::time::Duration;
 use crate::bus::EventBus;
 use crate::context::{ContextAssembly, LayeredMemory};
 use crate::conversation::{Conversation, ConversationStore};
-use crate::inprocess::{InProcessConversationStore, InProcessMemoryStore};
-use crate::memory::MemoryStore;
+use crate::inprocess::{
+    InProcessConversationStore, InProcessMemoryL1Store, InProcessMemoryL2Store,
+    InProcessMemoryL3Store,
+};
+use crate::memory::{Memory, MemoryL1Store, MemoryL2Store, MemoryL3Store};
 use crate::trigger::{FirstSegmentDetector, MemoryPolicies, TopicDetector};
 
 /// The startup registry: every service has an in-process default;
@@ -24,12 +27,14 @@ use crate::trigger::{FirstSegmentDetector, MemoryPolicies, TopicDetector};
 #[derive(Default)]
 pub struct RuntimeBuilder {
     conversation_store: Option<Arc<dyn ConversationStore>>,
-    memory_store: Option<Arc<dyn MemoryStore>>,
+    memory_l1_store: Option<Arc<dyn MemoryL1Store>>,
+    memory_l2_store: Option<Arc<dyn MemoryL2Store>>,
+    memory_l3_store: Option<Arc<dyn MemoryL3Store>>,
     context_assembly: Option<Arc<dyn ContextAssembly>>,
     observers: Vec<Arc<dyn crate::bus::Observer>>,
     memory_policies: MemoryPolicies,
     topic_detector: Option<Arc<dyn TopicDetector>>,
-    idle_timeout: Option<Duration>,
+    conversation_idle_timeout: Option<Duration>,
 }
 
 impl RuntimeBuilder {
@@ -44,9 +49,22 @@ impl RuntimeBuilder {
         self
     }
 
-    /// Sets the memory store (default: in-process).
-    pub fn memory_store(mut self, memory_store: impl MemoryStore) -> Self {
-        self.memory_store = Some(Arc::new(memory_store));
+    /// Sets the L1 working memory store (default: built-in in-process
+    /// memory — the freshness layer expects memory-grade latency).
+    pub fn memory_l1_store(mut self, store: impl MemoryL1Store) -> Self {
+        self.memory_l1_store = Some(Arc::new(store));
+        self
+    }
+
+    /// Sets the L2 summary store (default: in-process).
+    pub fn memory_l2_store(mut self, store: impl MemoryL2Store) -> Self {
+        self.memory_l2_store = Some(Arc::new(store));
+        self
+    }
+
+    /// Sets the L3 knowledge store (default: in-process).
+    pub fn memory_l3_store(mut self, store: impl MemoryL3Store) -> Self {
+        self.memory_l3_store = Some(Arc::new(store));
         self
     }
 
@@ -81,8 +99,8 @@ impl RuntimeBuilder {
     /// for this long are ended by [`SynonzRuntime::sweep_stale`]
     /// (the ConversationEnd fallback; explicit `Conversation::end`
     /// remains the primary trigger).
-    pub fn idle_timeout(mut self, timeout: Duration) -> Self {
-        self.idle_timeout = Some(timeout);
+    pub fn conversation_idle_timeout(mut self, timeout: Duration) -> Self {
+        self.conversation_idle_timeout = Some(timeout);
         self
     }
 
@@ -92,9 +110,14 @@ impl RuntimeBuilder {
             conversation_store: self
                 .conversation_store
                 .unwrap_or_else(|| Arc::new(InProcessConversationStore::default())),
-            memory_store: self
-                .memory_store
-                .unwrap_or_else(|| Arc::new(InProcessMemoryStore::default())),
+            memory: Memory::new(
+                self.memory_l1_store
+                    .unwrap_or_else(|| Arc::new(InProcessMemoryL1Store::default())),
+                self.memory_l2_store
+                    .unwrap_or_else(|| Arc::new(InProcessMemoryL2Store::default())),
+                self.memory_l3_store
+                    .unwrap_or_else(|| Arc::new(InProcessMemoryL3Store::default())),
+            ),
             context_assembly: self
                 .context_assembly
                 .unwrap_or_else(|| Arc::new(LayeredMemory)),
@@ -103,7 +126,7 @@ impl RuntimeBuilder {
             topic_detector: self
                 .topic_detector
                 .unwrap_or_else(|| Arc::new(FirstSegmentDetector)),
-            idle_timeout: self.idle_timeout,
+            conversation_idle_timeout: self.conversation_idle_timeout,
         }
     }
 }
@@ -118,12 +141,14 @@ impl RuntimeBuilder {
 #[derive(Clone)]
 pub struct SynonzRuntime {
     conversation_store: Arc<dyn ConversationStore>,
-    memory_store: Arc<dyn MemoryStore>,
+    /// The layered memory as one domain object (assembled from the three
+    /// storage slots at build time; the runtime is its single authority).
+    memory: Memory,
     context_assembly: Arc<dyn ContextAssembly>,
     event_bus: EventBus,
     memory_policies: MemoryPolicies,
     topic_detector: Arc<dyn TopicDetector>,
-    idle_timeout: Option<Duration>,
+    conversation_idle_timeout: Option<Duration>,
 }
 
 impl SynonzRuntime {
@@ -137,13 +162,14 @@ impl SynonzRuntime {
         Arc::clone(&self.conversation_store)
     }
 
-    /// The registered (or default) memory store.
+    /// The layered memory (the three storage slots behind one facade).
     ///
-    /// Public for the Low Level track: direct store access (diagnostics,
-    /// custom stores, explicit operations) alongside the framework's own
-    /// orchestration.
-    pub fn memory_store(&self) -> Arc<dyn MemoryStore> {
-        Arc::clone(&self.memory_store)
+    /// Public for the Low Level track: direct memory access (diagnostics,
+    /// custom flows, explicit operations) alongside the framework's own
+    /// orchestration. This is the object's single authority — nobody
+    /// constructs a `Memory` by hand.
+    pub fn memory(&self) -> Memory {
+        self.memory.clone()
     }
 
     /// The registered (or default) context assembly strategy.
@@ -173,7 +199,7 @@ impl SynonzRuntime {
     /// equivalent periodic task); the explicit [`Conversation::end`]
     /// remains the primary trigger with the initiating side in control.
     pub async fn sweep_stale(&self) -> usize {
-        let Some(timeout) = self.idle_timeout else {
+        let Some(timeout) = self.conversation_idle_timeout else {
             return 0;
         };
         let now = std::time::SystemTime::now()

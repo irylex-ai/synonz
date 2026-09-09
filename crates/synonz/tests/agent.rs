@@ -431,7 +431,7 @@ async fn max_rounds_exceeded_fails_explicitly() {
         synonz::TurnOutcome::Failed(AgentError::MaxRoundsExceeded)
     ));
     // The memory layers were NOT fed from the failed turn.
-    let memory = runtime.memory_store();
+    let memory = runtime.memory();
     assert_eq!(memory.l1_len(&subject, conv.id()).expect("l1 len"), 0);
     let retried = agent.run(conv.turn_input("weather everywhere")).await;
     assert!(matches!(retried, Err(AgentError::MaxRoundsExceeded)));

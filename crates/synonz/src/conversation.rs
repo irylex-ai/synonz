@@ -54,8 +54,9 @@ pub struct ConversationState {
     pub last_active: u64,
 }
 
-/// The conversation persistence contract, sibling of
-/// [`crate::memory::MemoryStore`]). Implementations own storage; the
+/// The conversation persistence contract, sibling of the
+/// [`Memory`] facade and its three store contracts. Implementations own
+/// storage; the
 /// framework owns when saves happen (auto-save on turn completion,
 /// High Level).
 pub trait ConversationStore: Send + Sync + 'static {
@@ -256,8 +257,8 @@ impl Conversation {
     /// to surface them.
     pub fn end(&self, runtime: &SynonzRuntime) -> Vec<(crate::event::MemoryFlowStage, String)> {
         let memory_policies = runtime.memory_policies();
-        let memory = runtime.memory_store();
-        crate::trigger::run_end_flows(self, &memory_policies, &*memory)
+        let memory = runtime.memory();
+        crate::trigger::run_end_flows(self, &memory_policies, &memory)
     }
 
     /// The conversation's identity.

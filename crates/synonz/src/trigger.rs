@@ -13,7 +13,7 @@ use crate::bus::EventSink;
 
 use crate::conversation::Conversation;
 use crate::event::{CallPurpose, MemoryFlowStage, ModelEvent, TurnEvent};
-use crate::memory::{KnowledgeFragment, MemoryStore, SummaryBlock};
+use crate::memory::{KnowledgeFragment, Memory, SummaryBlock};
 use crate::message::{Message, Role};
 use crate::model::Model;
 use crate::model::ModelRequest;
@@ -122,7 +122,7 @@ pub(crate) struct PostTurn<'a> {
     pub conversation: &'a Conversation,
     /// The memory store the flows operate on (explicitly injected — the
     /// trigger never reaches for it).
-    pub memory: &'a dyn MemoryStore,
+    pub memory: &'a Memory,
     pub memory_policies: &'a MemoryPolicies,
     pub topic_detector: &'a dyn TopicDetector,
     /// The turn's user input (topic detection).
@@ -247,7 +247,7 @@ pub(crate) async fn run_post_turn_flows(
 async fn flush_l1_into_l2(
     model: &dyn Model,
     conversation: &Conversation,
-    memory: &dyn MemoryStore,
+    memory: &Memory,
     count: usize,
     sink: &EventSink,
 ) -> Result<(), String> {
@@ -274,7 +274,7 @@ async fn flush_l1_into_l2(
 pub(crate) fn run_end_flows(
     conversation: &Conversation,
     memory_policies: &MemoryPolicies,
-    memory: &dyn MemoryStore,
+    memory: &Memory,
 ) -> Vec<(MemoryFlowStage, String)> {
     if !memory_policies
         .extra

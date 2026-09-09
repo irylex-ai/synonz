@@ -1,17 +1,22 @@
 //! The in-process default implementations: conversation persistence and
-//! layered memory (register nothing, get the in-process defaults).
+//! the three memory layer stores (register nothing, get the in-process
+//! defaults).
 //!
-//! Both are process-local (data does not survive restart), deterministic,
+//! All are process-local (data does not survive restart), deterministic,
 //! and dependency-free — the bootstrap-quality defaults. Register real
 //! implementations (Redis, SQL, vector stores) on the runtime for
-//! persistence.
+//! persistence. The defaults are internal (pub(crate)): the public face
+//! is the contracts, not the bundled implementations.
 
 use std::collections::HashMap;
 use std::sync::Mutex;
 
 use crate::Subject;
 use crate::conversation::{ConversationState, ConversationStore, ConversationStoreError};
-use crate::memory::{KnowledgeFragment, L1Entry, MemoryStore, MemoryStoreError, SummaryBlock};
+use crate::memory::{
+    KnowledgeFragment, L1Entry, MemoryL1Store, MemoryL2Store, MemoryL3Store, MemoryStoreError,
+    SummaryBlock, Topic,
+};
 
 // ─────────────────────── conversation persistence ───────────────────────
 
@@ -50,57 +55,41 @@ impl ConversationStore for InProcessConversationStore {
     }
 }
 
-// ─────────────────────────── layered memory ─────────────────────────────
+// ───────────────────────── memory layer stores ──────────────────────────
 
+/// In-process L1 working memory (default implementation): the recent
+/// turns of each conversation, verbatim, memory-grade latency.
 #[derive(Default)]
-struct InMemoryLayers {
+pub(crate) struct InProcessMemoryL1Store {
     // subject identity string -> conversation id -> ordered L1 turns.
-    l1: HashMap<String, Vec<L1Entry>>,
-    // subject -> conversation id -> ordered L2 blocks.
-    l2: HashMap<String, Vec<SummaryBlock>>,
-    // subject -> ordered L3 fragments.
-    l3: HashMap<String, Vec<KnowledgeFragment>>,
+    l1: Mutex<HashMap<String, Vec<L1Entry>>>,
 }
 
-/// In-process layered memory (default implementation).
-///
-/// Retrieval uses topic matching plus recency ranking (TopicRecency) —
-/// zero external dependencies. Storage is process-local.
-#[derive(Default)]
-pub struct InProcessMemoryStore {
-    layers: Mutex<InMemoryLayers>,
-}
-
-impl MemoryStore for InProcessMemoryStore {
-    fn l1_append(
+impl MemoryL1Store for InProcessMemoryL1Store {
+    fn append(
         &self,
         subject: &Subject,
         conversation_id: &str,
-        topic: &crate::memory::Topic,
+        topic: &Topic,
         messages: Vec<crate::Message>,
     ) -> Result<(), MemoryStoreError> {
-        let mut layers = self.layers.lock().unwrap_or_else(|p| p.into_inner());
+        let mut l1 = self.l1.lock().unwrap_or_else(|p| p.into_inner());
         let entry = L1Entry {
             conversation_id: conversation_id.to_string(),
             topic: topic.to_string(),
             messages,
         };
-        layers
-            .l1
-            .entry(subject.to_string())
-            .or_default()
-            .push(entry);
+        l1.entry(subject.to_string()).or_default().push(entry);
         Ok(())
     }
 
-    fn l1_window(
+    fn window(
         &self,
         subject: &Subject,
         conversation_id: &str,
     ) -> Result<Vec<L1Entry>, MemoryStoreError> {
-        let layers = self.layers.lock().unwrap_or_else(|p| p.into_inner());
-        Ok(layers
-            .l1
+        let l1 = self.l1.lock().unwrap_or_else(|p| p.into_inner());
+        Ok(l1
             .get(&subject.to_string())
             .map(|entries| {
                 entries
@@ -112,14 +101,14 @@ impl MemoryStore for InProcessMemoryStore {
             .unwrap_or_default())
     }
 
-    fn l1_pop_oldest(
+    fn pop_oldest(
         &self,
         subject: &Subject,
         conversation_id: &str,
         n: usize,
     ) -> Result<Vec<L1Entry>, MemoryStoreError> {
-        let mut layers = self.layers.lock().unwrap_or_else(|p| p.into_inner());
-        let Some(entries) = layers.l1.get_mut(&subject.to_string()) else {
+        let mut l1 = self.l1.lock().unwrap_or_else(|p| p.into_inner());
+        let Some(entries) = l1.get_mut(&subject.to_string()) else {
             return Ok(Vec::new());
         };
         let mut popped = Vec::new();
@@ -137,10 +126,9 @@ impl MemoryStore for InProcessMemoryStore {
         Ok(popped)
     }
 
-    fn l1_len(&self, subject: &Subject, conversation_id: &str) -> Result<usize, MemoryStoreError> {
-        let layers = self.layers.lock().unwrap_or_else(|p| p.into_inner());
-        Ok(layers
-            .l1
+    fn len(&self, subject: &Subject, conversation_id: &str) -> Result<usize, MemoryStoreError> {
+        let l1 = self.l1.lock().unwrap_or_else(|p| p.into_inner());
+        Ok(l1
             .get(&subject.to_string())
             .map(|entries| {
                 entries
@@ -150,25 +138,29 @@ impl MemoryStore for InProcessMemoryStore {
             })
             .unwrap_or(0))
     }
+}
 
-    fn l2_append(&self, subject: &Subject, block: SummaryBlock) -> Result<(), MemoryStoreError> {
-        let mut layers = self.layers.lock().unwrap_or_else(|p| p.into_inner());
-        layers
-            .l2
-            .entry(subject.to_string())
-            .or_default()
-            .push(block);
+/// In-process L2 summary store (default implementation).
+#[derive(Default)]
+pub(crate) struct InProcessMemoryL2Store {
+    // subject -> conversation id -> ordered L2 blocks.
+    l2: Mutex<HashMap<String, Vec<SummaryBlock>>>,
+}
+
+impl MemoryL2Store for InProcessMemoryL2Store {
+    fn append(&self, subject: &Subject, block: SummaryBlock) -> Result<(), MemoryStoreError> {
+        let mut l2 = self.l2.lock().unwrap_or_else(|p| p.into_inner());
+        l2.entry(subject.to_string()).or_default().push(block);
         Ok(())
     }
 
-    fn l2_read(
+    fn read(
         &self,
         subject: &Subject,
         conversation_id: &str,
     ) -> Result<Vec<SummaryBlock>, MemoryStoreError> {
-        let layers = self.layers.lock().unwrap_or_else(|p| p.into_inner());
-        Ok(layers
-            .l2
+        let l2 = self.l2.lock().unwrap_or_else(|p| p.into_inner());
+        Ok(l2
             .get(&subject.to_string())
             .map(|blocks| {
                 blocks
@@ -180,10 +172,9 @@ impl MemoryStore for InProcessMemoryStore {
             .unwrap_or_default())
     }
 
-    fn l2_len(&self, subject: &Subject, conversation_id: &str) -> Result<usize, MemoryStoreError> {
-        let layers = self.layers.lock().unwrap_or_else(|p| p.into_inner());
-        Ok(layers
-            .l2
+    fn len(&self, subject: &Subject, conversation_id: &str) -> Result<usize, MemoryStoreError> {
+        let l2 = self.l2.lock().unwrap_or_else(|p| p.into_inner());
+        Ok(l2
             .get(&subject.to_string())
             .map(|blocks| {
                 blocks
@@ -194,14 +185,14 @@ impl MemoryStore for InProcessMemoryStore {
             .unwrap_or(0))
     }
 
-    fn l2_pop_oldest(
+    fn pop_oldest(
         &self,
         subject: &Subject,
         conversation_id: &str,
         n: usize,
     ) -> Result<Vec<SummaryBlock>, MemoryStoreError> {
-        let mut layers = self.layers.lock().unwrap_or_else(|p| p.into_inner());
-        let Some(blocks) = layers.l2.get_mut(&subject.to_string()) else {
+        let mut l2 = self.l2.lock().unwrap_or_else(|p| p.into_inner());
+        let Some(blocks) = l2.get_mut(&subject.to_string()) else {
             return Ok(Vec::new());
         };
         let mut popped = Vec::new();
@@ -218,14 +209,26 @@ impl MemoryStore for InProcessMemoryStore {
         *blocks = kept;
         Ok(popped)
     }
+}
 
-    fn l3_upsert(
+/// In-process L3 knowledge store (default implementation).
+///
+/// Retrieval uses topic matching plus recency ranking — zero external
+/// dependencies. Storage is process-local.
+#[derive(Default)]
+pub(crate) struct InProcessMemoryL3Store {
+    // subject -> ordered L3 fragments.
+    l3: Mutex<HashMap<String, Vec<KnowledgeFragment>>>,
+}
+
+impl MemoryL3Store for InProcessMemoryL3Store {
+    fn upsert(
         &self,
         subject: &Subject,
         fragment: KnowledgeFragment,
     ) -> Result<(), MemoryStoreError> {
-        let mut layers = self.layers.lock().unwrap_or_else(|p| p.into_inner());
-        let fragments = layers.l3.entry(subject.to_string()).or_default();
+        let mut l3 = self.l3.lock().unwrap_or_else(|p| p.into_inner());
+        let fragments = l3.entry(subject.to_string()).or_default();
         // Upsert by identity: replace an existing fragment on the same
         // (conversation, topic) identity, otherwise append.
         if let Some(existing) = fragments
@@ -239,16 +242,15 @@ impl MemoryStore for InProcessMemoryStore {
         Ok(())
     }
 
-    fn l3_retrieve(
+    fn query(
         &self,
         subject: &Subject,
         query: &str,
-        topic: &crate::memory::Topic,
+        topic: &Topic,
         budget: usize,
     ) -> Result<Vec<KnowledgeFragment>, MemoryStoreError> {
-        let layers = self.layers.lock().unwrap_or_else(|p| p.into_inner());
-        let mut candidates: Vec<KnowledgeFragment> = layers
-            .l3
+        let l3 = self.l3.lock().unwrap_or_else(|p| p.into_inner());
+        let mut candidates: Vec<KnowledgeFragment> = l3
             .get(&subject.to_string())
             .map(|fragments| {
                 fragments
@@ -266,10 +268,9 @@ impl MemoryStore for InProcessMemoryStore {
         Ok(candidates)
     }
 
-    fn l3_len(&self, subject: &Subject) -> Result<usize, MemoryStoreError> {
-        let layers = self.layers.lock().unwrap_or_else(|p| p.into_inner());
-        Ok(layers
-            .l3
+    fn len(&self, subject: &Subject) -> Result<usize, MemoryStoreError> {
+        let l3 = self.l3.lock().unwrap_or_else(|p| p.into_inner());
+        Ok(l3
             .get(&subject.to_string())
             .map(|fragments| fragments.len())
             .unwrap_or(0))

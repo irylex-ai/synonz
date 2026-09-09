@@ -60,8 +60,8 @@ pub use event::{
 };
 pub use io::{AgentInput, AgentOutput};
 pub use memory::{
-    FragmentIdentity, KnowledgeFragment, L1Entry, MemoryStore, MemoryStoreError, SummaryBlock,
-    Topic,
+    FragmentIdentity, KnowledgeFragment, L1Entry, Memory, MemoryL1Store, MemoryL2Store,
+    MemoryL3Store, MemoryStoreError, SummaryBlock, Topic,
 };
 pub use message::{
     CallId, CanonicalViolation, ContentBlock, Message, Role, ToolCall, ToolContent, ToolResult,

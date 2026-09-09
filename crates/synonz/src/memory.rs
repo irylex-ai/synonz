@@ -1,7 +1,10 @@
 //! The memory system: fragment model and the layered memory store
-//! contract.
+//! contracts.
 //!
-//! Memory is the subject-owned abstraction of interaction. Three layers:
+//! Memory is the subject-owned abstraction of interaction. Three layers,
+//! each an independent storage contract (heterogeneous backends are the
+//! norm: L1 in-process memory, L2 Redis, L3 vector stores — each slot
+//! scales and swaps on its own):
 //!
 //! - **L1**: the current conversation's recent turns (verbatim);
 //! - **L2**: summaries of this conversation's earlier turns (cached);
@@ -10,7 +13,15 @@
 //! Every fragment is uniquely located by the triple
 //! `(subject_id, conversation_id, topic)`. Orchestration (when flows
 //! happen) belongs to the framework; storage and retrieval logic belongs
-//! to [`MemoryStore`] implementations.
+//! to the store implementations.
+//!
+//! [`Memory`] is the domain object on the usage side: one handle
+//! aggregating the three slots, so callers read and write through a
+//! single coherent facade (`memory.l1_append(..)`) while the storage
+//! sides stay independently replaceable. It is assembled by the runtime
+//! and never constructed by hand — the runtime is its single authority.
+
+use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -102,15 +113,16 @@ pub enum MemoryStoreError {
     SubjectNotFound(String),
 }
 
-/// The layered memory contract.
+/// The L1 storage contract: the working memory layer (recent turns,
+/// verbatim).
 ///
-/// Implementations own *storage and retrieval logic*: what to persist,
-/// how to persist it, and which L3 fragments a retrieval returns.
-/// The framework owns orchestration: when turns are written, when
-/// summaries are generated, when demotions and promotions happen.
-pub trait MemoryStore: Send + Sync + 'static {
-    /// Appends one turn to L1 for the given conversation and topic.
-    fn l1_append(
+/// Implementations own L1 *storage*: what to persist and how to fetch it.
+/// The default expectation is memory-grade latency — L1 is the freshness
+/// layer of the perceptual-latency gradient (see the crate architecture
+/// documentation).
+pub trait MemoryL1Store: Send + Sync + 'static {
+    /// Appends one turn for the given conversation and topic.
+    fn append(
         &self,
         subject: &Subject,
         conversation_id: &str,
@@ -118,16 +130,16 @@ pub trait MemoryStore: Send + Sync + 'static {
         messages: Vec<crate::Message>,
     ) -> Result<(), MemoryStoreError>;
 
-    /// The current conversation's recent L1 turns, oldest first.
-    fn l1_window(
+    /// The conversation's recent L1 turns, oldest first.
+    fn window(
         &self,
         subject: &Subject,
         conversation_id: &str,
     ) -> Result<Vec<L1Entry>, MemoryStoreError>;
 
     /// Removes and returns the oldest `n` L1 turns of a conversation
-    /// (used by the framework's demotion flow).
-    fn l1_pop_oldest(
+    /// (used by the framework's compaction flow).
+    fn pop_oldest(
         &self,
         subject: &Subject,
         conversation_id: &str,
@@ -135,40 +147,49 @@ pub trait MemoryStore: Send + Sync + 'static {
     ) -> Result<Vec<L1Entry>, MemoryStoreError>;
 
     /// How many L1 turns a conversation currently holds.
-    fn l1_len(&self, subject: &Subject, conversation_id: &str) -> Result<usize, MemoryStoreError>;
+    fn len(&self, subject: &Subject, conversation_id: &str) -> Result<usize, MemoryStoreError>;
+}
 
+/// The L2 storage contract: the summary layer (earlier turns, compressed).
+pub trait MemoryL2Store: Send + Sync + 'static {
     /// Appends an L2 summary block.
-    fn l2_append(&self, subject: &Subject, block: SummaryBlock) -> Result<(), MemoryStoreError>;
+    fn append(&self, subject: &Subject, block: SummaryBlock) -> Result<(), MemoryStoreError>;
 
     /// The conversation's L2 summary blocks, oldest first.
-    fn l2_read(
+    fn read(
         &self,
         subject: &Subject,
         conversation_id: &str,
     ) -> Result<Vec<SummaryBlock>, MemoryStoreError>;
 
     /// How many L2 blocks a conversation currently holds.
-    fn l2_len(&self, subject: &Subject, conversation_id: &str) -> Result<usize, MemoryStoreError>;
+    fn len(&self, subject: &Subject, conversation_id: &str) -> Result<usize, MemoryStoreError>;
 
     /// Removes the oldest `n` L2 blocks of a conversation and returns
     /// them (for distillation into L3).
-    fn l2_pop_oldest(
+    fn pop_oldest(
         &self,
         subject: &Subject,
         conversation_id: &str,
         n: usize,
     ) -> Result<Vec<SummaryBlock>, MemoryStoreError>;
+}
 
+/// The L3 storage contract: the knowledge layer (cross-conversation,
+/// distilled).
+///
+/// Implementations own the retrieval *logic* — topic matching, semantic
+/// search, hybrids — not just storage.
+pub trait MemoryL3Store: Send + Sync + 'static {
     /// Upserts an L3 knowledge fragment.
-    fn l3_upsert(
+    fn upsert(
         &self,
         subject: &Subject,
         fragment: KnowledgeFragment,
     ) -> Result<(), MemoryStoreError>;
 
-    /// Retrieves relevant L3 fragments for the query (the retrieval
-    /// *logic* — topic matching, semantic search, hybrids — lives here).
-    fn l3_retrieve(
+    /// Retrieves relevant L3 fragments for the query.
+    fn query(
         &self,
         subject: &Subject,
         query: &str,
@@ -178,7 +199,135 @@ pub trait MemoryStore: Send + Sync + 'static {
 
     /// The subject's complete L3 fragment count (introspection for
     /// budgeting and diagnostics).
-    fn l3_len(&self, subject: &Subject) -> Result<usize, MemoryStoreError>;
+    fn len(&self, subject: &Subject) -> Result<usize, MemoryStoreError>;
+}
+
+/// The layered memory as one domain object: the three storage slots
+/// aggregated behind a single coherent facade.
+///
+/// Assembled by the runtime (its sole constructor); clones share the same
+/// slots. Callers read and write through the facade methods while the
+/// storage sides stay independently replaceable. **Boundary legislation**:
+/// a store implementation must never curate (compact, distill, promote on
+/// its own) — curation timing is driven by lifecycle facts and its
+/// visibility is legislated in the state engine layer.
+#[derive(Clone)]
+pub struct Memory {
+    l1: Arc<dyn MemoryL1Store>,
+    l2: Arc<dyn MemoryL2Store>,
+    l3: Arc<dyn MemoryL3Store>,
+}
+
+impl Memory {
+    /// Assembles the facade from the three slots (runtime-only).
+    pub(crate) fn new(
+        l1: Arc<dyn MemoryL1Store>,
+        l2: Arc<dyn MemoryL2Store>,
+        l3: Arc<dyn MemoryL3Store>,
+    ) -> Self {
+        Self { l1, l2, l3 }
+    }
+
+    /// Appends one turn to L1 for the given conversation and topic.
+    pub fn l1_append(
+        &self,
+        subject: &Subject,
+        conversation_id: &str,
+        topic: &Topic,
+        messages: Vec<crate::Message>,
+    ) -> Result<(), MemoryStoreError> {
+        self.l1.append(subject, conversation_id, topic, messages)
+    }
+
+    /// The current conversation's recent L1 turns, oldest first.
+    pub fn l1_window(
+        &self,
+        subject: &Subject,
+        conversation_id: &str,
+    ) -> Result<Vec<L1Entry>, MemoryStoreError> {
+        self.l1.window(subject, conversation_id)
+    }
+
+    /// Removes and returns the oldest `n` L1 turns of a conversation.
+    pub fn l1_pop_oldest(
+        &self,
+        subject: &Subject,
+        conversation_id: &str,
+        n: usize,
+    ) -> Result<Vec<L1Entry>, MemoryStoreError> {
+        self.l1.pop_oldest(subject, conversation_id, n)
+    }
+
+    /// How many L1 turns a conversation currently holds.
+    pub fn l1_len(
+        &self,
+        subject: &Subject,
+        conversation_id: &str,
+    ) -> Result<usize, MemoryStoreError> {
+        self.l1.len(subject, conversation_id)
+    }
+
+    /// Appends an L2 summary block.
+    pub fn l2_append(
+        &self,
+        subject: &Subject,
+        block: SummaryBlock,
+    ) -> Result<(), MemoryStoreError> {
+        self.l2.append(subject, block)
+    }
+
+    /// The conversation's L2 summary blocks, oldest first.
+    pub fn l2_read(
+        &self,
+        subject: &Subject,
+        conversation_id: &str,
+    ) -> Result<Vec<SummaryBlock>, MemoryStoreError> {
+        self.l2.read(subject, conversation_id)
+    }
+
+    /// How many L2 blocks a conversation currently holds.
+    pub fn l2_len(
+        &self,
+        subject: &Subject,
+        conversation_id: &str,
+    ) -> Result<usize, MemoryStoreError> {
+        self.l2.len(subject, conversation_id)
+    }
+
+    /// Removes the oldest `n` L2 blocks of a conversation and returns them.
+    pub fn l2_pop_oldest(
+        &self,
+        subject: &Subject,
+        conversation_id: &str,
+        n: usize,
+    ) -> Result<Vec<SummaryBlock>, MemoryStoreError> {
+        self.l2.pop_oldest(subject, conversation_id, n)
+    }
+
+    /// Upserts an L3 knowledge fragment.
+    pub fn l3_upsert(
+        &self,
+        subject: &Subject,
+        fragment: KnowledgeFragment,
+    ) -> Result<(), MemoryStoreError> {
+        self.l3.upsert(subject, fragment)
+    }
+
+    /// Retrieves relevant L3 fragments for the query.
+    pub fn l3_query(
+        &self,
+        subject: &Subject,
+        query: &str,
+        topic: &Topic,
+        budget: usize,
+    ) -> Result<Vec<KnowledgeFragment>, MemoryStoreError> {
+        self.l3.query(subject, query, topic, budget)
+    }
+
+    /// The subject's complete L3 fragment count.
+    pub fn l3_len(&self, subject: &Subject) -> Result<usize, MemoryStoreError> {
+        self.l3.len(subject)
+    }
 }
 
 fn now_epoch() -> u64 {
