@@ -12,15 +12,14 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use crate::bus::EventBus;
-use crate::context::{ContextAssembly, LayeredMemory};
+use crate::bus::{EventBus, MemoryEvent, MemoryFlowFailedMoment, SynonzEvent};
 use crate::conversation::{Conversation, ConversationStore};
+use crate::event::MemoryFlowStage;
 use crate::inprocess::{
     InProcessConversationStore, InProcessMemoryL1Store, InProcessMemoryL2Store,
     InProcessMemoryL3Store,
 };
 use crate::memory::{Memory, MemoryL1Store, MemoryL2Store, MemoryL3Store};
-use crate::trigger::{FirstSegmentDetector, MemoryPolicies, TopicDetector};
 
 /// The startup registry: every service has an in-process default;
 /// registration replaces it. Resolution can never fail.
@@ -30,10 +29,7 @@ pub struct RuntimeBuilder {
     memory_l1_store: Option<Arc<dyn MemoryL1Store>>,
     memory_l2_store: Option<Arc<dyn MemoryL2Store>>,
     memory_l3_store: Option<Arc<dyn MemoryL3Store>>,
-    context_assembly: Option<Arc<dyn ContextAssembly>>,
     observers: Vec<Arc<dyn crate::bus::Observer>>,
-    memory_policies: MemoryPolicies,
-    topic_detector: Option<Arc<dyn TopicDetector>>,
     conversation_idle_timeout: Option<Duration>,
 }
 
@@ -68,30 +64,11 @@ impl RuntimeBuilder {
         self
     }
 
-    /// Sets the context assembly strategy (default: `LayeredMemory`).
-    pub fn context_assembly(mut self, context_assembly: impl ContextAssembly) -> Self {
-        self.context_assembly = Some(Arc::new(context_assembly));
-        self
-    }
-
     /// Registers an observer of the full event stream. Unlike the other
     /// services there is **no default** — with no observer registered, the
     /// observation lane delivers to nobody (the bus itself still runs).
     pub fn observer(mut self, observer: impl crate::bus::Observer) -> Self {
         self.observers.push(Arc::new(observer));
-        self
-    }
-
-    /// Sets the memory policies (the resource floors always apply;
-    /// `extra` stacks event policies on top).
-    pub fn memory_policies(mut self, memory_policies: MemoryPolicies) -> Self {
-        self.memory_policies = memory_policies;
-        self
-    }
-
-    /// Sets the topic detector (default: first-segment heuristic).
-    pub fn topic_detector(mut self, topic_detector: impl TopicDetector) -> Self {
-        self.topic_detector = Some(Arc::new(topic_detector));
         self
     }
 
@@ -118,14 +95,8 @@ impl RuntimeBuilder {
                 self.memory_l3_store
                     .unwrap_or_else(|| Arc::new(InProcessMemoryL3Store::default())),
             ),
-            context_assembly: self
-                .context_assembly
-                .unwrap_or_else(|| Arc::new(LayeredMemory)),
             event_bus: EventBus::new(self.observers),
-            memory_policies: self.memory_policies,
-            topic_detector: self
-                .topic_detector
-                .unwrap_or_else(|| Arc::new(FirstSegmentDetector)),
+            maintenance: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
             conversation_idle_timeout: self.conversation_idle_timeout,
         }
     }
@@ -144,10 +115,13 @@ pub struct SynonzRuntime {
     /// The layered memory as one domain object (assembled from the three
     /// storage slots at build time; the runtime is its single authority).
     memory: Memory,
-    context_assembly: Arc<dyn ContextAssembly>,
     event_bus: EventBus,
-    memory_policies: MemoryPolicies,
-    topic_detector: Arc<dyn TopicDetector>,
+    /// The session maintenance table: conversation id → the background
+    /// maintenance tasks the agents' engines spawned there (the system
+    /// schedules what applications produce; conversation-end teardown
+    /// drains them).
+    maintenance:
+        Arc<std::sync::Mutex<std::collections::HashMap<String, Vec<tokio::task::JoinHandle<()>>>>>,
     conversation_idle_timeout: Option<Duration>,
 }
 
@@ -172,24 +146,96 @@ impl SynonzRuntime {
         self.memory.clone()
     }
 
-    /// The registered (or default) context assembly strategy.
-    pub(crate) fn context_assembly(&self) -> Arc<dyn ContextAssembly> {
-        Arc::clone(&self.context_assembly)
-    }
-
     /// The event bus (the resident dual-lane dispatch facility).
     pub(crate) fn event_bus(&self) -> &EventBus {
         &self.event_bus
     }
 
-    /// The memory policies (floors always apply).
-    pub(crate) fn memory_policies(&self) -> MemoryPolicies {
-        self.memory_policies.clone()
+    /// A maintenance-task registry handle scoped to one conversation.
+    pub(crate) fn task_registry(&self, conversation_id: &str) -> crate::context::TaskRegistry {
+        crate::context::TaskRegistry::new(Arc::clone(&self.maintenance), conversation_id)
     }
 
-    /// The topic detector.
-    pub(crate) fn topic_detector(&self) -> Arc<dyn TopicDetector> {
-        Arc::clone(&self.topic_detector)
+    /// The conversation-end teardown (the system's structural behavior):
+    /// drains the conversation's background maintenance tasks, then
+    /// mechanically promotes all L2 blocks into L3 (no model call, no
+    /// strategy). Failures surface as `FlowFailed { moment:
+    /// AtConversationEnd }` memory facts; success surfaces as `Promoted`.
+    pub(crate) async fn finalize_conversation(&self, conversation: &Conversation) {
+        // 1. Drain: the conversation's in-flight maintenance completes
+        //    before the promotion reads L2 — no unfinished blocks.
+        let handles = self
+            .maintenance
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .remove(conversation.id());
+        if let Some(handles) = handles {
+            for handle in handles {
+                let _ = handle.await; // job failures already surfaced via the bus
+            }
+        }
+
+        // 2. Mechanical promotion: every L2 block becomes L3 knowledge
+        //    under the conversation's topic.
+        let subject = conversation.subject();
+        let memory = &self.memory;
+        let l2_len = match memory.l2_len(subject, conversation.id()) {
+            Ok(len) => len,
+            Err(error) => {
+                self.event_bus
+                    .emit(SynonzEvent::Memory(MemoryEvent::FlowFailed {
+                        stage: MemoryFlowStage::Distill,
+                        detail: format!("promotion read: {error}"),
+                        moment: MemoryFlowFailedMoment::AtConversationEnd,
+                    }));
+                return;
+            }
+        };
+        if l2_len == 0 {
+            return;
+        }
+        let blocks = match memory.l2_pop_oldest(subject, conversation.id(), l2_len) {
+            Ok(blocks) => blocks,
+            Err(error) => {
+                self.event_bus
+                    .emit(SynonzEvent::Memory(MemoryEvent::FlowFailed {
+                        stage: MemoryFlowStage::Distill,
+                        detail: format!("promotion pop: {error}"),
+                        moment: MemoryFlowFailedMoment::AtConversationEnd,
+                    }));
+                return;
+            }
+        };
+        let topic = conversation.topic().unwrap_or_default();
+        let mut promoted = 0usize;
+        for block in blocks {
+            let fragment = crate::memory::KnowledgeFragment {
+                identity: crate::memory::FragmentIdentity {
+                    subject_id: subject.to_string(),
+                    conversation_id: block.conversation_id,
+                    topic: topic.clone(),
+                },
+                content: block.content,
+                created_at: now_epoch(),
+            };
+            if let Err(error) = memory.l3_upsert(subject, fragment) {
+                self.event_bus
+                    .emit(SynonzEvent::Memory(MemoryEvent::FlowFailed {
+                        stage: MemoryFlowStage::Distill,
+                        detail: format!("promotion upsert: {error}"),
+                        moment: MemoryFlowFailedMoment::AtConversationEnd,
+                    }));
+            } else {
+                promoted += 1;
+            }
+        }
+        if promoted > 0 {
+            self.event_bus
+                .emit(SynonzEvent::Memory(MemoryEvent::Promoted {
+                    conversation_id: conversation.id().to_string(),
+                    count: promoted,
+                }));
+        }
     }
 
     /// Sweeps conversations with no activity past the idle timeout,
@@ -226,12 +272,17 @@ impl SynonzRuntime {
                 continue;
             };
             if let Ok(conversation) = Conversation::of(self, &subject, &state.id) {
-                let soft_errors = conversation.end(self);
-                if soft_errors.is_empty() {
-                    ended += 1;
-                }
+                conversation.end(self).await;
+                ended += 1;
             }
         }
         ended
     }
+}
+
+fn now_epoch() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
 }

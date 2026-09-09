@@ -116,10 +116,11 @@ async fn observer_receives_the_full_stream_in_emission_order() {
         .map(|(_, kind)| kind.as_str())
         .collect();
     // Full stream, single round: started → requested → delta → responded
-    // → completed. Terminal last; input side visible.
+    // → archive fact → completed. Terminal last; input side visible; the
+    // memory facts ride the same bus (the engine's maintenance emits).
     assert_eq!(
         kinds,
-        vec!["started", "model", "delta", "model", "completed"],
+        vec!["started", "model", "delta", "model", "other", "completed"],
         "full stream in emission order"
     );
     // No overflow on this small stream.
@@ -181,8 +182,9 @@ async fn lag_is_reported_when_the_queue_overflows() {
 
     let recording = recorder.inner.lock().unwrap();
     // Total events of the run: started + requested + 300 deltas + responded
-    // + completed = 304. Delivered + dropped must account for every one of
-    // them — nothing vanishes silently.
+    // + completed = 304, plus the engine's archive fact = 305. Delivered +
+    // dropped must account for every one of them — nothing vanishes
+    // silently.
     let total_dropped = recording.lags.last().copied().unwrap_or(0);
     assert!(
         !recording.lags.is_empty(),
@@ -192,7 +194,7 @@ async fn lag_is_reported_when_the_queue_overflows() {
     );
     assert_eq!(
         recording.events.len() as u64 + total_dropped,
-        304,
+        305,
         "accounting is complete"
     );
 }

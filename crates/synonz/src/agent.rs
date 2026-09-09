@@ -67,11 +67,12 @@ use tokio::sync::mpsc;
 use crate::CancellationToken;
 use crate::bus::EventSink;
 use crate::cancel::{CancelCore, CancelHandle, CancelOutcome};
+use crate::context::{Context, ContextAssemblerInput, TurnContext};
 use crate::conversation::{Conversation, Turn, TurnInput};
 use crate::error::{AgentError, ModelError};
 use crate::event::{
-    CallPurpose, CancelReason, ExecutionEvent, LifecycleEvent, MemoryFlowStage, ModelEvent,
-    TokenUsage, ToolEvent, TurnEvent,
+    CallPurpose, CancelReason, ExecutionEvent, LifecycleEvent, ModelEvent, TokenUsage, ToolEvent,
+    TurnEvent,
 };
 use crate::io::{AgentInput, AgentOutput};
 use crate::message::{CallId, ContentBlock, Message, ToolCall, ToolResult};
@@ -110,6 +111,7 @@ pub struct AgentBuilder {
     tools: Vec<Arc<dyn Tool>>,
     system_prompt: Option<String>,
     max_rounds: Option<u32>,
+    context: Option<Arc<dyn Context>>,
 }
 
 impl AgentBuilder {
@@ -123,6 +125,16 @@ impl AgentBuilder {
     /// the same runtime (enforced at the execution entry).
     pub fn runtime(mut self, runtime: &SynonzRuntime) -> Self {
         self.runtime = Some(runtime.clone());
+        self
+    }
+
+    /// Sets the state engine (default: [`DefaultContext`] fully
+    /// defaulted). The engine is the agent's context — its materialization
+    /// (assembly) and maintenance (archive/compaction/distillation)
+    /// strategy; each agent carries its own (multi-agent strategy
+    /// differences are expressed here).
+    pub fn context(mut self, context: impl Context + 'static) -> Self {
+        self.context = Some(Arc::new(context));
         self
     }
 
@@ -210,14 +222,17 @@ impl AgentBuilder {
             system_prompt: self.system_prompt,
             max_rounds: self.max_rounds.unwrap_or(DEFAULT_MAX_ROUNDS),
             default_timeout: None,
+            context: self
+                .context
+                .unwrap_or_else(|| Arc::new(crate::context::DefaultContext::new())),
         })
     }
 }
 
-/// The agent's configuration: model + tools + system prompt + budget, plus
-/// the runtime it lives in (the agent knows its container; it
-/// holds no run state — every run's state lives inside the run, and the
-/// same agent can drive many concurrent runs independently).
+/// The agent's configuration: model + tools + system prompt + budget, its
+/// state engine, and the runtime it lives in (the agent knows its
+/// container; it holds no run state — every run's state lives inside the
+/// run, and the same agent can drive many concurrent runs independently).
 #[derive(Clone)]
 pub struct Agent {
     runtime: SynonzRuntime,
@@ -226,6 +241,7 @@ pub struct Agent {
     system_prompt: Option<String>,
     max_rounds: u32,
     default_timeout: Option<Duration>,
+    context: Arc<dyn Context>,
 }
 
 impl Agent {
@@ -383,6 +399,7 @@ impl Agent {
             system_prompt: self.system_prompt.clone(),
             max_rounds: self.max_rounds,
             conversation: conv.clone(),
+            context: Arc::clone(&self.context),
             sink,
         };
         tokio::spawn(task.execute(input, Arc::clone(&core)));
@@ -626,7 +643,7 @@ impl Future for Execution<'_> {
 
 /// The per-run task: everything the loop needs, all owned. The runtime is
 /// the agent's — the single source for every service the execution uses
-/// (memory, persistence, policies, assembly).
+/// (memory, persistence, the bus); the state engine is the agent's.
 struct AgentLoopTask {
     runtime: SynonzRuntime,
     model: Arc<dyn Model>,
@@ -634,6 +651,7 @@ struct AgentLoopTask {
     system_prompt: Option<String>,
     max_rounds: u32,
     conversation: Conversation,
+    context: Arc<dyn Context>,
     sink: EventSink,
 }
 
@@ -651,15 +669,23 @@ impl AgentLoopTask {
             }))
             .await;
 
-        // The background engine: the conversation's identity plus the
-        // operating runtime's services (explicitly wired, top-down).
-        let context = crate::context::Context::for_conversation(&self.conversation, &self.runtime);
-
-        // Moment 1: assemble. Memory reads that fail degrade the background
-        // visibly — the run continues with the layers that succeeded. (The
-        // failures are bus facts: the turn's frame is not built yet; a
-        // consumer gone at this point is caught below.)
-        let assembled = context.assemble(&input.text).await;
+        // Moment 1: materialize the state (the engine's assembly). Memory
+        // reads that fail degrade the background visibly — the run
+        // continues with the layers that succeeded. (The failures are bus
+        // facts: the turn's frame is not built yet; a consumer gone at
+        // this point is caught below.)
+        let memory = self.runtime.memory();
+        let topic = self.conversation.topic().unwrap_or_default();
+        let assembled = self
+            .context
+            .assemble(ContextAssemblerInput {
+                memory: &memory,
+                subject: self.conversation.subject(),
+                conversation_id: self.conversation.id(),
+                topic: &topic,
+                input: &input.text,
+            })
+            .await;
         for failure in &assembled.failures {
             sink.emit_memory(crate::MemoryEvent::FlowFailed {
                 stage: failure.stage.clone(),
@@ -689,7 +715,7 @@ impl AgentLoopTask {
                     .save(self.conversation.state())
                 {
                     sink.emit_memory(crate::MemoryEvent::FlowFailed {
-                        stage: MemoryFlowStage::Archive,
+                        stage: crate::event::MemoryFlowStage::Archive,
                         detail: format!("conversation auto-save failed: {error}"),
                         moment: crate::MemoryFlowFailedMoment::AfterTurn,
                     });
@@ -837,17 +863,28 @@ impl AgentLoopTask {
                     messages[base_len..].to_vec(),
                     output.clone(),
                 ));
-                // Moments 2 + 3: archive + compress the background. The
-                // summary call emits ContextManagement events before the
-                // terminal — visible, not magic.
-                context
-                    .on_turn_completed(
-                        &*self.model,
-                        &input.text,
-                        messages[base_len..].to_vec(),
-                        sink,
-                    )
-                    .await;
+                // Moments 2 + 3: maintain the state on turn completion.
+                // The synchronous segment (topic + archive) runs before
+                // the terminal; the heavy curation runs in the background
+                // (registered with the runtime's maintenance table).
+                let memory = self.runtime.memory();
+                let turn_context = TurnContext {
+                    conversation: &self.conversation,
+                    input: &input.text,
+                    messages: messages[base_len..].to_vec(),
+                    memory: &memory,
+                    model: Arc::clone(&self.model),
+                    events: sink.clone(),
+                    tasks: self.runtime.task_registry(self.conversation.id()),
+                };
+                let flow_errors = self.context.on_turn_completed(&turn_context).await;
+                for error in flow_errors {
+                    sink.emit_memory(crate::MemoryEvent::FlowFailed {
+                        stage: error.stage,
+                        detail: error.detail,
+                        moment: crate::MemoryFlowFailedMoment::AfterTurn,
+                    });
+                }
                 emit!(TurnEvent::Lifecycle(LifecycleEvent::Completed {
                     response: output,
                 }));

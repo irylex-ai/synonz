@@ -237,16 +237,17 @@ struct BusCore {
 /// Held by the runtime; clones share the same bus. Emission is
 /// non-blocking by legislation: a full observation queue counts the drop
 /// and moves on. The dispatcher task spawns lazily on the first emit
-/// inside an async context.
+/// inside an async context. The input is type-locked to
+/// [`SynonzEvent`] — non-framework events cannot enter the bus.
 #[derive(Clone)]
-pub(crate) struct EventBus {
+pub struct EventBus {
     core: Arc<BusCore>,
 }
 
 impl EventBus {
     /// Creates the bus and arms it with its observers. The dispatcher
     /// spawns on the first emit that runs inside an async context.
-    pub(crate) fn new(observers: Vec<Arc<dyn Observer>>) -> Self {
+    pub fn new(observers: Vec<Arc<dyn Observer>>) -> Self {
         let (sender, receiver) = mpsc::channel(OBSERVATION_QUEUE_CAP);
         Self {
             core: Arc::new(BusCore {
@@ -266,9 +267,9 @@ impl EventBus {
 
     /// Emits a run-external fact (no execution attribution).
     ///
-    /// Reserved for the conversation lifecycle (M19: `Created` / `Ended`).
-    #[allow(dead_code)]
-    pub(crate) fn emit(&self, event: SynonzEvent) {
+    /// The general emission path; the conversation lifecycle facts travel
+    /// here.
+    pub fn emit(&self, event: SynonzEvent) {
         self.emit_inner(None, event);
     }
 
@@ -383,7 +384,9 @@ pub struct EventSink {
 }
 
 impl EventSink {
-    pub(crate) fn new(bus: EventBus, execution_id: u64, consumer: mpsc::Sender<TurnEvent>) -> Self {
+    /// Assembles the outlet (framework-internal; exposed for tests and
+    /// custom orchestrators that must emit on an engine's behalf).
+    pub fn new(bus: EventBus, execution_id: u64, consumer: mpsc::Sender<TurnEvent>) -> Self {
         Self {
             bus,
             execution_id,
@@ -403,5 +406,12 @@ impl EventSink {
     pub fn emit_memory(&self, event: MemoryEvent) {
         self.bus
             .emit_for_run(self.execution_id, SynonzEvent::Memory(event));
+    }
+
+    /// Emits one conversation fact: bus only (never on the product
+    /// narrative).
+    pub fn emit_conversation(&self, event: ConversationEvent) {
+        self.bus
+            .emit_for_run(self.execution_id, SynonzEvent::Conversation(event));
     }
 }

@@ -33,7 +33,6 @@ pub mod model;
 pub mod runtime;
 pub mod subject;
 pub mod tool;
-pub mod trigger;
 
 mod cancel;
 
@@ -42,12 +41,13 @@ pub mod mock;
 
 pub use agent::{Agent, AgentBuilder, DEFAULT_MAX_ROUNDS, Execution};
 pub use bus::{
-    ConversationEndReason, ConversationEvent, MemoryEvent, MemoryFlowFailedMoment, Observer,
-    ObserverContext, SynonzEvent,
+    ConversationEndReason, ConversationEvent, EventBus, EventSink, MemoryEvent,
+    MemoryFlowFailedMoment, Observer, ObserverContext, SynonzEvent,
 };
 pub use context::{
-    AssemblyError, AssemblyFailure, AssemblyOutput, AssemblyRequest, Context, ContextAssembly,
-    LayeredMemory,
+    AssemblyFailure, Context, ContextAssembler, ContextAssemblerInput, ContextAssemblerOutput,
+    ConversationTopicDetector, DefaultContext, MemoryFlowError, MemorySummarizer, TaskRegistry,
+    TopicDecision, TurnContext,
 };
 pub use conversation::{
     Conversation, ConversationState, ConversationStore, ConversationStoreError, Turn, TurnInput,
@@ -72,7 +72,6 @@ pub use runtime::{RuntimeBuilder, SynonzRuntime};
 pub use subject::{Subject, SubjectType};
 pub use tokio_util::sync::CancellationToken;
 pub use tool::{Tool, ToolContext, ToolError, ToolSpec};
-pub use trigger::{EventPolicy, FirstSegmentDetector, MemoryPolicies, TopicDetector};
 
 #[cfg(feature = "test-util")]
 pub use mock::MockModel;

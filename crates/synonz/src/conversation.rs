@@ -239,26 +239,14 @@ impl Conversation {
         *self.topic.lock().unwrap_or_else(|p| p.into_inner()) = Some(topic.to_string());
     }
 
-    /// The narrative background of this conversation: the third persistent
-    /// object (session-scoped runtime), produced by the conversation
-    /// (factory attribution: the conversation owns the background's
-    /// identity). The execution derives it from the conversation plus the
-    /// operating runtime at run time — the background cannot be mounted
-    /// on the agent.
-    pub fn context(&self, runtime: &SynonzRuntime) -> crate::context::Context {
-        crate::context::Context::for_conversation(self, runtime)
-    }
-
-    /// Ends the conversation explicitly: runs the ConversationEnd flows
-    /// (L2 → L3 promotion) on the given runtime's memory when the policy
-    /// is enabled. The trigger authority belongs to the initiating side;
-    /// the idle timeout is the fallback for users who never call this.
-    /// Returns the flow failures (typed by stage) — the caller decides how
-    /// to surface them.
-    pub fn end(&self, runtime: &SynonzRuntime) -> Vec<(crate::event::MemoryFlowStage, String)> {
-        let memory_policies = runtime.memory_policies();
-        let memory = runtime.memory();
-        crate::trigger::run_end_flows(self, &memory_policies, &memory)
+    /// Ends the conversation: the two end paths are the explicit call
+    /// (the initiating side in control) and the idle-timeout sweep. The
+    /// end itself performs the generic acts of a lifecycle transition;
+    /// the state teardown (drain the conversation's background
+    /// maintenance, mechanical L2 → L3 promotion) is the runtime's
+    /// structural behavior — never this data entity's business.
+    pub async fn end(&self, runtime: &SynonzRuntime) {
+        runtime.finalize_conversation(self).await;
     }
 
     /// The conversation's identity.
