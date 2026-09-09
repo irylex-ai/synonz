@@ -1,7 +1,7 @@
 //! The event model: a run's single ordered narrative.
 //!
-//! Every meaningful thing that happens during one agent run is visible as an
-//! [`AgentEvent`] on the run's stream. The stream is the *only* information
+//! Every meaningful thing that happens during one agent run is visible as a
+//! [`TurnEvent`] on the run's stream. The stream is the *only* information
 //! channel: replaying it reconstructs the run completely (observation,
 //! auditing, deterministic testing). Events carry self-sufficient payloads —
 //! understanding a step never requires state outside the stream.
@@ -10,17 +10,18 @@
 //!
 //! Events form a two-level enum: the top level classifies by concern
 //! (lifecycle / model / tool), and each category owns its variants. In
-//! serialized form the category appears under `"type"` and the kind under
-//! `"event"`:
+//! serialized form the category appears under `"kind"` and the kind under
+//! `"event"` (the bus envelope [`crate::SynonzEvent`] adds the outer
+//! `"type"` = the entity family):
 //!
 //! ```
-//! use synonz::{AgentEvent, LifecycleEvent};
+//! use synonz::{TurnEvent, LifecycleEvent};
 //!
-//! let event = AgentEvent::Lifecycle(LifecycleEvent::Started {
+//! let event = TurnEvent::Lifecycle(LifecycleEvent::Started {
 //!     input: "weather in beijing?".into(),
 //! });
 //! let json = serde_json::to_value(&event).unwrap();
-//! assert_eq!(json["type"], "lifecycle");
+//! assert_eq!(json["kind"], "lifecycle");
 //! assert_eq!(json["event"], "started");
 //! ```
 //!
@@ -33,8 +34,8 @@
 //!   event.
 //! - A "round" spans from one
 //!   [`ModelEvent::Requested`] with
-//!   [`CallPurpose::Reasoning`] to the next; rounds are derived by consumers,
-//!   not stored.
+//!   [`CallPurpose::Reasoning`] to the next; the round number is carried
+//!   explicitly in the payload (`round`) — consumers never derive it.
 
 use crate::error::AgentError;
 use crate::io::AgentOutput;
@@ -44,8 +45,8 @@ use serde::{Deserialize, Serialize};
 /// The top-level event classification by concern.
 #[non_exhaustive]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(tag = "type", rename_all = "snake_case")]
-pub enum AgentEvent {
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum TurnEvent {
     /// Run lifecycle markers, including the terminal event.
     Lifecycle(LifecycleEvent),
     /// Model interactions (requests, streamed deltas, responses).
@@ -79,32 +80,6 @@ pub enum LifecycleEvent {
         /// Why the run was cancelled.
         reason: CancelReason,
     },
-    /// Non-terminal: a memory-flow failure (archive, topic, compression,
-    /// or assembly read). Memory failures are **visible, never silent**
-    /// (never silent) and do not abort the run.
-    MemoryFlowFailed {
-        /// Which stage of the background lifecycle failed.
-        stage: MemoryFlowStage,
-        /// Human-readable detail of the failure.
-        detail: String,
-    },
-}
-
-/// Which stage of the background lifecycle failed.
-#[non_exhaustive]
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum MemoryFlowStage {
-    /// Reading a memory layer during background assembly.
-    AssembleRead,
-    /// Writing the L1 archive after a completed turn.
-    Archive,
-    /// Updating the session topic.
-    TopicUpdate,
-    /// Summarizing demoted L1 turns into L2.
-    Summarize,
-    /// Distilling L2 overflow into L3.
-    Distill,
 }
 
 /// Why a run was cancelled.
@@ -136,16 +111,16 @@ impl core::fmt::Display for CancelReason {
 ///
 /// All model consumption inside a run is visible in the event stream; the
 /// purpose distinguishes reasoning-loop calls from auxiliary calls (which
-/// the framework itself does not make in v1 — no hidden model calls).
+/// carry `round: None` — see [`ModelEvent`]).
 #[non_exhaustive]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CallPurpose {
     /// Part of the reasoning loop (round boundary marker).
     Reasoning,
-    /// Context management such as summarization (future, S2).
+    /// Context management such as summarization.
     ContextManagement,
-    /// Classification such as intent routing (future, S3).
+    /// Classification such as intent routing (reserved for S3).
     Classification,
 }
 
@@ -183,6 +158,13 @@ pub enum ModelDelta {
     },
 }
 
+/// The reasoning-loop round an event belongs to.
+///
+/// One-based, matching the loop's round counter. `None` marks a call
+/// outside the reasoning loop (auxiliary calls such as summarization) —
+/// mutually confirming with [`CallPurpose::ContextManagement`].
+pub type Round = Option<usize>;
+
 /// Model interaction events.
 #[non_exhaustive]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -195,11 +177,16 @@ pub enum ModelEvent {
         /// The full canonical message list being sent (self-sufficient
         /// payload: no external state needed to interpret it).
         messages: Vec<Message>,
+        /// The reasoning round this call belongs to (`None` for auxiliary
+        /// calls outside the loop).
+        round: Round,
     },
     /// A streamed response fragment.
     StreamDelta {
         /// The delta fragment.
         delta: ModelDelta,
+        /// The reasoning round this delta belongs to.
+        round: Round,
     },
     /// The model produced a complete response.
     Responded {
@@ -207,6 +194,8 @@ pub enum ModelEvent {
         message: Message,
         /// Token accounting for this call.
         usage: TokenUsage,
+        /// The reasoning round this response belongs to.
+        round: Round,
     },
 }
 
@@ -219,6 +208,8 @@ pub enum ToolEvent {
     CallRequested {
         /// The invocation (id, tool name, arguments).
         call: ToolCall,
+        /// The reasoning round whose response issued the call.
+        round: Round,
     },
     /// A tool invocation finished (success or soft failure).
     CallCompleted {
@@ -226,12 +217,31 @@ pub enum ToolEvent {
         call_id: CallId,
         /// The tool outcome; `Err` is fed back to the model.
         result: ToolResult,
+        /// The reasoning round whose response issued the call.
+        round: Round,
     },
+}
+
+/// Which stage of the background lifecycle failed.
+#[non_exhaustive]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MemoryFlowStage {
+    /// Reading a memory layer during background assembly.
+    AssembleRead,
+    /// Writing the L1 archive after a completed turn.
+    Archive,
+    /// Updating the session topic.
+    TopicUpdate,
+    /// Summarizing demoted L1 turns into L2.
+    Summarize,
+    /// Distilling L2 overflow into L3.
+    Distill,
 }
 
 /// The product-narrative event of the execution face.
 ///
-/// A filtered projection of [`AgentEvent`]: input-side payloads
+/// A filtered projection of [`TurnEvent`]: input-side payloads
 /// (`Started` / `Requested` / `Responded`) stay on the observation
 /// bypass; everything a product consumer renders surfaces here. The
 /// terminal invariant carries over — a terminal variant is always the
@@ -267,5 +277,29 @@ mod tests {
     fn cancel_reason_displays() {
         assert_eq!(CancelReason::UserRequested.to_string(), "user requested");
         assert_eq!(CancelReason::Timeout.to_string(), "timeout");
+    }
+
+    #[test]
+    fn turn_event_serializes_with_kind_and_event_tags() {
+        let event = TurnEvent::Lifecycle(LifecycleEvent::Cancelled {
+            reason: CancelReason::Timeout,
+        });
+        let json = serde_json::to_value(&event).unwrap();
+        assert_eq!(json["kind"], "lifecycle");
+        assert_eq!(json["event"], "cancelled");
+        assert_eq!(json["reason"], "timeout");
+    }
+
+    #[test]
+    fn round_travels_on_model_events() {
+        let event = TurnEvent::Model(ModelEvent::Requested {
+            purpose: CallPurpose::Reasoning,
+            messages: Vec::new(),
+            round: Some(2),
+        });
+        let json = serde_json::to_value(&event).unwrap();
+        assert_eq!(json["kind"], "model");
+        assert_eq!(json["event"], "requested");
+        assert_eq!(json["round"], 2);
     }
 }

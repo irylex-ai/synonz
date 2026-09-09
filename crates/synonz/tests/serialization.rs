@@ -3,14 +3,20 @@
 //! The serialized shape of events is a wire contract (recording/replay,
 //! transport). These tests lock the exact JSON structure so accidental
 //! format changes surface as test failures.
+//!
+//! Tag scheme (three levels, three keys — no collisions):
+//! - `SynonzEvent`: `"type"` = entity family (turn / conversation / memory)
+//! - `TurnEvent`: `"kind"` = concern (lifecycle / model / tool)
+//! - variant enums: `"event"` = the kind (started / requested / ...)
 
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 use serde_json::json;
 use synonz::{
-    AgentError, AgentEvent, AgentInput, AgentOutput, CallId, CallPurpose, CancelReason,
-    ContentBlock, LifecycleEvent, Message, ModelDelta, ModelError, ModelEvent, Role, TokenUsage,
-    ToolCall, ToolContent, ToolEvent, ToolResult,
+    AgentError, AgentInput, AgentOutput, CallId, CallPurpose, CancelReason, ContentBlock,
+    ConversationEndReason, ConversationEvent, LifecycleEvent, MemoryEvent, MemoryFlowFailedMoment,
+    MemoryFlowStage, Message, ModelDelta, ModelError, ModelEvent, Role, SynonzEvent, TokenUsage,
+    ToolCall, ToolContent, ToolEvent, ToolResult, TurnEvent,
 };
 
 fn roundtrip<T: Serialize + DeserializeOwned + PartialEq + std::fmt::Debug>(value: &T) {
@@ -46,47 +52,100 @@ fn sample_messages() -> Vec<Message> {
 #[test]
 fn events_roundtrip() {
     let events = vec![
-        AgentEvent::Lifecycle(LifecycleEvent::Started {
+        TurnEvent::Lifecycle(LifecycleEvent::Started {
             input: AgentInput::new("weather in beijing?"),
         }),
-        AgentEvent::Model(ModelEvent::Requested {
+        TurnEvent::Model(ModelEvent::Requested {
             purpose: CallPurpose::Reasoning,
             messages: sample_messages(),
+            round: Some(1),
         }),
-        AgentEvent::Model(ModelEvent::StreamDelta {
+        TurnEvent::Model(ModelEvent::StreamDelta {
             delta: ModelDelta::Text {
                 text: "beijing is".into(),
             },
+            round: Some(1),
         }),
-        AgentEvent::Model(ModelEvent::Responded {
+        TurnEvent::Model(ModelEvent::Responded {
             message: Message::assistant_text("beijing is sunny, 28C."),
             usage: TokenUsage::new(120, 8),
+            round: Some(1),
         }),
-        AgentEvent::Tool(ToolEvent::CallRequested {
+        TurnEvent::Tool(ToolEvent::CallRequested {
             call: ToolCall::new("x1", "weather", json!({"city": "beijing"})),
+            round: Some(1),
         }),
-        AgentEvent::Tool(ToolEvent::CallCompleted {
+        TurnEvent::Tool(ToolEvent::CallCompleted {
             call_id: CallId::new("x1"),
             result: ToolResult::Err {
                 message: "service unavailable".into(),
             },
+            round: Some(1),
         }),
-        AgentEvent::Lifecycle(LifecycleEvent::Cancelled {
+        TurnEvent::Lifecycle(LifecycleEvent::Cancelled {
             reason: CancelReason::Timeout,
         }),
-        AgentEvent::Lifecycle(LifecycleEvent::Failed {
+        TurnEvent::Lifecycle(LifecycleEvent::Failed {
             error: AgentError::Model(ModelError::RateLimited {
                 message: "429".into(),
             }),
         }),
-        AgentEvent::Lifecycle(LifecycleEvent::Failed {
+        TurnEvent::Lifecycle(LifecycleEvent::Failed {
             error: AgentError::MaxRoundsExceeded,
         }),
-        AgentEvent::Lifecycle(LifecycleEvent::Completed {
+        TurnEvent::Lifecycle(LifecycleEvent::Completed {
             response: AgentOutput::new(
                 Message::assistant_text("beijing is sunny, 28C."),
                 TokenUsage::new(120, 8),
             ),
+        }),
+    ];
+    for event in &events {
+        roundtrip(event);
+    }
+}
+
+#[test]
+fn bus_families_roundtrip() {
+    let events = vec![
+        SynonzEvent::Turn(TurnEvent::Lifecycle(LifecycleEvent::Started {
+            input: AgentInput::new("hi"),
+        })),
+        SynonzEvent::Conversation(ConversationEvent::Created {
+            conversation_id: "conv-1".into(),
+            subject_id: "user-1".into(),
+        }),
+        SynonzEvent::Conversation(ConversationEvent::Ended {
+            conversation_id: "conv-1".into(),
+            subject_id: "user-1".into(),
+            reason: ConversationEndReason::IdleSwept,
+        }),
+        SynonzEvent::Conversation(ConversationEvent::TopicShifted {
+            conversation_id: "conv-1".into(),
+            from: "weather".into(),
+            to: "travel".into(),
+        }),
+        SynonzEvent::Memory(MemoryEvent::TurnArchived {
+            conversation_id: "conv-1".into(),
+            subject_id: "user-1".into(),
+            topic: "weather".into(),
+        }),
+        SynonzEvent::Memory(MemoryEvent::Compacted {
+            conversation_id: "conv-1".into(),
+            count: 3,
+        }),
+        SynonzEvent::Memory(MemoryEvent::Distilled {
+            conversation_id: "conv-1".into(),
+            count: 2,
+        }),
+        SynonzEvent::Memory(MemoryEvent::Promoted {
+            conversation_id: "conv-1".into(),
+            count: 4,
+        }),
+        SynonzEvent::Memory(MemoryEvent::FlowFailed {
+            stage: MemoryFlowStage::Summarize,
+            detail: "model call failed".into(),
+            moment: MemoryFlowFailedMoment::Background,
         }),
     ];
     for event in &events {
@@ -101,13 +160,29 @@ fn messages_roundtrip() {
 
 #[test]
 fn started_event_snapshot() {
-    let event = AgentEvent::Lifecycle(LifecycleEvent::Started {
+    let event = TurnEvent::Lifecycle(LifecycleEvent::Started {
         input: AgentInput::new("hi"),
     });
     assert_eq!(
         serde_json::to_value(&event).unwrap(),
         json!({
-            "type": "lifecycle",
+            "kind": "lifecycle",
+            "event": "started",
+            "input": { "text": "hi" },
+        })
+    );
+}
+
+#[test]
+fn turn_event_nests_inside_the_bus_envelope() {
+    let event = SynonzEvent::Turn(TurnEvent::Lifecycle(LifecycleEvent::Started {
+        input: AgentInput::new("hi"),
+    }));
+    assert_eq!(
+        serde_json::to_value(&event).unwrap(),
+        json!({
+            "type": "turn",
+            "kind": "lifecycle",
             "event": "started",
             "input": { "text": "hi" },
         })
@@ -116,16 +191,18 @@ fn started_event_snapshot() {
 
 #[test]
 fn model_requested_event_snapshot() {
-    let event = AgentEvent::Model(ModelEvent::Requested {
+    let event = TurnEvent::Model(ModelEvent::Requested {
         purpose: CallPurpose::Reasoning,
         messages: vec![Message::user("hi")],
+        round: Some(1),
     });
     assert_eq!(
         serde_json::to_value(&event).unwrap(),
         json!({
-            "type": "model",
+            "kind": "model",
             "event": "requested",
             "purpose": "reasoning",
+            "round": 1,
             "messages": [
                 {
                     "role": "user",
@@ -139,15 +216,44 @@ fn model_requested_event_snapshot() {
 }
 
 #[test]
+fn auxiliary_model_call_carries_null_round() {
+    let event = SynonzEvent::Turn(TurnEvent::Model(ModelEvent::Requested {
+        purpose: CallPurpose::ContextManagement,
+        messages: vec![Message::user("summarize")],
+        round: None,
+    }));
+    assert_eq!(
+        serde_json::to_value(&event).unwrap(),
+        json!({
+            "type": "turn",
+            "kind": "model",
+            "event": "requested",
+            "purpose": "context_management",
+            "round": null,
+            "messages": [
+                {
+                    "role": "user",
+                    "blocks": [
+                        { "block": "text", "text": "summarize" }
+                    ],
+                }
+            ],
+        })
+    );
+}
+
+#[test]
 fn tool_call_requested_event_snapshot() {
-    let event = AgentEvent::Tool(ToolEvent::CallRequested {
+    let event = TurnEvent::Tool(ToolEvent::CallRequested {
         call: ToolCall::new("x1", "weather", json!({"city": "beijing"})),
+        round: Some(1),
     });
     assert_eq!(
         serde_json::to_value(&event).unwrap(),
         json!({
-            "type": "tool",
+            "kind": "tool",
             "event": "call_requested",
+            "round": 1,
             "call": {
                 "call_id": "x1",
                 "name": "weather",
@@ -159,19 +265,21 @@ fn tool_call_requested_event_snapshot() {
 
 #[test]
 fn tool_call_completed_event_snapshot() {
-    let event = AgentEvent::Tool(ToolEvent::CallCompleted {
+    let event = TurnEvent::Tool(ToolEvent::CallCompleted {
         call_id: CallId::new("x1"),
         result: ToolResult::Ok {
             content: ToolContent::Text {
                 text: "sunny".into(),
             },
         },
+        round: Some(1),
     });
     assert_eq!(
         serde_json::to_value(&event).unwrap(),
         json!({
-            "type": "tool",
+            "kind": "tool",
             "event": "call_completed",
+            "round": 1,
             "call_id": "x1",
             "result": {
                 "ok": {
@@ -184,13 +292,13 @@ fn tool_call_completed_event_snapshot() {
 
 #[test]
 fn cancelled_event_snapshot() {
-    let event = AgentEvent::Lifecycle(LifecycleEvent::Cancelled {
+    let event = TurnEvent::Lifecycle(LifecycleEvent::Cancelled {
         reason: CancelReason::UserRequested,
     });
     assert_eq!(
         serde_json::to_value(&event).unwrap(),
         json!({
-            "type": "lifecycle",
+            "kind": "lifecycle",
             "event": "cancelled",
             "reason": "user_requested",
         })
@@ -227,17 +335,57 @@ fn assistant_tool_call_block_snapshot() {
 
 #[test]
 fn stream_delta_snapshot() {
-    let event = AgentEvent::Model(ModelEvent::StreamDelta {
+    let event = TurnEvent::Model(ModelEvent::StreamDelta {
         delta: ModelDelta::Text {
             text: "frag".into(),
         },
+        round: Some(2),
     });
     assert_eq!(
         serde_json::to_value(&event).unwrap(),
         json!({
-            "type": "model",
+            "kind": "model",
             "event": "stream_delta",
+            "round": 2,
             "delta": { "kind": "text", "text": "frag" },
+        })
+    );
+}
+
+#[test]
+fn conversation_ended_event_snapshot() {
+    let event = SynonzEvent::Conversation(ConversationEvent::Ended {
+        conversation_id: "conv-1".into(),
+        subject_id: "user-1".into(),
+        reason: ConversationEndReason::Explicit,
+    });
+    assert_eq!(
+        serde_json::to_value(&event).unwrap(),
+        json!({
+            "type": "conversation",
+            "event": "ended",
+            "conversation_id": "conv-1",
+            "subject_id": "user-1",
+            "reason": "explicit",
+        })
+    );
+}
+
+#[test]
+fn memory_flow_failed_event_snapshot() {
+    let event = SynonzEvent::Memory(MemoryEvent::FlowFailed {
+        stage: MemoryFlowStage::Archive,
+        detail: "l1 append failed".into(),
+        moment: MemoryFlowFailedMoment::AfterTurn,
+    });
+    assert_eq!(
+        serde_json::to_value(&event).unwrap(),
+        json!({
+            "type": "memory",
+            "event": "flow_failed",
+            "stage": "archive",
+            "detail": "l1 append failed",
+            "moment": "after_turn",
         })
     );
 }

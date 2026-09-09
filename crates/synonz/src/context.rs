@@ -11,11 +11,10 @@
 //! strategy decides what is sent; the framework owns when.
 
 use crate::conversation::Conversation;
-use crate::event::{AgentEvent, LifecycleEvent, MemoryFlowStage};
+use crate::event::MemoryFlowStage;
 use crate::memory::MemoryStore;
 use crate::message::Message;
 use crate::model::Model;
-use crate::observer::EventTap;
 use crate::runtime::SynonzRuntime;
 use crate::subject::Subject;
 use futures::future::BoxFuture;
@@ -142,15 +141,15 @@ impl Context {
     /// cancelled turns enter the truth archive only — they never feed the
     /// memory layers.
     ///
-    /// Flow failures are emitted as `MemoryFlowFailed` events through the
-    /// event tap — visible, never silent; they do
+    /// Flow failures are emitted as `FlowFailed` memory facts through the
+    /// event sink — visible, never silent; they do
     /// not abort the run.
     pub(crate) async fn on_turn_completed(
         &self,
         model: &dyn Model,
         input: &str,
         messages: Vec<Message>,
-        tap: &EventTap,
+        sink: &crate::bus::EventSink,
     ) {
         let memory_policies = self.runtime.memory_policies();
         let topic_detector = self.runtime.topic_detector();
@@ -165,16 +164,15 @@ impl Context {
                 input,
                 messages,
             },
-            tap,
+            sink,
         )
         .await;
         for (stage, detail) in soft_errors {
-            let _ = tap
-                .emit(AgentEvent::Lifecycle(LifecycleEvent::MemoryFlowFailed {
-                    stage,
-                    detail,
-                }))
-                .await;
+            sink.emit_memory(crate::MemoryEvent::FlowFailed {
+                stage,
+                detail,
+                moment: crate::MemoryFlowFailedMoment::AfterTurn,
+            });
         }
         let _ = topic;
     }

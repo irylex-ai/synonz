@@ -1,9 +1,10 @@
-//! `events`: the observation bypass — a recording Observer watching the
-//! full event stream of a run.
+//! `events`: the event bus — a recording Observer watching the full event
+//! stream of a run.
 //!
 //! The observer sees everything, including the input-side payloads
 //! (Started / Requested / Responded) that the product narrative face
-//! filters out. Run:
+//! filters out. Registered observers observe every run — unconditionally.
+//! Run:
 //! `cargo run -p synonz-examples --bin events`
 
 use std::sync::Arc;
@@ -11,8 +12,8 @@ use std::sync::Mutex;
 
 use futures::StreamExt;
 use synonz::{
-    Agent, AgentEvent, ExecutionEvent, Observer, ObserverContext, Subject, SubjectType,
-    SynonzRuntime,
+    Agent, ExecutionEvent, Observer, ObserverContext, Subject, SubjectType, SynonzEvent,
+    SynonzRuntime, TurnEvent,
 };
 
 /// A model that streams two text deltas and then finishes.
@@ -42,7 +43,7 @@ impl synonz::Model for StreamingModel {
 }
 
 /// A recording observer: appends every event to a shared log. Real
-/// recorders would serialize (AgentEvent is serde) into files, tracing
+/// recorders would serialize (SynonzEvent is serde) into files, tracing
 /// pipelines, or an OTel exporter — heavy work belongs in the observer's
 /// own queue, never on the dispatcher.
 #[derive(Default)]
@@ -51,26 +52,37 @@ struct RecordingObserver {
 }
 
 impl Observer for RecordingObserver {
-    fn on_event(&self, ctx: &ObserverContext, event: &AgentEvent) {
+    fn on_event(&self, ctx: &ObserverContext, event: &SynonzEvent) {
+        let run = ctx
+            .execution_id
+            .map(|id| id.to_string())
+            .unwrap_or_else(|| "external".into());
         let line = match event {
-            AgentEvent::Lifecycle(synonz::LifecycleEvent::Started { input }) => {
-                format!("[{}] started: {}", ctx.execution_id, input.text)
+            SynonzEvent::Turn(TurnEvent::Lifecycle(synonz::LifecycleEvent::Started { input })) => {
+                format!("[{run}] started: {}", input.text)
             }
-            AgentEvent::Model(synonz::ModelEvent::Requested { purpose, .. }) => {
-                format!("[{}] model call requested ({purpose:?})", ctx.execution_id)
+            SynonzEvent::Turn(TurnEvent::Model(synonz::ModelEvent::Requested {
+                purpose, ..
+            })) => {
+                format!("[{run}] model call requested ({purpose:?})")
             }
-            AgentEvent::Model(synonz::ModelEvent::StreamDelta {
+            SynonzEvent::Turn(TurnEvent::Model(synonz::ModelEvent::StreamDelta {
                 delta: synonz::ModelDelta::Text { text },
-            }) => {
-                format!("[{}] delta: {text:?}", ctx.execution_id)
+                ..
+            })) => {
+                format!("[{run}] delta: {text:?}")
             }
-            AgentEvent::Model(synonz::ModelEvent::Responded { usage, .. }) => {
-                format!("[{}] model responded ({usage:?})", ctx.execution_id)
+            SynonzEvent::Turn(TurnEvent::Model(synonz::ModelEvent::Responded {
+                usage, ..
+            })) => {
+                format!("[{run}] model responded ({usage:?})")
             }
-            AgentEvent::Lifecycle(synonz::LifecycleEvent::Completed { .. }) => {
-                format!("[{}] completed", ctx.execution_id)
+            SynonzEvent::Turn(TurnEvent::Lifecycle(synonz::LifecycleEvent::Completed {
+                ..
+            })) => {
+                format!("[{run}] completed")
             }
-            other => format!("[{}] other: {other:?}", ctx.execution_id),
+            other => format!("[{run}] other: {other:?}"),
         };
         println!("{line}");
         self.log.lock().unwrap().push(line);
@@ -84,7 +96,6 @@ async fn main() {
     let mut conv = synonz::Conversation::new(&Subject::of(SubjectType::User, "demo"));
     let agent = Agent::builder()
         .runtime(&runtime)
-        .observability(true) // open the observation face for this agent
         .model(StreamingModel)
         .build()
         .expect("model is set");

@@ -9,10 +9,10 @@
 //! uses the agent's model and is visible in the event stream under
 //! [`crate::CallPurpose::ContextManagement`].
 
-use crate::observer::EventTap;
+use crate::bus::EventSink;
 
 use crate::conversation::Conversation;
-use crate::event::{AgentEvent, CallPurpose, LifecycleEvent, MemoryFlowStage, ModelEvent};
+use crate::event::{CallPurpose, MemoryFlowStage, ModelEvent, TurnEvent};
 use crate::memory::{KnowledgeFragment, MemoryStore, SummaryBlock};
 use crate::message::{Message, Role};
 use crate::model::Model;
@@ -134,15 +134,15 @@ pub(crate) struct PostTurn<'a> {
 /// Runs the post-turn memory flows: L1 write, topic update, resource
 /// floors, and stacked event policies. Emits `ContextManagement` events
 /// for summarization calls into `emit`; returns the current topic plus
-/// the typed soft errors (surfaced by the caller as `MemoryFlowFailed`
-/// events — degraded but never silent).
+/// the typed soft errors (surfaced by the caller as `FlowFailed` memory
+/// facts — degraded but never silent).
 ///
 /// Failures of the *flows* are non-fatal (memory is auxiliary): they do
 /// not fail the run (the run's own terminal event is emitted by the
 /// caller).
 pub(crate) async fn run_post_turn_flows(
     ctx: PostTurn<'_>,
-    tap: &EventTap,
+    sink: &EventSink,
 ) -> (String, Vec<(MemoryFlowStage, String)>) {
     let PostTurn {
         model,
@@ -175,7 +175,7 @@ pub(crate) async fn run_post_turn_flows(
     if topic_shift_enabled && decision.shifted {
         match memory.l1_len(conversation.subject(), conversation.id()) {
             Ok(l1_len) if l1_len > 0 => {
-                if let Err(e) = flush_l1_into_l2(model, conversation, memory, l1_len, tap).await {
+                if let Err(e) = flush_l1_into_l2(model, conversation, memory, l1_len, sink).await {
                     soft_errors.push((MemoryFlowStage::Summarize, e));
                 }
             }
@@ -191,7 +191,7 @@ pub(crate) async fn run_post_turn_flows(
     match memory.l1_len(conversation.subject(), conversation.id()) {
         Ok(l1_len) if l1_len > memory_policies.l1_window => {
             let overflow = l1_len - memory_policies.l1_window;
-            if let Err(e) = flush_l1_into_l2(model, conversation, memory, overflow, tap).await {
+            if let Err(e) = flush_l1_into_l2(model, conversation, memory, overflow, sink).await {
                 soft_errors.push((MemoryFlowStage::Summarize, e));
             }
         }
@@ -249,12 +249,12 @@ async fn flush_l1_into_l2(
     conversation: &Conversation,
     memory: &dyn MemoryStore,
     count: usize,
-    tap: &EventTap,
+    sink: &EventSink,
 ) -> Result<(), String> {
     let popped = memory
         .l1_pop_oldest(conversation.subject(), conversation.id(), count)
         .map_err(|e| format!("l1 pop: {e}"))?;
-    let summary = summarize_l1(model, &popped, tap).await;
+    let summary = summarize_l1(model, &popped, sink).await;
     memory
         .l2_append(
             conversation.subject(),
@@ -327,7 +327,7 @@ pub(crate) fn run_end_flows(
 async fn summarize_l1(
     model: &dyn Model,
     entries: &[crate::memory::L1Entry],
-    tap: &EventTap,
+    sink: &EventSink,
 ) -> String {
     if entries.is_empty() {
         return String::new();
@@ -357,19 +357,21 @@ async fn summarize_l1(
     let request = Message::user(format!(
         "Summarize the following conversation turns into one short paragraph, preserving key facts, decisions, and preferences:\n\n{transcript}"
     ));
-    let emit_requested = AgentEvent::Model(ModelEvent::Requested {
+    let emit_requested = TurnEvent::Model(ModelEvent::Requested {
         purpose: CallPurpose::ContextManagement,
         messages: vec![request.clone()],
+        round: None,
     });
-    let _ = tap.emit(emit_requested).await;
+    let _ = sink.emit_turn(emit_requested).await;
 
     let request = ModelRequest::new(vec![request], Vec::new());
     match crate::model::complete(model, request).await {
         Ok((message, usage)) => {
-            let _ = tap
-                .emit(AgentEvent::Model(ModelEvent::Responded {
+            let _ = sink
+                .emit_turn(TurnEvent::Model(ModelEvent::Responded {
                     message: message.clone(),
                     usage,
+                    round: None,
                 }))
                 .await;
             message_text(&message).unwrap_or_default()
@@ -378,14 +380,13 @@ async fn summarize_l1(
             // Lossless degradation: the raw transcript becomes the L2
             // content — and the degradation is VISIBLE (memory-flow
             // failures are never silent).
-            let _ = tap
-                .emit(AgentEvent::Lifecycle(LifecycleEvent::MemoryFlowFailed {
-                    stage: MemoryFlowStage::Summarize,
-                    detail: format!(
-                        "summarization failed; the raw transcript was archived as the summary: {error}"
-                    ),
-                }))
-                .await;
+            sink.emit_memory(crate::MemoryEvent::FlowFailed {
+                stage: MemoryFlowStage::Summarize,
+                detail: format!(
+                    "summarization failed; the raw transcript was archived as the summary: {error}"
+                ),
+                moment: crate::MemoryFlowFailedMoment::AfterTurn,
+            });
             transcript
         }
     }

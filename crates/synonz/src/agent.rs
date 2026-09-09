@@ -65,12 +65,13 @@ use futures::StreamExt;
 use tokio::sync::mpsc;
 
 use crate::CancellationToken;
+use crate::bus::EventSink;
 use crate::cancel::{CancelCore, CancelHandle, CancelOutcome};
 use crate::conversation::{Conversation, Turn, TurnInput};
 use crate::error::{AgentError, ModelError};
 use crate::event::{
-    AgentEvent, CallPurpose, CancelReason, ExecutionEvent, LifecycleEvent, MemoryFlowStage,
-    ModelEvent, TokenUsage, ToolEvent,
+    CallPurpose, CancelReason, ExecutionEvent, LifecycleEvent, MemoryFlowStage, ModelEvent,
+    TokenUsage, ToolEvent, TurnEvent,
 };
 use crate::io::{AgentInput, AgentOutput};
 use crate::message::{CallId, ContentBlock, Message, ToolCall, ToolResult};
@@ -109,7 +110,6 @@ pub struct AgentBuilder {
     tools: Vec<Arc<dyn Tool>>,
     system_prompt: Option<String>,
     max_rounds: Option<u32>,
-    observability: bool,
 }
 
 impl AgentBuilder {
@@ -123,16 +123,6 @@ impl AgentBuilder {
     /// the same runtime (enforced at the execution entry).
     pub fn runtime(mut self, runtime: &SynonzRuntime) -> Self {
         self.runtime = Some(runtime.clone());
-        self
-    }
-
-    /// Enables the observation bypass for this agent's runs:
-    /// every event is tapped to the runtime's registered observers on a
-    /// side queue — the hot path never waits. Default **off**: the
-    /// observation face is closed unless explicitly opened (it is
-    /// normally carried by a dedicated service).
-    pub fn observability(mut self, enabled: bool) -> Self {
-        self.observability = enabled;
         self
     }
 
@@ -220,7 +210,6 @@ impl AgentBuilder {
             system_prompt: self.system_prompt,
             max_rounds: self.max_rounds.unwrap_or(DEFAULT_MAX_ROUNDS),
             default_timeout: None,
-            observability: self.observability,
         })
     }
 }
@@ -237,7 +226,6 @@ pub struct Agent {
     system_prompt: Option<String>,
     max_rounds: u32,
     default_timeout: Option<Duration>,
-    observability: bool,
 }
 
 impl Agent {
@@ -370,9 +358,8 @@ impl Agent {
     }
 
     /// Spawns the loop task and wraps its shared execution state in an
-    /// [`AgentRunner`] — the machinery both `Execution` (now) and the
-    /// Observer bypass hang off. Applies the agent's default
-    /// time budget when one is set.
+    /// [`AgentRunner`] — the machinery the `Execution` handle hangs off.
+    /// Applies the agent's default time budget when one is set.
     fn spawn_runner(
         &self,
         input: AgentInput,
@@ -380,22 +367,15 @@ impl Agent {
         core: Arc<CancelCore>,
     ) -> AgentRunner {
         let (sender, receiver) = mpsc::channel(1);
-        // The observation bypass: when the switch is on and the
-        // runtime has observers, events are tapped into a bounded side
-        // queue; a per-run dispatcher delivers them off the hot path.
-        let observation = if self.observability && !self.runtime.observers().is_empty() {
-            Some(crate::observer::ObservationQueue::spawn(
-                self.runtime.observers().to_vec(),
-                crate::observer::next_execution_id(),
-            ))
-        } else {
-            None
-        };
-        let tap = if let Some(observation) = observation {
-            crate::observer::EventTap::with_observation(sender, observation)
-        } else {
-            crate::observer::EventTap::consumer_only(sender)
-        };
+        // The run's event outlet: the bus is notified on every emission
+        // (observers registered at the runtime observe every run — no
+        // per-agent gate), the delivery channel carries the product
+        // narrative.
+        let sink = EventSink::new(
+            self.runtime.event_bus().clone(),
+            crate::bus::next_execution_id(),
+            sender,
+        );
         let task = AgentLoopTask {
             runtime: self.runtime.clone(),
             model: Arc::clone(&self.model),
@@ -403,7 +383,7 @@ impl Agent {
             system_prompt: self.system_prompt.clone(),
             max_rounds: self.max_rounds,
             conversation: conv.clone(),
-            tap,
+            sink,
         };
         tokio::spawn(task.execute(input, Arc::clone(&core)));
         let runner = AgentRunner {
@@ -420,11 +400,11 @@ impl Agent {
 }
 
 /// Maps a terminal lifecycle event onto the run's final outcome.
-fn map_terminal(event: &AgentEvent) -> Option<Result<AgentOutput, AgentError>> {
+fn map_terminal(event: &TurnEvent) -> Option<Result<AgentOutput, AgentError>> {
     match event {
-        AgentEvent::Lifecycle(LifecycleEvent::Completed { response }) => Some(Ok(response.clone())),
-        AgentEvent::Lifecycle(LifecycleEvent::Failed { error }) => Some(Err(error.clone())),
-        AgentEvent::Lifecycle(LifecycleEvent::Cancelled { reason }) => {
+        TurnEvent::Lifecycle(LifecycleEvent::Completed { response }) => Some(Ok(response.clone())),
+        TurnEvent::Lifecycle(LifecycleEvent::Failed { error }) => Some(Err(error.clone())),
+        TurnEvent::Lifecycle(LifecycleEvent::Cancelled { reason }) => {
             Some(Err(AgentError::Cancelled(*reason)))
         }
         _ => None,
@@ -433,12 +413,10 @@ fn map_terminal(event: &AgentEvent) -> Option<Result<AgentOutput, AgentError>> {
 
 /// The shared execution state of one in-flight run.
 ///
-/// [`Answer`] and [`Run`] are peers that each wrap an `AgentRunner` —
-/// neither wraps the other. The runner owns the event receiver, the
-/// cancellation handle, and the terminal outcome; the two handles differ
-/// only in how they consume the event stream.
+/// The runner owns the event receiver, the cancellation handle, and the
+/// terminal outcome.
 pub(crate) struct AgentRunner {
-    receiver: mpsc::Receiver<AgentEvent>,
+    receiver: mpsc::Receiver<TurnEvent>,
     handle: CancelHandle,
     rounds_seen: usize,
     terminal: Option<Result<AgentOutput, AgentError>>,
@@ -448,17 +426,17 @@ impl AgentRunner {
     /// Receives the next event, or `None` after the stream closes. The
     /// terminal event's outcome is remembered, so awaiting the runner
     /// after full iteration still resolves.
-    async fn next(&mut self) -> Option<AgentEvent> {
+    async fn next(&mut self) -> Option<TurnEvent> {
         let event = self.receiver.recv().await?;
         self.note(&event);
         Some(event)
     }
 
     /// Records round count and the terminal outcome from an event.
-    fn note(&mut self, event: &AgentEvent) {
+    fn note(&mut self, event: &TurnEvent) {
         if matches!(
             event,
-            AgentEvent::Model(ModelEvent::Requested {
+            TurnEvent::Model(ModelEvent::Requested {
                 purpose: CallPurpose::Reasoning,
                 ..
             })
@@ -493,7 +471,7 @@ impl AgentRunner {
     fn poll_event(
         &mut self,
         cx: &mut std::task::Context<'_>,
-    ) -> std::task::Poll<Option<AgentEvent>> {
+    ) -> std::task::Poll<Option<TurnEvent>> {
         match self.receiver.poll_recv(cx) {
             std::task::Poll::Ready(Some(event)) => {
                 self.note(&event);
@@ -536,28 +514,29 @@ impl AgentRunner {
 /// input-side payloads (`Started` / `Requested` / `Responded`) stay on
 /// the observation bypass; everything a product consumer renders
 /// surfaces as an [`ExecutionEvent`].
-fn execution_event(event: AgentEvent) -> Option<ExecutionEvent> {
+fn execution_event(event: TurnEvent) -> Option<ExecutionEvent> {
     match event {
-        AgentEvent::Model(ModelEvent::StreamDelta { delta }) => Some(ExecutionEvent::Delta(delta)),
-        AgentEvent::Tool(ToolEvent::CallRequested { call }) => {
+        TurnEvent::Model(ModelEvent::StreamDelta { delta, .. }) => {
+            Some(ExecutionEvent::Delta(delta))
+        }
+        TurnEvent::Tool(ToolEvent::CallRequested { call, .. }) => {
             Some(ExecutionEvent::ToolRequested(call))
         }
-        AgentEvent::Tool(ToolEvent::CallCompleted { call_id, result }) => {
-            Some(ExecutionEvent::ToolCompleted { call_id, result })
-        }
-        AgentEvent::Lifecycle(LifecycleEvent::Completed { response }) => {
+        TurnEvent::Tool(ToolEvent::CallCompleted {
+            call_id, result, ..
+        }) => Some(ExecutionEvent::ToolCompleted { call_id, result }),
+        TurnEvent::Lifecycle(LifecycleEvent::Completed { response }) => {
             Some(ExecutionEvent::Completed(response))
         }
-        AgentEvent::Lifecycle(LifecycleEvent::Failed { error }) => {
+        TurnEvent::Lifecycle(LifecycleEvent::Failed { error }) => {
             Some(ExecutionEvent::Failed(error))
         }
-        AgentEvent::Lifecycle(LifecycleEvent::Cancelled { reason }) => {
+        TurnEvent::Lifecycle(LifecycleEvent::Cancelled { reason }) => {
             Some(ExecutionEvent::Cancelled(reason))
         }
-        AgentEvent::Lifecycle(LifecycleEvent::Started { .. })
-        | AgentEvent::Lifecycle(LifecycleEvent::MemoryFlowFailed { .. })
-        | AgentEvent::Model(ModelEvent::Requested { .. })
-        | AgentEvent::Model(ModelEvent::Responded { .. }) => None,
+        TurnEvent::Lifecycle(LifecycleEvent::Started { .. })
+        | TurnEvent::Model(ModelEvent::Requested { .. })
+        | TurnEvent::Model(ModelEvent::Responded { .. }) => None,
     }
 }
 
@@ -655,19 +634,19 @@ struct AgentLoopTask {
     system_prompt: Option<String>,
     max_rounds: u32,
     conversation: Conversation,
-    tap: crate::observer::EventTap,
+    sink: EventSink,
 }
 
 impl AgentLoopTask {
     async fn execute(self, input: AgentInput, core: Arc<CancelCore>) {
-        // Local binding: the macros below resolve `tap` to this borrow.
-        let tap = &self.tap;
+        // Local binding: the macros below resolve `sink` to this borrow.
+        let sink = &self.sink;
         let mut total_usage = TokenUsage::new(0, 0);
 
         // Started: a plain send. A consumer already gone here is caught by
         // the cancelled check right after the turn's frame is built below.
-        let _ = tap
-            .emit(AgentEvent::Lifecycle(LifecycleEvent::Started {
+        let _ = sink
+            .emit_turn(TurnEvent::Lifecycle(LifecycleEvent::Started {
                 input: input.clone(),
             }))
             .await;
@@ -678,16 +657,15 @@ impl AgentLoopTask {
 
         // Moment 1: assemble. Memory reads that fail degrade the background
         // visibly — the run continues with the layers that succeeded. (The
-        // failure events are plain sends: the turn's frame is not built yet;
-        // a consumer gone at this point is caught below.)
+        // failures are bus facts: the turn's frame is not built yet; a
+        // consumer gone at this point is caught below.)
         let assembled = context.assemble(&input.text).await;
         for failure in &assembled.failures {
-            let _ = tap
-                .emit(AgentEvent::Lifecycle(LifecycleEvent::MemoryFlowFailed {
-                    stage: failure.stage.clone(),
-                    detail: failure.detail.clone(),
-                }))
-                .await;
+            sink.emit_memory(crate::MemoryEvent::FlowFailed {
+                stage: failure.stage.clone(),
+                detail: failure.detail.clone(),
+                moment: crate::MemoryFlowFailedMoment::AfterTurn,
+            });
         }
         let mut messages = Vec::new();
         if let Some(prompt) = &self.system_prompt {
@@ -701,7 +679,7 @@ impl AgentLoopTask {
 
         // Truth-archive helper: every outcome enters the history, marked.
         // Persistence runs through the operating runtime — failures
-        // surface as MemoryFlowFailed events, never silent.
+        // surface as memory-flow facts, never silent.
         macro_rules! record {
             ($turn:expr) => {{
                 self.conversation.push_turn($turn);
@@ -710,12 +688,11 @@ impl AgentLoopTask {
                     .conversation_store()
                     .save(self.conversation.state())
                 {
-                    let _ = tap
-                        .emit(AgentEvent::Lifecycle(LifecycleEvent::MemoryFlowFailed {
-                            stage: MemoryFlowStage::Archive,
-                            detail: format!("conversation auto-save failed: {error}"),
-                        }))
-                        .await;
+                    sink.emit_memory(crate::MemoryEvent::FlowFailed {
+                        stage: MemoryFlowStage::Archive,
+                        detail: format!("conversation auto-save failed: {error}"),
+                        moment: crate::MemoryFlowFailedMoment::AfterTurn,
+                    });
                 }
             }};
         }
@@ -731,7 +708,7 @@ impl AgentLoopTask {
                 messages[base_len..].to_vec(),
                 cancel_reason(outcome),
             ));
-            let _ = tap.emit(cancelled_event(outcome)).await;
+            let _ = sink.emit_turn(cancelled_event(outcome)).await;
             return;
         }
 
@@ -739,7 +716,7 @@ impl AgentLoopTask {
         // archived before the run ends — then the loop simply stops.
         macro_rules! emit {
             ($event:expr) => {
-                if !tap.emit($event).await {
+                if !sink.emit_turn($event).await {
                     record!(Turn::cancelled(
                         input.clone(),
                         messages[base_len..].to_vec(),
@@ -756,10 +733,12 @@ impl AgentLoopTask {
             .map(|t| ToolSpec::for_tool(&**t))
             .collect();
 
-        for _round in 1..=self.max_rounds {
-            emit!(AgentEvent::Model(ModelEvent::Requested {
+        for round_number in 1..=self.max_rounds {
+            let round = Some(round_number as usize);
+            emit!(TurnEvent::Model(ModelEvent::Requested {
                 purpose: CallPurpose::Reasoning,
                 messages: messages.clone(),
+                round,
             }));
 
             let request = ModelRequest::new(messages.clone(), tool_specs.clone());
@@ -784,7 +763,7 @@ impl AgentLoopTask {
                             messages[base_len..].to_vec(),
                             error.clone(),
                         ));
-                        emit!(AgentEvent::Lifecycle(LifecycleEvent::Failed { error }));
+                        emit!(TurnEvent::Lifecycle(LifecycleEvent::Failed { error }));
                         return;
                     }
                 }
@@ -804,7 +783,10 @@ impl AgentLoopTask {
                     }
                     item = stream.next() => match item {
                         Some(ModelStreamItem::Delta(delta)) => {
-                            emit!(AgentEvent::Model(ModelEvent::StreamDelta { delta }));
+                            emit!(TurnEvent::Model(ModelEvent::StreamDelta {
+                                delta,
+                                round,
+                            }));
                             continue;
                         }
                         Some(ModelStreamItem::Failed(error)) => {
@@ -814,7 +796,7 @@ impl AgentLoopTask {
                                 messages[base_len..].to_vec(),
                                 error.clone(),
                             ));
-                            emit!(AgentEvent::Lifecycle(LifecycleEvent::Failed { error }));
+                            emit!(TurnEvent::Lifecycle(LifecycleEvent::Failed { error }));
                             return;
                         }
                         Some(ModelStreamItem::Finish { message, usage }) => (message, usage),
@@ -827,7 +809,7 @@ impl AgentLoopTask {
                                 messages[base_len..].to_vec(),
                                 error.clone(),
                             ));
-                            emit!(AgentEvent::Lifecycle(LifecycleEvent::Failed { error }));
+                            emit!(TurnEvent::Lifecycle(LifecycleEvent::Failed { error }));
                             return;
                         }
                     }
@@ -841,9 +823,10 @@ impl AgentLoopTask {
             );
 
             let calls = tool_calls_of(&message);
-            emit!(AgentEvent::Model(ModelEvent::Responded {
+            emit!(TurnEvent::Model(ModelEvent::Responded {
                 message: message.clone(),
                 usage,
+                round,
             }));
 
             if calls.is_empty() {
@@ -862,10 +845,10 @@ impl AgentLoopTask {
                         &*self.model,
                         &input.text,
                         messages[base_len..].to_vec(),
-                        tap,
+                        sink,
                     )
                     .await;
-                emit!(AgentEvent::Lifecycle(LifecycleEvent::Completed {
+                emit!(TurnEvent::Lifecycle(LifecycleEvent::Completed {
                     response: output,
                 }));
                 return;
@@ -877,8 +860,8 @@ impl AgentLoopTask {
 
             // Suspension point 3: parallel tool execution — completion-order
             // events, deterministic call-order conversation.
-            emit_all_requested(tap, &calls).await;
-            let results = match self.run_tools_parallel(&calls, &core, tap).await {
+            emit_all_requested(sink, round, &calls).await;
+            let results = match self.run_tools_parallel(&calls, &core, sink, round).await {
                 Ok(results) => results,
                 Err(outcome) => {
                     record!(Turn::cancelled(
@@ -903,7 +886,7 @@ impl AgentLoopTask {
             messages[base_len..].to_vec(),
             AgentError::MaxRoundsExceeded,
         ));
-        emit!(AgentEvent::Lifecycle(LifecycleEvent::Failed {
+        emit!(TurnEvent::Lifecycle(LifecycleEvent::Failed {
             error: AgentError::MaxRoundsExceeded,
         }));
     }
@@ -916,7 +899,8 @@ impl AgentLoopTask {
         &self,
         calls: &[ToolCall],
         core: &Arc<CancelCore>,
-        tap: &crate::observer::EventTap,
+        sink: &EventSink,
+        round: Option<usize>,
     ) -> Result<std::collections::HashMap<CallId, ToolResult>, CancelOutcome> {
         let mut set = tokio::task::JoinSet::new();
         for call in calls {
@@ -953,10 +937,11 @@ impl AgentLoopTask {
             };
             match joined {
                 Some(Ok((call_id, result))) => {
-                    if !tap
-                        .emit(AgentEvent::Tool(ToolEvent::CallCompleted {
+                    if !sink
+                        .emit_turn(TurnEvent::Tool(ToolEvent::CallCompleted {
                             call_id: call_id.clone(),
                             result: result.clone(),
+                            round,
                         }))
                         .await
                     {
@@ -977,10 +962,11 @@ impl AgentLoopTask {
                         let result = ToolResult::Err {
                             message: format!("tool task failed: {join_error}"),
                         };
-                        if !tap
-                            .emit(AgentEvent::Tool(ToolEvent::CallCompleted {
+                        if !sink
+                            .emit_turn(TurnEvent::Tool(ToolEvent::CallCompleted {
                                 call_id: call.call_id.clone(),
                                 result: result.clone(),
+                                round,
                             }))
                             .await
                         {
@@ -996,10 +982,11 @@ impl AgentLoopTask {
     }
 }
 
-async fn emit_all_requested(tap: &crate::observer::EventTap, calls: &[ToolCall]) {
+async fn emit_all_requested(sink: &EventSink, round: Option<usize>, calls: &[ToolCall]) {
     for call in calls {
-        tap.emit(AgentEvent::Tool(ToolEvent::CallRequested {
+        sink.emit_turn(TurnEvent::Tool(ToolEvent::CallRequested {
             call: call.clone(),
+            round,
         }))
         .await;
     }
@@ -1023,8 +1010,8 @@ fn cancel_reason(outcome: CancelOutcome) -> CancelReason {
     }
 }
 
-fn cancelled_event(outcome: CancelOutcome) -> AgentEvent {
-    AgentEvent::Lifecycle(LifecycleEvent::Cancelled {
+fn cancelled_event(outcome: CancelOutcome) -> TurnEvent {
+    TurnEvent::Lifecycle(LifecycleEvent::Cancelled {
         reason: cancel_reason(outcome),
     })
 }

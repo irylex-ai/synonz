@@ -20,6 +20,7 @@
 //! All commonly used types are re-exported at the crate root.
 
 pub mod agent;
+pub mod bus;
 pub mod context;
 pub mod conversation;
 pub mod error;
@@ -29,7 +30,6 @@ pub mod io;
 pub mod memory;
 pub mod message;
 pub mod model;
-pub mod observer;
 pub mod runtime;
 pub mod subject;
 pub mod tool;
@@ -41,6 +41,10 @@ mod cancel;
 pub mod mock;
 
 pub use agent::{Agent, AgentBuilder, DEFAULT_MAX_ROUNDS, Execution};
+pub use bus::{
+    ConversationEndReason, ConversationEvent, MemoryEvent, MemoryFlowFailedMoment, Observer,
+    ObserverContext, SynonzEvent,
+};
 pub use context::{
     AssemblyError, AssemblyFailure, AssemblyOutput, AssemblyRequest, Context, ContextAssembly,
     LayeredMemory,
@@ -51,8 +55,8 @@ pub use conversation::{
 };
 pub use error::{AgentError, ModelError};
 pub use event::{
-    AgentEvent, CallPurpose, CancelReason, ExecutionEvent, LifecycleEvent, MemoryFlowStage,
-    ModelDelta, ModelEvent, TokenUsage, ToolEvent,
+    CallPurpose, CancelReason, ExecutionEvent, LifecycleEvent, MemoryFlowStage, ModelDelta,
+    ModelEvent, TokenUsage, ToolEvent, TurnEvent,
 };
 pub use io::{AgentInput, AgentOutput};
 pub use memory::{
@@ -64,7 +68,6 @@ pub use message::{
     validate_conversation,
 };
 pub use model::{Model, ModelParams, ModelRequest, ModelStream, ModelStreamItem, complete};
-pub use observer::{Observer, ObserverContext};
 pub use runtime::{RuntimeBuilder, SynonzRuntime};
 pub use subject::{Subject, SubjectType};
 pub use tokio_util::sync::CancellationToken;

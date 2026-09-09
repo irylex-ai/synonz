@@ -1,10 +1,11 @@
-//! M14 acceptance: the observation bypass (Observer / dispatcher).
+//! M16 acceptance: the event bus observation lane (Observer / resident
+//! dispatcher).
 //!
 //! Verifies the dispatcher contract: delivery in emission order (full
 //! stream, terminal included), lag reporting on overflow, panic
-//! circuit-breaking (the execution and the other observers are
-//! unaffected), the agent-level switch (off = zero dispatch), and
-//! execution-id attribution.
+//! circuit-breaking (the emitter and the other observers are
+//! unaffected), unconditional observation (registered observers see
+//! every run — no per-agent gate), and execution-id attribution.
 
 #![cfg(feature = "test-util")]
 
@@ -13,8 +14,8 @@ use std::sync::Mutex;
 use std::time::Duration;
 
 use synonz::{
-    Agent, AgentEvent, Conversation, MockModel, ModelDelta, ModelStreamItem, Observer,
-    ObserverContext, SubjectType, SynonzRuntime,
+    Agent, Conversation, MockModel, ModelDelta, ModelStreamItem, Observer, ObserverContext,
+    SubjectType, SynonzEvent, SynonzRuntime, TurnEvent,
 };
 
 fn runtime_with(observer: impl Observer) -> SynonzRuntime {
@@ -45,7 +46,7 @@ struct Recorder {
 
 #[derive(Default)]
 struct Recording {
-    events: Vec<(u64, String)>,
+    events: Vec<(Option<u64>, String)>,
     lags: Vec<u64>,
 }
 
@@ -56,19 +57,18 @@ impl Recorder {
 }
 
 impl Observer for Recorder {
-    fn on_event(&self, ctx: &ObserverContext, event: &AgentEvent) {
+    fn on_event(&self, ctx: &ObserverContext, event: &SynonzEvent) {
         let kind = match event {
-            AgentEvent::Lifecycle(lifecycle) => match lifecycle {
-                synonz::LifecycleEvent::Started { .. } => "started",
-                synonz::LifecycleEvent::Completed { .. } => "completed",
-                synonz::LifecycleEvent::Failed { .. } => "failed",
-                synonz::LifecycleEvent::Cancelled { .. } => "cancelled",
-                synonz::LifecycleEvent::MemoryFlowFailed { .. } => "memory-flow-failed",
-                _ => "lifecycle-other",
+            SynonzEvent::Turn(turn) => match turn {
+                TurnEvent::Lifecycle(synonz::LifecycleEvent::Started { .. }) => "started",
+                TurnEvent::Lifecycle(synonz::LifecycleEvent::Completed { .. }) => "completed",
+                TurnEvent::Lifecycle(synonz::LifecycleEvent::Failed { .. }) => "failed",
+                TurnEvent::Lifecycle(synonz::LifecycleEvent::Cancelled { .. }) => "cancelled",
+                TurnEvent::Model(synonz::ModelEvent::StreamDelta { .. }) => "delta",
+                TurnEvent::Model(_) => "model",
+                TurnEvent::Tool(_) => "tool",
+                _ => "turn-other",
             },
-            AgentEvent::Model(synonz::ModelEvent::StreamDelta { .. }) => "delta",
-            AgentEvent::Model(_) => "model",
-            AgentEvent::Tool(_) => "tool",
             _ => "other",
         };
         self.recording()
@@ -88,7 +88,6 @@ async fn observer_receives_the_full_stream_in_emission_order() {
     let mut conv = Conversation::new(&synonz::Subject::of(SubjectType::User, "u"));
     let agent = Agent::builder()
         .runtime(&runtime)
-        .observability(true)
         .model(MockModel::new(vec![
             vec![
                 ModelStreamItem::Delta(ModelDelta::Text {
@@ -138,10 +137,12 @@ async fn lag_is_reported_when_the_queue_overflows() {
         inner: Arc<Mutex<Recording>>,
     }
     impl Observer for SlowRecorder {
-        fn on_event(&self, ctx: &ObserverContext, event: &AgentEvent) {
+        fn on_event(&self, ctx: &ObserverContext, event: &SynonzEvent) {
             std::thread::sleep(Duration::from_millis(1));
             let kind = match event {
-                AgentEvent::Model(synonz::ModelEvent::StreamDelta { .. }) => "delta",
+                SynonzEvent::Turn(TurnEvent::Model(synonz::ModelEvent::StreamDelta { .. })) => {
+                    "delta"
+                }
                 _ => "other",
             };
             self.inner
@@ -171,7 +172,6 @@ async fn lag_is_reported_when_the_queue_overflows() {
     });
     let agent = Agent::builder()
         .runtime(&runtime)
-        .observability(true)
         .model(MockModel::new(vec![script]))
         .build()
         .unwrap();
@@ -206,7 +206,7 @@ async fn panicking_observer_is_circuit_broken_without_harming_others() {
         calls: Arc<Mutex<usize>>,
     }
     impl Observer for PanickingOnce {
-        fn on_event(&self, _ctx: &ObserverContext, _event: &AgentEvent) {
+        fn on_event(&self, _ctx: &ObserverContext, _event: &SynonzEvent) {
             {
                 let mut calls = self.calls.lock().unwrap();
                 *calls += 1;
@@ -227,7 +227,6 @@ async fn panicking_observer_is_circuit_broken_without_harming_others() {
     let mut conv = Conversation::new(&synonz::Subject::of(SubjectType::User, "u"));
     let agent = Agent::builder()
         .runtime(&runtime)
-        .observability(true)
         .model(text_model(&["done"]))
         .build()
         .unwrap();
@@ -249,9 +248,10 @@ async fn panicking_observer_is_circuit_broken_without_harming_others() {
 }
 
 #[tokio::test]
-async fn switch_off_closes_the_observation_face() {
+async fn observation_is_unconditional_for_registered_observers() {
     let recorder = Recorder::default();
-    // The runtime HAS an observer — but the agent's switch is off (default).
+    // The runtime HAS an observer — no per-agent switch exists anymore:
+    // every run's events are observed, always.
     let runtime = runtime_with(recorder.clone());
     let mut conv = Conversation::new(&synonz::Subject::of(SubjectType::User, "u"));
     let agent = Agent::builder()
@@ -263,10 +263,18 @@ async fn switch_off_closes_the_observation_face() {
     let _ = agent.run(conv.turn_input("go")).await;
     tokio::time::sleep(Duration::from_millis(50)).await;
 
-    assert!(
-        recorder.recording().events.is_empty(),
-        "switch off = zero dispatch"
+    let recording = recorder.recording();
+    let kinds: Vec<&str> = recording
+        .events
+        .iter()
+        .map(|(_, kind)| kind.as_str())
+        .collect();
+    assert_eq!(
+        kinds.first(),
+        Some(&"started"),
+        "registered observers see every run, unconditionally"
     );
+    assert_eq!(kinds.last(), Some(&"completed"));
 }
 
 #[tokio::test]
@@ -275,7 +283,6 @@ async fn execution_ids_attribute_concurrent_runs() {
     let runtime = runtime_with(recorder.clone());
     let agent = Agent::builder()
         .runtime(&runtime)
-        .observability(true)
         .model(text_model(&["a", "b"]))
         .build()
         .unwrap();
@@ -290,7 +297,7 @@ async fn execution_ids_attribute_concurrent_runs() {
     tokio::time::sleep(Duration::from_millis(100)).await;
 
     let recording = recorder.recording();
-    let mut ids: Vec<u64> = recording.events.iter().map(|(id, _)| *id).collect();
+    let mut ids: Vec<u64> = recording.events.iter().filter_map(|(id, _)| *id).collect();
     ids.sort_unstable();
     ids.dedup();
     assert_eq!(

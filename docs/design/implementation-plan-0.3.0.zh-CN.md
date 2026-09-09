@@ -1,6 +1,6 @@
 # Synonz 0.3.0 实现计划
 
-- 状态: APPROVED（2026-09-09，irylex 人工评审通过；实施中——M16 起步）
+- 状态: APPROVED（2026-09-09，irylex 人工评审通过；实施中——M16 已完成）
 - 日期: 2026-09-09
 - 依据: ADR-0017（APPROVED，含评审修订与评审修订二）、架构设计文档
   v4（APPROVED，含 Monitor 机制延期记录）、v4 评审决议
@@ -127,8 +127,10 @@ memory_l2 / memory_l3 / observer）。
 | `ModelEvent` / `ToolEvent` | 同名（载荷加 `round: Option<usize>`） |
 | `ExecutionEvent` | 不变（投影源改为 TurnEvent） |
 | `Observer::on_event(&AgentEvent)` | `on_event(&SynonzEvent)`；`execution_id: Option<u64>` |
+| `AgentBuilder::observability(bool)` | **退役**（总线无条件发布：观察位注册即全量目击，无 per-agent 门——0016 完备性原则的延伸） |
 | ObserverDispatcher（per-run） | 总线常驻派发器（观察车道） |
-| `EventTap` | 溶解（显式双路：bus.emit + consumer.send） |
+| `EventTap` | 溶解（显式双路：bus.emit + consumer.send——`EventSink::emit_turn`/`emit_memory`） |
+| `EventBus::emit`（v4 草图为 async + DispatchOutcome） | 实施勘误：**同步** `fn emit`（try_send 非阻塞立法 + 同步发射点需要：`Conversation::new`）且无 DispatchOutcome（行动车道 0.3.0 无派发点，无消费者）——M20 文档同步 |
 | `MemoryStore`（统一三层） | `MemoryL1/L2Store`/`MemoryL3Store` 三契约位 + `Memory` 一等对象 |
 | `InMemoryStore` | 拆为各层内置默认（pub(crate)） |
 | `runtime.memory_store()` / `.memory_policies()` / `.topic_detector()` | `runtime.memory()`；策略进 DefaultContext |

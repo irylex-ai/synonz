@@ -12,6 +12,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use crate::bus::EventBus;
 use crate::context::{ContextAssembly, LayeredMemory};
 use crate::conversation::{Conversation, ConversationStore};
 use crate::inprocess::{InProcessConversationStore, InProcessMemoryStore};
@@ -25,7 +26,7 @@ pub struct RuntimeBuilder {
     conversation_store: Option<Arc<dyn ConversationStore>>,
     memory_store: Option<Arc<dyn MemoryStore>>,
     context_assembly: Option<Arc<dyn ContextAssembly>>,
-    observers: Vec<Arc<dyn crate::observer::Observer>>,
+    observers: Vec<Arc<dyn crate::bus::Observer>>,
     memory_policies: MemoryPolicies,
     topic_detector: Option<Arc<dyn TopicDetector>>,
     idle_timeout: Option<Duration>,
@@ -57,9 +58,8 @@ impl RuntimeBuilder {
 
     /// Registers an observer of the full event stream. Unlike the other
     /// services there is **no default** — with no observer registered, the
-    /// observation face is fully closed. Observability is additionally
-    /// gated per agent (`AgentBuilder::observability`).
-    pub fn observer(mut self, observer: impl crate::observer::Observer) -> Self {
+    /// observation lane delivers to nobody (the bus itself still runs).
+    pub fn observer(mut self, observer: impl crate::bus::Observer) -> Self {
         self.observers.push(Arc::new(observer));
         self
     }
@@ -98,7 +98,7 @@ impl RuntimeBuilder {
             context_assembly: self
                 .context_assembly
                 .unwrap_or_else(|| Arc::new(LayeredMemory)),
-            observers: self.observers.into(),
+            event_bus: EventBus::new(self.observers),
             memory_policies: self.memory_policies,
             topic_detector: self
                 .topic_detector
@@ -120,7 +120,7 @@ pub struct SynonzRuntime {
     conversation_store: Arc<dyn ConversationStore>,
     memory_store: Arc<dyn MemoryStore>,
     context_assembly: Arc<dyn ContextAssembly>,
-    observers: Arc<[Arc<dyn crate::observer::Observer>]>,
+    event_bus: EventBus,
     memory_policies: MemoryPolicies,
     topic_detector: Arc<dyn TopicDetector>,
     idle_timeout: Option<Duration>,
@@ -151,9 +151,9 @@ impl SynonzRuntime {
         Arc::clone(&self.context_assembly)
     }
 
-    /// The registered observers (empty = the observation face is closed).
-    pub(crate) fn observers(&self) -> &[Arc<dyn crate::observer::Observer>] {
-        &self.observers
+    /// The event bus (the resident dual-lane dispatch facility).
+    pub(crate) fn event_bus(&self) -> &EventBus {
+        &self.event_bus
     }
 
     /// The memory policies (floors always apply).
