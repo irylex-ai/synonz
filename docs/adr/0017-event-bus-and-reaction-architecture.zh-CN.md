@@ -4,12 +4,37 @@
 - 日期: 2026-09-09
 - 决策者: irylex（人类逐点确认）
 - 评审修订（DRAFT 期开放项决议落地，实施前）：①创建签名统一带
-  runtime，`ConversationCreated` 升在册；②`TopicShifted` 升在册
-  （EventSource=Curator）；③`round: Option<usize>`（None=循环外
-  维护调用）；④Memory 存储契约拆三层独立位（`MemoryL1Store`/
-  `MemoryL2Store`/`MemoryL3Store`，L1 默认内置内存实现）+ `Memory`
-  聚合视图（使用侧一体）；⑤`SynonzEvent: Serialize + Deserialize`
+  runtime，`ConversationCreated` 升在册；②`TopicShifted` 升在册；
+  ③`round: Option<usize>`（None=循环外维护调用）；④Memory 存储契
+  约拆三层独立位（`MemoryL1Store`/`MemoryL2Store`/`MemoryL3Store`，
+  L1 默认内置内存实现）；⑤`SynonzEvent: Serialize + Deserialize`
   立法（两级 tag，延续 ADR-0003）
+- 评审修订二（v4 架构评审，2026-09-09，实施前落地）：⑥**MemoryCurator
+  契约退役**——记忆策展能力并入 **Context 状态引擎**（`trait
+  Context`：`assemble` + `on_turn_completed` 两方法，Agent 级注册
+  AgentBuilder；多 Agent 策略差异；预设打包引擎配方）；三策略槽
+  `ContextAssembler` / `MemorySummarizer` / `ConversationTopicDetector`
+  + 楼层参数（builder 数值）；⑦**终结收尾去策略化**——
+  `on_conversation_ended` 从契约删除，终结 = Runtime 结构行为
+  （drain 会话维护表 + 机械促进 L2→L3，init 模式）；自定义终结走
+  观察位（订阅 `ConversationEvent::Ended`）；总线行动车道立法保留
+  （S3 预留，0.3.0 无派发点）；⑧**EventPolicy 退役**（被总线体系
+  结构性吸收：终结促进 = 结构行为、漂移冲刷 = 漂移的语义后果默认）
+  与 **MemoryPolicies 退役**（楼层参数化）——RuntimeBuilder 收敛
+  五主位（conversation_store / l1 / l2 / l3 / observer）、零便捷位；
+  ⑨**Memory 一等持有对象**（Runtime build() 组装三存储位、唯一持有、
+  `runtime.memory()` 唯一出口；行为与数据分离——引擎经载荷接收，
+  Runtime 为编排点；后台任务登记 Runtime 会话维护表，引擎无实例
+  状态）；⑩**命名族立法**：契约 = 行动者（-er）、实现 = 特征 +
+  契约名对照、Input ↔ Output 对偶、主语补全、单数指代、Event 术语
+  去污；默认实现一律内化（契约公开、实现 pub(crate)）：
+  `LayeredMemoryContextAssembler` / `PromptMemorySummarizer` /
+  `FirstSegmentTopicDetector`；⑪**上下文 = Agent 状态统合概念**
+  （记忆 ⊂ 上下文 + 环境感知 + 运行时要素——Agent 有状态的载体）；
+  装配 = 完整上下文物化，`ContextAssemblerInput` 原料域
+  `non_exhaustive` 开放，"取材唯记忆"原则修订为"**装配不读真相域**"
+  （背景与真相分离立法不变）；Conversation 独立于 Agent（1~N 参与，
+  S3 友好；多引擎交替维护的一致性 = 应用/编排层责任）
 - 性质: 反应扩展性地基——新增总线设施与 Curator 契约，重整事件
   词汇表（含既有类型改名与迁移），破坏性变化随 0.3.0 单波发布
 - 关联: 承接并修订 ADR-0015（记忆流触发形态）、ADR-0016（旁路

@@ -5,6 +5,16 @@
   ConversationHistory 收编、裸路径保留（§10）、with_context 挂载
   模式；触发体系、三兄弟契约、装配格式不变；Context 职责升格
   （组装/归档/压缩三行为）见 ADR-0015 决策三
+- 被修订（ADR-0017 评审修订二，2026-09-09）：本 ADR 立法的"强制
+  楼层 + 可叠加事件策略"双层触发体系**被总线体系结构性取代**——
+  `EventPolicy`（TopicShift/ConversationEnd）退役（终结促进 =
+  结构行为、漂移冲刷 = 漂移的语义后果默认），楼层保留为状态引擎
+  的数值参数（l1_window/l2_cap，原 MemoryPolicies 退役）；
+  "取材唯记忆"原则修订为"**装配不读真相域**"（`ContextAssemblerInput`
+  原料域 non_exhaustive 开放——记忆为主原料，感知/运行时要素可
+  扩展；背景与真相分离立法不变）；三兄弟契约演化为三存储契约位
+  （MemoryL1/L2/L3Store）；装配格式不变（LayeredMemory 策略内化为
+  LayeredMemoryContextAssembler）
 - 日期: 2026-08-29
 - 决策者: irylex（人类确认）
 - 性质: 系统级 ADR——原 S2b（ContextManager）与 S2c（Memory）的旧切分
