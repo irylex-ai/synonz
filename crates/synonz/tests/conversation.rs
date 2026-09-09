@@ -87,7 +87,7 @@ fn weather_agent(runtime: &SynonzRuntime, scripts: usize) -> Agent {
 async fn multi_turn_conversation_remembers_history() {
     let (runtime, subject) = env();
     let agent = weather_agent(&runtime, 2);
-    let mut conv = Conversation::new(&subject);
+    let mut conv = Conversation::new(&runtime, &subject);
 
     // Turn 1 (two model rounds inside one run): tool call + answer.
     let output = agent
@@ -125,7 +125,7 @@ async fn multi_turn_conversation_remembers_history() {
 async fn conversation_flat_history_replays_into_the_model() {
     let (runtime, subject) = env();
     let agent = weather_agent(&runtime, 2);
-    let mut conv = Conversation::new(&subject);
+    let mut conv = Conversation::new(&runtime, &subject);
 
     let _ = agent.run(conv.turn_input("one")).await.unwrap();
     let _ = agent.run(conv.turn_input("two")).await.unwrap();
@@ -147,7 +147,7 @@ async fn cancelled_turns_enter_the_history_marked() {
         .model(MockModel::hanging())
         .build()
         .unwrap();
-    let mut conv = Conversation::new(&subject);
+    let mut conv = Conversation::new(&runtime, &subject);
 
     let execution = agent.run(conv.turn_input("starts then cancels"));
     drop(execution); // cancel via drop
@@ -184,7 +184,7 @@ async fn failed_turns_enter_the_history_marked() {
         .model(FailingModel)
         .build()
         .unwrap();
-    let mut conv = Conversation::new(&subject);
+    let mut conv = Conversation::new(&runtime, &subject);
 
     let result = agent.run(conv.turn_input("fails")).await;
     assert!(matches!(
@@ -222,7 +222,7 @@ async fn multiple_agents_continue_one_conversation() {
         .build()
         .unwrap();
 
-    let mut conv = Conversation::new(&subject);
+    let mut conv = Conversation::new(&runtime, &subject);
     let first = researcher
         .run(conv.turn_input("research the weather"))
         .await
@@ -236,8 +236,9 @@ async fn multiple_agents_continue_one_conversation() {
 
 #[test]
 fn export_round_trips_the_truth_record() {
+    let runtime = SynonzRuntime::builder().build();
     let subject = Subject::of(SubjectType::User, "test-user");
-    let conv = Conversation::with_id(&subject, "exported");
+    let conv = Conversation::with_id(&runtime, &subject, "exported");
     let turns_before = conv.export().expect("export");
 
     // The export holds the truth record; restoration goes through a store
@@ -246,4 +247,123 @@ fn export_round_trips_the_truth_record() {
     let state: synonz::ConversationState = serde_json::from_slice(&turns_before).unwrap();
     assert_eq!(state.id, "exported");
     assert!(state.turns.is_empty());
+}
+
+// ── M19: the conversation lifecycle (entries, idempotent end, sweep) ──
+
+/// An observer recording conversation facts (Created / Ended with their
+/// reasons).
+#[derive(Default, Clone)]
+struct LifecycleRecorder {
+    facts: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+}
+
+impl synonz::Observer for LifecycleRecorder {
+    fn on_event(&self, _ctx: &synonz::ObserverContext, event: &synonz::SynonzEvent) {
+        if let synonz::SynonzEvent::Conversation(fact) = event {
+            let line = match fact {
+                synonz::ConversationEvent::Created { .. } => "created".to_string(),
+                synonz::ConversationEvent::Ended { reason, .. } => {
+                    format!("ended:{reason:?}")
+                }
+                _ => "conversation-other".to_string(),
+            };
+            self.facts.lock().unwrap().push(line);
+        }
+    }
+}
+
+#[tokio::test]
+async fn creation_persists_the_initial_state_and_notifies() {
+    let recorder = LifecycleRecorder::default();
+    let runtime = SynonzRuntime::builder().observer(recorder.clone()).build();
+    let subject = Subject::of(SubjectType::User, "lifecycle");
+
+    // The three acts: construct + persist + notify.
+    let conv = Conversation::with_id(&runtime, &subject, "born");
+    let restored = Conversation::of(&runtime, &subject, "born").expect("the state persisted");
+    assert_eq!(restored.id(), "born");
+    assert!(!conv.is_ended());
+
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    let facts = recorder.facts.lock().unwrap();
+    assert_eq!(
+        facts.first(),
+        Some(&"created".to_string()),
+        "the birth fact rides the bus"
+    );
+}
+
+#[tokio::test]
+async fn end_is_idempotent_and_notifies_once() {
+    let recorder = LifecycleRecorder::default();
+    let runtime = SynonzRuntime::builder().observer(recorder.clone()).build();
+    let subject = Subject::of(SubjectType::User, "lifecycle");
+    let conv = Conversation::with_id(&runtime, &subject, "close-me");
+
+    conv.end(&runtime).await;
+    assert!(conv.is_ended());
+    conv.end(&runtime).await; // the second end is a structural no-op
+
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    let facts = recorder.facts.lock().unwrap();
+    let ends: Vec<&String> = facts.iter().filter(|f| f.starts_with("ended")).collect();
+    assert_eq!(ends.len(), 1, "ended notifies exactly once");
+    assert_eq!(
+        ends[0],
+        &format!("ended:{:?}", synonz::ConversationEndReason::Explicit)
+    );
+}
+
+#[tokio::test]
+async fn sweep_ends_idle_conversations_and_skips_ended_ones() {
+    let recorder = LifecycleRecorder::default();
+    let runtime = SynonzRuntime::builder()
+        .observer(recorder.clone())
+        .conversation_idle_timeout(Duration::from_secs(1))
+        .build();
+    let subject = Subject::of(SubjectType::User, "lifecycle");
+
+    // Two conversations, backdated past the idle threshold; one already
+    // ended.
+    let _idle = Conversation::with_id(&runtime, &subject, "idle-one");
+    let already = Conversation::with_id(&runtime, &subject, "already-ended");
+    already.end(&runtime).await;
+
+    tokio::time::sleep(Duration::from_millis(1100)).await; // past the threshold
+    let swept = runtime.sweep_stale().await;
+    assert_eq!(swept, 1, "only the idle, un-ended conversation swept");
+
+    let idle_after = Conversation::of(&runtime, &subject, "idle-one").unwrap();
+    assert!(idle_after.is_ended());
+    let already_after = Conversation::of(&runtime, &subject, "already-ended").unwrap();
+    assert!(already_after.is_ended());
+
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    let facts = recorder.facts.lock().unwrap();
+    let idle_sweeps: Vec<&String> = facts.iter().filter(|f| f.starts_with("ended:")).collect();
+    assert_eq!(
+        idle_sweeps.len(),
+        2,
+        "one explicit end + one swept end: {facts:?}"
+    );
+    assert!(idle_sweeps.contains(&&format!(
+        "ended:{:?}",
+        synonz::ConversationEndReason::IdleSwept
+    )));
+}
+
+#[tokio::test]
+async fn of_restores_the_ended_state() {
+    let runtime = SynonzRuntime::builder().build();
+    let subject = Subject::of(SubjectType::User, "lifecycle");
+    let conv = Conversation::with_id(&runtime, &subject, "ended-state");
+    assert!(!conv.is_ended());
+    conv.end(&runtime).await;
+    assert!(conv.is_ended());
+
+    // The restored conversation carries the lifecycle state (the audit
+    // and sweep behaviors read it from the store).
+    let restored = Conversation::of(&runtime, &subject, "ended-state").unwrap();
+    assert!(restored.is_ended());
 }

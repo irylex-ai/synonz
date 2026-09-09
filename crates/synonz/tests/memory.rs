@@ -98,7 +98,7 @@ async fn post_turn_flow_writes_l1_and_demotes_on_turn_count() {
     // and L2 receives a block.
     let runtime = SynonzRuntime::builder().build();
     let model = RoutingModel::new(&["answer one", "answer two"], &["summary"]);
-    let mut conv = Conversation::with_id(&subject, "conv-1");
+    let mut conv = Conversation::with_id(&runtime, &subject, "conv-1");
     let agent = Agent::builder()
         .runtime(&runtime)
         .context(DefaultContext::new().l1_window(1).l2_cap(4))
@@ -135,7 +135,7 @@ async fn l2_overflow_distills_into_l3() {
     let runtime = SynonzRuntime::builder().build();
     // L2 capped at 1: any second summary block distills into L3.
     let model = RoutingModel::new(&["a1", "a2", "a3"], &["sum1", "sum2"]);
-    let mut conv = Conversation::with_id(&subject, "conv-2");
+    let mut conv = Conversation::with_id(&runtime, &subject, "conv-2");
     let agent = Agent::builder()
         .runtime(&runtime)
         .context(DefaultContext::new().l1_window(1).l2_cap(1))
@@ -163,7 +163,7 @@ async fn conversation_end_drains_and_promotes_l2_into_l3() {
     // Promotion is now structural (no policy gate): conversation end
     // drains the background maintenance, then mechanically promotes.
     let model = RoutingModel::new(&["a1", "a2"], &["sum1"]);
-    let mut conv = Conversation::with_id(&subject, "conv-3");
+    let mut conv = Conversation::with_id(&runtime, &subject, "conv-3");
     let agent = Agent::builder()
         .runtime(&runtime)
         .context(DefaultContext::new().l1_window(1).l2_cap(4))
@@ -427,7 +427,7 @@ async fn assembly_memory_failures_are_visible_not_silent() {
 #[tokio::test]
 async fn background_engine_drives_a_full_turn() {
     let (runtime, subject) = env();
-    let mut conv = Conversation::with_id(&subject, "conv-7");
+    let mut conv = Conversation::with_id(&runtime, &subject, "conv-7");
     let agent = Agent::builder()
         .runtime(&runtime)
         .model(text_model(&["the answer"]))
@@ -478,7 +478,7 @@ async fn flow_facts_are_visible_on_the_bus() {
     let runtime = SynonzRuntime::builder().observer(recorder.clone()).build();
     let (_unused, subject) = ((), Subject::of(SubjectType::User, "facts"));
     let model = RoutingModel::new(&["a1", "a2"], &["sum1"]);
-    let mut conv = Conversation::with_id(&subject, "conv-8");
+    let mut conv = Conversation::with_id(&runtime, &subject, "conv-8");
     let agent = Agent::builder()
         .runtime(&runtime)
         .context(DefaultContext::new().l1_window(1).l2_cap(4))
@@ -523,7 +523,7 @@ async fn summarization_failure_is_a_visible_background_fact() {
     let recorder = FactRecorder::default();
     let runtime = SynonzRuntime::builder().observer(recorder.clone()).build();
     let (_unused, subject) = env();
-    let mut conv = Conversation::with_id(&subject, "conv-9");
+    let mut conv = Conversation::with_id(&runtime, &subject, "conv-9");
     let agent = Agent::builder()
         .runtime(&runtime)
         .context(
@@ -568,7 +568,7 @@ async fn topic_shift_compacts_and_emits_the_fact() {
     let runtime = SynonzRuntime::builder().observer(recorder.clone()).build();
     let (_unused, subject) = env();
     let model = RoutingModel::new(&["a1", "a2"], &["sum1"]);
-    let mut conv = Conversation::with_id(&subject, "conv-10");
+    let mut conv = Conversation::with_id(&runtime, &subject, "conv-10");
     let agent = Agent::builder()
         .runtime(&runtime)
         .context(

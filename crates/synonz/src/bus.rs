@@ -69,6 +69,8 @@ pub enum MemoryFlowFailedMoment {
     AtConversationEnd,
     /// The post-turn maintenance, background segment.
     Background,
+    /// The lifecycle entry (the conversation's initial state save).
+    Creation,
 }
 
 /// Conversation lifecycle facts.

@@ -2,15 +2,15 @@
 //!
 //! A `Conversation` is a *data entity*: the aggregate of its
 //! turns, identified, serializable, and agent-agnostic — different agents
-//! can continue the same conversation. Data-only behaviors live here
-//! (information expert); model-touching behaviors (summarization,
-//! compression) belong to the agent side (context management, S2b).
+//! can continue the same conversation (1~N agents per conversation).
+//! Data-only behaviors live here (information expert); state-engine
+//! behaviors (assembly, maintenance) belong to the agent's Context
+//! engine.
 //!
-//! Normal flow: `conv.turn_input(text)` builds the per-turn input object,
-//! the agent executes it, and the completed turn is recorded into the
-//! conversation automatically at the execution's epilogue
-//! ([`Conversation::push_turn`] is the internal write; documented for
-//! manual construction).
+//! Lifecycle: the three entries (`new` / `of` / `end`) all take the
+//! environment explicitly and share one shape — mark, persist, notify.
+//! `end` is idempotent (the ended state is part of the persisted state;
+//! the sweep skips ended conversations).
 
 use std::sync::Arc;
 use std::sync::Mutex;
@@ -19,6 +19,10 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
+use crate::bus::{
+    ConversationEndReason, ConversationEvent, MemoryEvent, MemoryFlowFailedMoment, SynonzEvent,
+};
+use crate::event::MemoryFlowStage;
 use crate::io::{AgentInput, AgentOutput};
 use crate::message::Message;
 use crate::runtime::SynonzRuntime;
@@ -52,6 +56,10 @@ pub struct ConversationState {
     pub topic: Option<String>,
     /// Epoch seconds of the last activity (idle-timeout tracking).
     pub last_active: u64,
+    /// Whether the conversation has ended (the lifecycle state; the
+    /// sweep skips ended conversations).
+    #[serde(default)]
+    pub ended: bool,
 }
 
 /// The conversation persistence contract, sibling of the
@@ -162,6 +170,7 @@ pub struct Conversation {
     subject: Subject,
     turns: Arc<Mutex<Vec<Turn>>>,
     topic: Arc<Mutex<Option<String>>>,
+    ended: Arc<Mutex<bool>>,
 }
 
 impl Clone for Conversation {
@@ -174,42 +183,51 @@ impl Clone for Conversation {
             subject: self.subject.clone(),
             turns: Arc::clone(&self.turns),
             topic: Arc::clone(&self.topic),
+            ended: Arc::clone(&self.ended),
         }
     }
 }
 
 impl Conversation {
-    /// Creates a new conversation for a subject.
+    /// Creates a new conversation for a subject: the lifecycle entry
+    /// performs the three generic acts — construct, persist the initial
+    /// state (the conversation exists to the runtime from birth), and
+    /// notify the bus (`Created`).
     ///
     /// The generated id is `conv-<timestamp>-<counter>`: unique within a
-    /// process for practical purposes, not cryptographic. The conversation
-    /// is pure data — persistence happens through a runtime when turns are
-    /// recorded or the conversation is restored.
-    pub fn new(subject: &Subject) -> Self {
+    /// process for practical purposes, not cryptographic. A persistence
+    /// failure at entry surfaces as a `FlowFailed { moment: Creation }`
+    /// fact — visible, never silent; the conversation itself works
+    /// (in-memory) either way.
+    pub fn new(runtime: &SynonzRuntime, subject: &Subject) -> Self {
         let nanos = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|duration| duration.as_nanos())
             .unwrap_or(0);
         let counter = CONVERSATION_COUNTER.fetch_add(1, Ordering::Relaxed);
-        Self::with_id(subject, format!("conv-{nanos:x}-{counter:x}"))
+        Self::with_id(runtime, subject, format!("conv-{nanos:x}-{counter:x}"))
     }
 
     /// Creates a new conversation with an application-supplied id (ticket
-    /// numbers, user session keys, ...).
-    pub fn with_id(subject: &Subject, id: impl Into<String>) -> Self {
-        Self {
+    /// numbers, user session keys, ...) — the same three lifecycle acts.
+    pub fn with_id(runtime: &SynonzRuntime, subject: &Subject, id: impl Into<String>) -> Self {
+        let conversation = Self {
             id: id.into(),
             subject: subject.clone(),
             turns: Arc::new(Mutex::new(Vec::new())),
             topic: Arc::new(Mutex::new(None)),
-        }
+            ended: Arc::new(Mutex::new(false)),
+        };
+        conversation.enter_lifecycle(runtime);
+        conversation
     }
 
     /// Restores an existing conversation by id from the runtime's store.
     ///
     /// `of` = restore (never create): fails with
     /// [`ConversationStoreError::NotFound`] when no conversation exists
-    /// under this id for this subject.
+    /// under this id for this subject. The lifecycle state (ended) is
+    /// restored with the truth.
     pub fn of(
         runtime: &SynonzRuntime,
         subject: &Subject,
@@ -221,7 +239,34 @@ impl Conversation {
             subject: subject.clone(),
             turns: Arc::new(Mutex::new(state.turns)),
             topic: Arc::new(Mutex::new(state.topic)),
+            ended: Arc::new(Mutex::new(state.ended)),
         })
+    }
+
+    /// The lifecycle entry: persist the initial state, notify the bus.
+    /// (Factory attribution: the constructor performs the generic acts —
+    /// the runtime is the environment they run through.)
+    fn enter_lifecycle(&self, runtime: &SynonzRuntime) {
+        if let Err(error) = runtime.conversation_store().save(self.state()) {
+            runtime
+                .event_bus()
+                .emit(SynonzEvent::Memory(MemoryEvent::FlowFailed {
+                    stage: MemoryFlowStage::Archive,
+                    detail: format!("conversation initial save failed: {error}"),
+                    moment: MemoryFlowFailedMoment::Creation,
+                }));
+        }
+        runtime
+            .event_bus()
+            .emit(SynonzEvent::Conversation(ConversationEvent::Created {
+                conversation_id: self.id.clone(),
+                subject_id: self.subject.to_string(),
+            }));
+    }
+
+    /// Whether the conversation has ended.
+    pub fn is_ended(&self) -> bool {
+        *self.ended.lock().unwrap_or_else(|p| p.into_inner())
     }
 
     /// The conversation's owning subject.
@@ -239,14 +284,51 @@ impl Conversation {
         *self.topic.lock().unwrap_or_else(|p| p.into_inner()) = Some(topic.to_string());
     }
 
-    /// Ends the conversation: the two end paths are the explicit call
-    /// (the initiating side in control) and the idle-timeout sweep. The
-    /// end itself performs the generic acts of a lifecycle transition;
-    /// the state teardown (drain the conversation's background
-    /// maintenance, mechanical L2 → L3 promotion) is the runtime's
-    /// structural behavior — never this data entity's business.
+    /// Ends the conversation — the lifecycle transition's generic acts:
+    /// mark (idempotent — the first call wins, later calls return), tear
+    /// down (the runtime's structural behavior: drain the background
+    /// maintenance, mechanical L2 → L3 promotion), persist the ended
+    /// state, and notify the bus (`Ended { reason }`).
+    ///
+    /// Two end paths: the explicit call (`Explicit` — the initiating side
+    /// in control) and the idle-timeout sweep (`IdleSwept` — no one at
+    /// the wheel). Persistence failures at the end surface as `FlowFailed
+    /// { moment: AtConversationEnd }` facts.
     pub async fn end(&self, runtime: &SynonzRuntime) {
+        self.end_with(runtime, ConversationEndReason::Explicit)
+            .await;
+    }
+
+    /// The end with an explicit path reason (the sweep's entry).
+    pub(crate) async fn end_with(&self, runtime: &SynonzRuntime, reason: ConversationEndReason) {
+        // Idempotent: the first end performs the acts; later calls are
+        // no-ops (the sweep also filters ended conversations).
+        {
+            let mut ended = self.ended.lock().unwrap_or_else(|p| p.into_inner());
+            if *ended {
+                return;
+            }
+            *ended = true;
+        }
+        // The state teardown is the runtime's structural behavior — never
+        // this data entity's business.
         runtime.finalize_conversation(self).await;
+        if let Err(error) = runtime.conversation_store().save(self.state()) {
+            runtime
+                .event_bus()
+                .emit(SynonzEvent::Memory(MemoryEvent::FlowFailed {
+                    stage: MemoryFlowStage::Archive,
+                    detail: format!("conversation end save failed: {error}"),
+                    moment: MemoryFlowFailedMoment::AtConversationEnd,
+                }));
+        }
+        runtime
+            .event_bus()
+            .emit(SynonzEvent::Conversation(ConversationEvent::Ended {
+                conversation_id: self.id.clone(),
+                subject_id: self.subject.to_string(),
+                reason,
+            }));
     }
 
     /// The conversation's identity.
@@ -301,8 +383,8 @@ impl Conversation {
             .push(turn);
     }
 
-    /// The current state snapshot (identity + turns + topic) — what a
-    /// store saves and what `of` restores from.
+    /// The current state snapshot (identity + turns + topic + lifecycle
+    /// state) — what a store saves and what `of` restores from.
     pub(crate) fn state(&self) -> ConversationState {
         let turns = self.turns.lock().unwrap_or_else(|p| p.into_inner());
         ConversationState {
@@ -311,6 +393,7 @@ impl Conversation {
             turns: turns.clone(),
             topic: self.topic(),
             last_active: now_epoch(),
+            ended: self.is_ended(),
         }
     }
 
@@ -387,9 +470,9 @@ mod tests {
 
     #[test]
     fn new_generates_unique_ids() {
-        let (_runtime, subject) = rt();
-        let a = Conversation::new(&subject);
-        let b = Conversation::new(&subject);
+        let (runtime, subject) = rt();
+        let a = Conversation::new(&runtime, &subject);
+        let b = Conversation::new(&runtime, &subject);
         assert_ne!(a.id(), b.id());
         assert!(a.id().starts_with("conv-"));
         assert_eq!(a.subject(), &subject);
@@ -397,15 +480,15 @@ mod tests {
 
     #[test]
     fn with_id_preserves_application_identity() {
-        let (_runtime, subject) = rt();
-        let conv = Conversation::with_id(&subject, "user-42-ticket-7");
+        let (runtime, subject) = rt();
+        let conv = Conversation::with_id(&runtime, &subject, "user-42-ticket-7");
         assert_eq!(conv.id(), "user-42-ticket-7");
     }
 
     #[test]
     fn push_and_read_roundtrip() {
-        let (_runtime, subject) = rt();
-        let conv = Conversation::new(&subject);
+        let (runtime, subject) = rt();
+        let conv = Conversation::new(&runtime, &subject);
         assert!(conv.is_empty());
         conv.push_turn(text_turn("a", "A"));
         conv.push_turn(text_turn("b", "B"));
@@ -420,7 +503,7 @@ mod tests {
     #[test]
     fn of_restores_from_store_after_save() {
         let (runtime, subject) = rt();
-        let conv = Conversation::with_id(&subject, "keep-me");
+        let conv = Conversation::with_id(&runtime, &subject, "keep-me");
         conv.push_turn(text_turn("a", "A"));
         conv.push_turn(text_turn("b", "B"));
         // Persistence is driven by the operating runtime; `of` restores it.
@@ -443,7 +526,7 @@ mod tests {
     #[test]
     fn of_fails_for_wrong_subject() {
         let (runtime, subject) = rt();
-        let conv = Conversation::with_id(&subject, "shared-id");
+        let conv = Conversation::with_id(&runtime, &subject, "shared-id");
         conv.push_turn(text_turn("a", "A"));
         runtime
             .conversation_store()
@@ -455,8 +538,8 @@ mod tests {
 
     #[test]
     fn turn_input_serializes_by_borrow() {
-        let (_runtime, subject) = rt();
-        let mut conv = Conversation::new(&subject);
+        let (runtime, subject) = rt();
+        let mut conv = Conversation::new(&runtime, &subject);
         let _turn = conv.turn_input("first");
         // Compile-time check: a second borrow cannot start while the first
         // turn input is alive. This test documents the borrow discipline.
@@ -470,7 +553,7 @@ mod tests {
         // not be visible on runtime B (each runtime holds its own view).
         let runtime_a = SynonzRuntime::builder().build();
         let runtime_b = SynonzRuntime::builder().build();
-        let conv = Conversation::with_id(&subject, "isolated");
+        let conv = Conversation::with_id(&runtime_a, &subject, "isolated");
         conv.push_turn(text_turn("a", "A"));
         runtime_a
             .conversation_store()

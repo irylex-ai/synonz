@@ -12,7 +12,9 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use crate::bus::{EventBus, MemoryEvent, MemoryFlowFailedMoment, SynonzEvent};
+use crate::bus::{
+    ConversationEndReason, EventBus, MemoryEvent, MemoryFlowFailedMoment, SynonzEvent,
+};
 use crate::conversation::{Conversation, ConversationStore};
 use crate::event::MemoryFlowStage;
 use crate::inprocess::{
@@ -257,7 +259,11 @@ impl SynonzRuntime {
         let stale = match self.conversation_store.list() {
             Ok(states) => states
                 .into_iter()
-                .filter(|state| state.last_active <= threshold && state.last_active > 0)
+                // Ended conversations are structurally skipped (the
+                // ended state is persisted).
+                .filter(|state| {
+                    !state.ended && state.last_active <= threshold && state.last_active > 0
+                })
                 .collect::<Vec<_>>(),
             Err(_) => return 0,
         };
@@ -272,7 +278,9 @@ impl SynonzRuntime {
                 continue;
             };
             if let Ok(conversation) = Conversation::of(self, &subject, &state.id) {
-                conversation.end(self).await;
+                conversation
+                    .end_with(self, ConversationEndReason::IdleSwept)
+                    .await;
                 ended += 1;
             }
         }

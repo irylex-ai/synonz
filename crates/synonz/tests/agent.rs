@@ -30,9 +30,11 @@ fn fixture() -> (SynonzRuntime, Subject) {
     (runtime, subject)
 }
 
-/// A fresh conversation (pure data — no runtime needed).
+/// A fresh conversation (created through the runtime: the lifecycle
+/// entry persists the initial state and notifies the bus).
 fn fresh_conv() -> Conversation {
-    Conversation::new(&Subject::of(SubjectType::User, "u-test"))
+    let runtime = SynonzRuntime::builder().build();
+    Conversation::new(&runtime, &Subject::of(SubjectType::User, "u-test"))
 }
 
 /// A tool with a scripted outcome and optional delay.
@@ -179,7 +181,7 @@ fn assert_terminal_invariant(events: &[ExecutionEvent]) {
 #[tokio::test]
 async fn single_round_completes() {
     let (runtime, subject) = fixture();
-    let mut conv = Conversation::new(&subject);
+    let mut conv = Conversation::new(&runtime, &subject);
     let agent = Agent::builder()
         .runtime(&runtime)
         .model(MockModel::finishing_with_text("beijing is sunny, 28C."))
@@ -203,7 +205,7 @@ async fn single_round_completes() {
 #[tokio::test]
 async fn run_returns_final_output() {
     let (runtime, subject) = fixture();
-    let mut conv = Conversation::new(&subject);
+    let mut conv = Conversation::new(&runtime, &subject);
     let agent = Agent::builder()
         .runtime(&runtime)
         .model(MockModel::finishing_with_text("sunny, 28C."))
@@ -218,7 +220,7 @@ async fn run_returns_final_output() {
 #[tokio::test]
 async fn tool_loop_feeds_results_back() {
     let (runtime, subject) = fixture();
-    let mut conv = Conversation::new(&subject);
+    let mut conv = Conversation::new(&runtime, &subject);
     let model = MockModel::new(vec![
         vec![finish_with_call("x1", "weather", "beijing")],
         vec![finish_text("beijing is sunny, 28C.")],
@@ -264,7 +266,7 @@ async fn tool_loop_feeds_results_back() {
 #[tokio::test]
 async fn parallel_tools_pair_by_call_id_and_keep_conversation_order() {
     let (runtime, subject) = fixture();
-    let mut conv = Conversation::new(&subject);
+    let mut conv = Conversation::new(&runtime, &subject);
     let model = MockModel::new(vec![
         vec![ModelStreamItem::Finish {
             message: synonz::Message::new(
@@ -323,7 +325,7 @@ async fn parallel_tools_pair_by_call_id_and_keep_conversation_order() {
 #[tokio::test]
 async fn soft_failure_is_fed_back_not_fatal() {
     let (runtime, subject) = fixture();
-    let mut conv = Conversation::new(&subject);
+    let mut conv = Conversation::new(&runtime, &subject);
     let model = MockModel::new(vec![
         vec![finish_with_call("x1", "broken", "{}")],
         vec![finish_text("recovered")],
@@ -369,7 +371,7 @@ async fn soft_failure_is_fed_back_not_fatal() {
 #[tokio::test]
 async fn unknown_tool_is_soft_failure() {
     let (runtime, subject) = fixture();
-    let mut conv = Conversation::new(&subject);
+    let mut conv = Conversation::new(&runtime, &subject);
     let model = MockModel::new(vec![
         vec![finish_with_call("x1", "nonexistent", "{}")],
         vec![finish_text("ok, skipping that")],
@@ -397,7 +399,7 @@ async fn unknown_tool_is_soft_failure() {
 #[tokio::test]
 async fn max_rounds_exceeded_fails_explicitly() {
     let (runtime, subject) = fixture();
-    let mut conv = Conversation::new(&subject);
+    let mut conv = Conversation::new(&runtime, &subject);
     // The model always wants another tool call; the budget must stop it.
     let model = MockModel::new(vec![
         vec![finish_with_call("x1", "weather", "beijing")],
@@ -440,7 +442,7 @@ async fn max_rounds_exceeded_fails_explicitly() {
 #[tokio::test]
 async fn cancel_by_external_token() {
     let (runtime, subject) = fixture();
-    let mut conv = Conversation::new(&subject);
+    let mut conv = Conversation::new(&runtime, &subject);
     let token = CancellationToken::new();
     let agent = Agent::builder()
         .runtime(&runtime)
@@ -482,7 +484,7 @@ async fn cancel_by_external_token() {
 #[tokio::test]
 async fn cancel_by_timeout() {
     let (runtime, subject) = fixture();
-    let mut conv = Conversation::new(&subject);
+    let mut conv = Conversation::new(&runtime, &subject);
     let agent = Agent::builder()
         .runtime(&runtime)
         .model(MockModel::hanging())
@@ -561,7 +563,7 @@ async fn cancel_by_drop_reaches_inflight_model_stream() {
     }
 
     let (runtime, subject) = fixture();
-    let mut conv = Conversation::new(&subject);
+    let mut conv = Conversation::new(&runtime, &subject);
     let dropped = Arc::new(AtomicBool::new(false));
     let agent = Agent::builder()
         .runtime(&runtime)

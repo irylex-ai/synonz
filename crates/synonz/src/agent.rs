@@ -37,6 +37,7 @@
 //! # async fn demo() {
 //! let runtime = SynonzRuntime::builder().build();
 //! let mut conv = synonz::Conversation::new(
+//!     &runtime,
 //!     &Subject::of(SubjectType::User, "demo"),
 //! );
 //! let agent = Agent::builder()
@@ -1166,7 +1167,8 @@ mod preset_tests {
     async fn research_preset_drives_a_full_run() {
         use crate::mock::MockModel;
         let runtime = crate::runtime::SynonzRuntime::builder().build();
-        let mut conv = crate::Conversation::new(&crate::Subject::of(crate::SubjectType::User, "u"));
+        let mut conv =
+            crate::Conversation::new(&runtime, &crate::Subject::of(crate::SubjectType::User, "u"));
         let model = MockModel::new(vec![vec![ModelStreamItem::Finish {
             message: Message::assistant_text("found the answer"),
             usage: TokenUsage::new(1, 1),

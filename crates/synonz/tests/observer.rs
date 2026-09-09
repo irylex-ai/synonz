@@ -69,6 +69,11 @@ impl Observer for Recorder {
                 TurnEvent::Tool(_) => "tool",
                 _ => "turn-other",
             },
+            SynonzEvent::Conversation(fact) => match fact {
+                synonz::ConversationEvent::Created { .. } => "created",
+                _ => "conversation-other",
+            },
+            SynonzEvent::Memory(_) => "memory",
             _ => "other",
         };
         self.recording()
@@ -85,7 +90,7 @@ impl Observer for Recorder {
 async fn observer_receives_the_full_stream_in_emission_order() {
     let recorder = Recorder::default();
     let runtime = runtime_with(recorder.clone());
-    let mut conv = Conversation::new(&synonz::Subject::of(SubjectType::User, "u"));
+    let mut conv = Conversation::new(&runtime, &synonz::Subject::of(SubjectType::User, "u"));
     let agent = Agent::builder()
         .runtime(&runtime)
         .model(MockModel::new(vec![
@@ -115,12 +120,20 @@ async fn observer_receives_the_full_stream_in_emission_order() {
         .iter()
         .map(|(_, kind)| kind.as_str())
         .collect();
-    // Full stream, single round: started → requested → delta → responded
-    // → archive fact → completed. Terminal last; input side visible; the
-    // memory facts ride the same bus (the engine's maintenance emits).
+    // Full stream: created (lifecycle entry) → started → requested →
+    // delta → responded → archive fact → completed. Terminal last; the
+    // conversation's birth fact opens the story.
     assert_eq!(
         kinds,
-        vec!["started", "model", "delta", "model", "other", "completed"],
+        vec![
+            "created",
+            "started",
+            "model",
+            "delta",
+            "model",
+            "memory",
+            "completed"
+        ],
         "full stream in emission order"
     );
     // No overflow on this small stream.
@@ -159,7 +172,7 @@ async fn lag_is_reported_when_the_queue_overflows() {
 
     let recorder = SlowRecorder::default();
     let runtime = runtime_with(recorder.clone());
-    let mut conv = Conversation::new(&synonz::Subject::of(SubjectType::User, "u"));
+    let mut conv = Conversation::new(&runtime, &synonz::Subject::of(SubjectType::User, "u"));
     // One call flooding 300 deltas: far beyond the 256-capacity queue.
     let mut script = Vec::new();
     for i in 0..300 {
@@ -181,10 +194,10 @@ async fn lag_is_reported_when_the_queue_overflows() {
     tokio::time::sleep(Duration::from_millis(700)).await; // slow drain
 
     let recording = recorder.inner.lock().unwrap();
-    // Total events of the run: started + requested + 300 deltas + responded
-    // + completed = 304, plus the engine's archive fact = 305. Delivered +
-    // dropped must account for every one of them — nothing vanishes
-    // silently.
+    // Total events of the run: created + started + requested + 300 deltas
+    // + responded + completed = 305, plus the engine's archive fact = 306.
+    // Delivered + dropped must account for every one of them — nothing
+    // vanishes silently.
     let total_dropped = recording.lags.last().copied().unwrap_or(0);
     assert!(
         !recording.lags.is_empty(),
@@ -194,7 +207,7 @@ async fn lag_is_reported_when_the_queue_overflows() {
     );
     assert_eq!(
         recording.events.len() as u64 + total_dropped,
-        305,
+        306,
         "accounting is complete"
     );
 }
@@ -226,7 +239,7 @@ async fn panicking_observer_is_circuit_broken_without_harming_others() {
         .observer(panicking)
         .observer(recorder.clone())
         .build();
-    let mut conv = Conversation::new(&synonz::Subject::of(SubjectType::User, "u"));
+    let mut conv = Conversation::new(&runtime, &synonz::Subject::of(SubjectType::User, "u"));
     let agent = Agent::builder()
         .runtime(&runtime)
         .model(text_model(&["done"]))
@@ -245,7 +258,7 @@ async fn panicking_observer_is_circuit_broken_without_harming_others() {
         .iter()
         .map(|(_, kind)| kind.as_str())
         .collect();
-    assert_eq!(kinds.first(), Some(&"started"));
+    assert_eq!(kinds.first(), Some(&"created"));
     assert_eq!(kinds.last(), Some(&"completed"));
 }
 
@@ -255,7 +268,7 @@ async fn observation_is_unconditional_for_registered_observers() {
     // The runtime HAS an observer — no per-agent switch exists anymore:
     // every run's events are observed, always.
     let runtime = runtime_with(recorder.clone());
-    let mut conv = Conversation::new(&synonz::Subject::of(SubjectType::User, "u"));
+    let mut conv = Conversation::new(&runtime, &synonz::Subject::of(SubjectType::User, "u"));
     let agent = Agent::builder()
         .runtime(&runtime)
         .model(text_model(&["done"]))
@@ -273,7 +286,7 @@ async fn observation_is_unconditional_for_registered_observers() {
         .collect();
     assert_eq!(
         kinds.first(),
-        Some(&"started"),
+        Some(&"created"),
         "registered observers see every run, unconditionally"
     );
     assert_eq!(kinds.last(), Some(&"completed"));
@@ -288,8 +301,8 @@ async fn execution_ids_attribute_concurrent_runs() {
         .model(text_model(&["a", "b"]))
         .build()
         .unwrap();
-    let mut conv_a = Conversation::new(&synonz::Subject::of(SubjectType::User, "a"));
-    let mut conv_b = Conversation::new(&synonz::Subject::of(SubjectType::User, "b"));
+    let mut conv_a = Conversation::new(&runtime, &synonz::Subject::of(SubjectType::User, "a"));
+    let mut conv_b = Conversation::new(&runtime, &synonz::Subject::of(SubjectType::User, "b"));
 
     let (ra, rb) = tokio::join!(
         agent.run(conv_a.turn_input("q1")),
