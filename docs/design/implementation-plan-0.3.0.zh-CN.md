@@ -1,6 +1,6 @@
 # Synonz 0.3.0 实现计划
 
-- 状态: DRAFT（待 irylex 评审）
+- 状态: APPROVED（2026-09-09，irylex 人工评审通过；实施中——M16 起步）
 - 日期: 2026-09-09
 - 依据: ADR-0017（APPROVED，含评审修订与评审修订二）、架构设计文档
   v4（APPROVED，含 Monitor 机制延期记录）、v4 评审决议
