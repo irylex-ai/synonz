@@ -1,8 +1,8 @@
 # Synonz 0.3.0 实现计划
 
-- 状态: VERIFIED（2026-09-09，M16~M20 全部完成；验收总标准核对通过——
-  139/139 全绿、clippy 零警告、旧 API 零残留、文档一致；**发布执行
-  等 irylex 单独确认**）
+- 状态: RELEASED（2026-09-09 计划 VERIFIED；2026-09-10 发布执行完成——
+  五 crate 0.3.0 已发布 crates.io、tag v0.3.0 已推送、GitHub Release
+  已建；验证：139/139 全绿、clippy 零警告、旧 API 零残留、文档一致）
 - 日期: 2026-09-09
 - 依据: ADR-0017（APPROVED，含评审修订与评审修订二）、架构设计文档
   v4（APPROVED，含 Monitor 机制延期记录）、v4 评审决议
