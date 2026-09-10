@@ -82,6 +82,17 @@ impl Observer for RecordingObserver {
             })) => {
                 format!("[{run}] completed")
             }
+            SynonzEvent::Conversation(synonz::ConversationEvent::Created {
+                conversation_id,
+                ..
+            }) => {
+                format!("[external] conversation created: {conversation_id}")
+            }
+            SynonzEvent::Memory(synonz::MemoryEvent::TurnArchived { topic, .. }) => {
+                format!(
+                    "[{run}] turn archived into L1 (topic: {topic})",
+                )
+            }
             other => format!("[{run}] other: {other:?}"),
         };
         println!("{line}");
