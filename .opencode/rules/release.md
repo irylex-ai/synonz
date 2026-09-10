@@ -174,6 +174,10 @@ The conditions required before entering READY:
 ### Documentation
 
 - user-facing documentation synchronized;
+- the registry-facing packaging documentation synchronized: each crate
+  renders its **own crate-level `README.md`** on the registry (not the
+  repository README) — these per-crate copies must match the repository
+  README before a release, because they drift silently between releases;
 - release notes prepared;
 - breaking changes documented.
 
@@ -278,7 +282,14 @@ Before RELEASED, published artifacts must be verified. Verification includes:
 
 - artifact correctness;
 - version consistency;
-- availability for users.
+- availability for users;
+- **packaging documentation**: the files a publish uploads — the crate-level
+  `README.md` files among them — must be **inspected, not assumed**. The
+  registry renders per-crate copies that drift silently from the repository
+  README (the 0.3.0 → 0.3.1 incident: every registry page shipped 0.1.1-era
+  documentation pointers until a docs-only patch release corrected them).
+  Verify the packaged README content against the repository README before
+  publishing, and verify the rendered result on the registry afterward.
 
 Do not assume an artifact is correct because it was built. Version strings,
 metadata, and published outputs must be checked against the intended release.
