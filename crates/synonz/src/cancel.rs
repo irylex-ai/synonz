@@ -127,33 +127,34 @@ impl Drop for CancelCore {
 /// Dropping the handle cancels the signal — this is how dropping a run
 /// stream cancels the run. The handle also arms the time budget.
 pub(crate) struct CancelHandle {
-    core: Arc<CancelCore>,
+    cancel_core: Arc<CancelCore>,
     _drop_guard: DropGuard,
 }
 
 #[allow(dead_code)]
 impl CancelHandle {
-    /// Wraps a core with a drop guard.
-    pub(crate) fn new(core: Arc<CancelCore>) -> Self {
+    /// Wraps the shared cancellation signal with a drop guard.
+    pub(crate) fn new(cancel_core: Arc<CancelCore>) -> Self {
         Self {
-            _drop_guard: core.token.clone().drop_guard(),
-            core,
+            _drop_guard: cancel_core.token.clone().drop_guard(),
+            cancel_core,
         }
     }
 
-    /// The shared signal core (used by the loop before the first yield).
-    pub(crate) fn core(&self) -> &CancelCore {
-        &self.core
+    /// The shared cancellation signal (used by the loop before the first
+    /// yield).
+    pub(crate) fn cancel_core(&self) -> &CancelCore {
+        &self.cancel_core
     }
 
     /// Explicitly cancels the run (user-requested cancellation).
     pub(crate) fn cancel(&self) {
-        self.core.token().cancel();
+        self.cancel_core.token().cancel();
     }
 
     /// Arms the time budget.
     pub(crate) fn arm_timeout(&self, duration: Duration) {
-        self.core.arm_timeout(duration);
+        self.cancel_core.arm_timeout(duration);
     }
 }
 
@@ -164,7 +165,7 @@ mod tests {
     #[tokio::test]
     async fn drop_of_handle_cancels_signal() {
         let handle = CancelHandle::new(CancelCore::new());
-        let token = handle.core().token().clone();
+        let token = handle.cancel_core().token().clone();
         assert!(!token.is_cancelled());
         drop(handle);
         token.cancelled().await;
@@ -176,14 +177,20 @@ mod tests {
         let parent = CancellationToken::new();
         let handle = CancelHandle::new(CancelCore::child_of(&parent));
         parent.cancel();
-        assert_eq!(handle.core().cancelled().await, CancelOutcome::Signal);
+        assert_eq!(
+            handle.cancel_core().cancelled().await,
+            CancelOutcome::Signal
+        );
     }
 
     #[tokio::test]
     async fn timeout_fires_with_timeout_outcome() {
         let handle = CancelHandle::new(CancelCore::new());
         handle.arm_timeout(Duration::from_millis(20));
-        assert_eq!(handle.core().cancelled().await, CancelOutcome::Timeout);
+        assert_eq!(
+            handle.cancel_core().cancelled().await,
+            CancelOutcome::Timeout
+        );
     }
 
     #[tokio::test]
@@ -198,7 +205,7 @@ mod tests {
         }
 
         let handle = CancelHandle::new(CancelCore::new());
-        let token = handle.core().token().clone();
+        let token = handle.cancel_core().token().clone();
         let dropped = Arc::new(AtomicBool::new(false));
         let sentinel = Sentinel(Arc::clone(&dropped));
 
@@ -213,7 +220,7 @@ mod tests {
         };
 
         tokio::select! {
-            outcome = handle.core().cancelled() => {
+            outcome = handle.cancel_core().cancelled() => {
                 assert_eq!(outcome, CancelOutcome::Signal);
             }
             _ = inflight => unreachable!("pending future must not resolve"),

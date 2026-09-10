@@ -350,15 +350,16 @@ impl Agent {
         }
     }
 
-    /// Runs the agent with an externally owned cancellation token: when the
-    /// token fires, the run cancels with [`CancelReason::UserRequested`].
+    /// Runs the agent with an externally owned cancellation signal: when
+    /// `cancel_token` fires, the run cancels with
+    /// [`CancelReason::UserRequested`].
     pub fn run_with<'a>(
         &self,
         input: impl Into<TurnInput<'a>>,
-        token: CancellationToken,
+        cancel_token: CancellationToken,
     ) -> Execution<'a> {
         let (input, conv) = input.into().into_parts();
-        let runner = self.spawn_runner(input, conv, CancelCore::child_of(&token));
+        let runner = self.spawn_runner(input, conv, CancelCore::child_of(&cancel_token));
         Execution {
             runner,
             _conv: conv,
@@ -381,7 +382,7 @@ impl Agent {
         &self,
         input: AgentInput,
         conv: &Conversation,
-        core: Arc<CancelCore>,
+        cancel_core: Arc<CancelCore>,
     ) -> AgentRunner {
         let (sender, receiver) = mpsc::channel(1);
         // The run's event outlet: the bus is notified on every emission
@@ -403,10 +404,10 @@ impl Agent {
             context: Arc::clone(&self.context),
             sink,
         };
-        tokio::spawn(task.execute(input, Arc::clone(&core)));
+        tokio::spawn(task.execute(input, Arc::clone(&cancel_core)));
         let runner = AgentRunner {
             receiver,
-            handle: CancelHandle::new(core),
+            handle: CancelHandle::new(cancel_core),
             rounds_seen: 0,
             terminal: None,
         };
@@ -657,7 +658,7 @@ struct AgentLoopTask {
 }
 
 impl AgentLoopTask {
-    async fn execute(self, input: AgentInput, core: Arc<CancelCore>) {
+    async fn execute(self, input: AgentInput, cancel_core: Arc<CancelCore>) {
         // Local binding: the macros below resolve `sink` to this borrow.
         let sink = &self.sink;
         let mut total_usage = TokenUsage::new(0, 0);
@@ -724,12 +725,13 @@ impl AgentLoopTask {
             }};
         }
 
-        // Cancelled before the loop (token/drop races with startup): the
-        // frame exists now, so the turn is archived and the terminal event
+        // Cancelled before the loop (a cancel_token/drop race with
+        // startup): the frame exists now, so the turn is archived and the
+        // terminal event
         // still closes the stream (the terminal invariant holds even for a
         // run that never reached the reasoning loop).
-        if core.is_cancelled() {
-            let outcome = core.cancelled().await;
+        if cancel_core.is_cancelled() {
+            let outcome = cancel_core.cancelled().await;
             record!(Turn::cancelled(
                 input.clone(),
                 messages[base_len..].to_vec(),
@@ -772,7 +774,7 @@ impl AgentLoopTask {
 
             // Suspension point 1: starting the model call.
             let mut stream = tokio::select! {
-                outcome = core.cancelled() => {
+                outcome = cancel_core.cancelled() => {
                     record!(Turn::cancelled(
                         input.clone(),
                         messages[base_len..].to_vec(),
@@ -799,7 +801,7 @@ impl AgentLoopTask {
             // Suspension point 2: consuming the response stream.
             let (message, usage) = loop {
                 let item = tokio::select! {
-                    outcome = core.cancelled() => {
+                    outcome = cancel_core.cancelled() => {
                         record!(Turn::cancelled(
                             input.clone(),
                             messages[base_len..].to_vec(),
@@ -899,7 +901,10 @@ impl AgentLoopTask {
             // Suspension point 3: parallel tool execution — completion-order
             // events, deterministic call-order conversation.
             emit_all_requested(sink, round, &calls).await;
-            let results = match self.run_tools_parallel(&calls, &core, sink, round).await {
+            let results = match self
+                .run_tools_parallel(&calls, &cancel_core, sink, round)
+                .await
+            {
                 Ok(results) => results,
                 Err(outcome) => {
                     record!(Turn::cancelled(
@@ -936,7 +941,7 @@ impl AgentLoopTask {
     async fn run_tools_parallel(
         &self,
         calls: &[ToolCall],
-        core: &Arc<CancelCore>,
+        cancel_core: &Arc<CancelCore>,
         sink: &EventSink,
         round: Option<usize>,
     ) -> Result<std::collections::HashMap<CallId, ToolResult>, CancelOutcome> {
@@ -944,14 +949,14 @@ impl AgentLoopTask {
         for call in calls {
             let tool = self.tools.iter().find(|t| t.name() == call.name).cloned();
             let call = call.clone();
-            let token = core.token().clone();
+            let cancel_token = cancel_core.token().clone();
             set.spawn(async move {
                 let result = match tool {
                     None => ToolResult::Err {
                         message: format!("unknown tool: {}", call.name),
                     },
                     Some(tool) => match tool
-                        .execute(call.arguments.clone(), ToolContext::new(token))
+                        .execute(call.arguments.clone(), ToolContext::new(cancel_token))
                         .await
                     {
                         Ok(result) => result,
@@ -967,7 +972,7 @@ impl AgentLoopTask {
         let mut results = std::collections::HashMap::new();
         while results.len() < calls.len() {
             let joined = tokio::select! {
-                outcome = core.cancelled() => {
+                outcome = cancel_core.cancelled() => {
                     set.abort_all();
                     return Err(outcome);
                 }

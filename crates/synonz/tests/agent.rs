@@ -440,20 +440,20 @@ async fn max_rounds_exceeded_fails_explicitly() {
 }
 
 #[tokio::test]
-async fn cancel_by_external_token() {
+async fn cancel_by_external_signal() {
     let (runtime, subject) = fixture();
     let mut conv = Conversation::new(&runtime, &subject);
-    let token = CancellationToken::new();
+    let cancel_token = CancellationToken::new();
     let agent = Agent::builder()
         .runtime(&runtime)
         .model(MockModel::hanging())
         .build()
         .unwrap();
 
-    let mut stream = agent.run_with(conv.turn_input("go"), token.clone());
+    let mut stream = agent.run_with(conv.turn_input("go"), cancel_token.clone());
     // Input-side payloads stay on the observation bypass: on the narrative
     // face the first surfaced event is already the cancellation terminal.
-    token.cancel();
+    cancel_token.cancel();
     let mut cancelled = None;
     while let Some(event) = stream.next().await {
         if matches!(

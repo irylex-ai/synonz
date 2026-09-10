@@ -1,4 +1,5 @@
-//! `cancellation`: the three cancellation entries — token, timeout, drop.
+//! `cancellation`: the three cancellation entries — external cancel
+//! signal, timeout, drop.
 //!
 //! Run: `cargo run -p synonz-examples --bin cancellation`
 
@@ -30,17 +31,18 @@ async fn main() {
         .expect("model is set");
     let subject = synonz::Subject::of(synonz::SubjectType::User, "demo");
 
-    // Entry 1: an external token cancels with `UserRequested`.
-    let token = CancellationToken::new();
+    // Entry 1: an external cancellation signal (`cancel_token`) fired
+    // from another task — the run cancels with `UserRequested`.
+    let cancel_token = CancellationToken::new();
     let mut conv = synonz::Conversation::new(&runtime, &subject);
-    let mut run = agent.run_with(conv.turn_input("go"), token.clone());
+    let mut run = agent.run_with(conv.turn_input("go"), cancel_token.clone());
     tokio::spawn(async move {
         tokio::time::sleep(Duration::from_millis(50)).await;
-        token.cancel();
+        cancel_token.cancel();
     });
     while let Some(event) = run.next().await {
         if let Some(reason) = terminal(&event) {
-            println!("token entry cancelled the run: {reason:?}");
+            println!("cancel entry cancelled the run: {reason:?}");
             assert_eq!(reason, CancelReason::UserRequested);
             break;
         }

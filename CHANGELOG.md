@@ -80,6 +80,9 @@ unpublished 0.2.0 (its full record follows below).
 - `RuntimeBuilder::idle_timeout` → `conversation_idle_timeout`
   (transitional — the automatic monitoring story lands in the Monitor
   ADR).
+- Naming clarity: `Agent::run_with`'s parameter renamed to
+  `cancel_token` (matches the `CancellationToken` type; the bare
+  `token` was referentially unclear). Non-breaking (positional).
 
 ### Migration Guidance (event-bus wave)
 
