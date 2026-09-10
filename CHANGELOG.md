@@ -4,13 +4,7 @@ All notable changes to Synonz are documented in this file. The format
 follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 versions follow [Semantic Versioning](https://semver.org/).
 
-## [Unreleased]
-
-### Added
-
-- Multi-agent orchestration (S3) — planned.
-
-## [0.3.0] - unreleased
+## [0.3.0] - 2026-09-09
 
 The reaction-architecture release: the event bus, the Agent-level
 Context state engine, the three-slot memory storage, and the complete
