@@ -7,21 +7,27 @@ Synonz is an open-source framework for building, running, and orchestrating
 AI agents. It is designed around four commitments: restrained abstraction
 (no framework magic), controllable behavior (you can always reason about
 what an agent is doing), complete lifecycle semantics (cancellation is a
-first-class citizen), and built-in observability (execution *is* an event
-stream).
+first-class citizen), and built-in observability (an event bus carries
+every run's full story — the hot path pays one non-blocking `try_send`).
 
 ```rust
-use synonz::Agent;
+use synonz::{Subject, SubjectType, SynonzRuntime};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let agent = Agent::builder()
+    let runtime = SynonzRuntime::builder().build();
+    let mut conv = synonz::Conversation::new(
+        &runtime,
+        &Subject::of(SubjectType::User, "demo"),
+    );
+    let agent = synonz::Agent::builder()
+        .runtime(&runtime)
         .model(synonz_openai::Client::from_env()?)
         .system_prompt("you are a helpful assistant")
         .build()?;
 
-    let answer = agent.ask("hello!").await?;
-    println!("{}", answer.text().unwrap_or_default());
+    let output = agent.run(conv.turn_input("hello!")).await?;
+    println!("{}", output.text().unwrap_or_default());
     Ok(())
 }
 ```
@@ -30,7 +36,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 | Crate | Purpose |
 |---|---|
-| `synonz` | Core: `Agent`, `Tool` and `Model` contracts, the event model, canonical messages, the reasoning loop |
+| `synonz` | Core: `Agent`, the Context state engine, the event bus and `SynonzEvent` vocabulary, the three-slot `Memory`, canonical messages, the reasoning loop |
 | `synonz-derive` | `#[derive(Tool)]` typed tool ergonomics (re-exported by `synonz`) |
 | `synonz-openai` | OpenAI-compatible `Model` adapter |
 | `synonz-anthropic` | Anthropic `Model` adapter |
@@ -43,8 +49,8 @@ Run them with `cargo run -p synonz-examples --bin <name>`:
 | Example | Notes |
 |---|---|
 | `custom_tool` | `#[derive(Tool)]` + agent loop (offline) |
-| `events` | Consuming the run's event narrative (offline) |
-| `cancellation` | Token / timeout / drop cancellation entries (offline) |
+| `events` | Observing the full event stream on the bus (offline) |
+| `cancellation` | External cancel signal / timeout / drop entries (offline) |
 | `mcp_tools` | Bridging an embedded MCP server (offline) |
 | `openai_chat` | Real chat, needs `SYNONZ_OPENAI_API_KEY` |
 | `anthropic_chat` | Real chat, needs `SYNONZ_ANTHROPIC_API_KEY` |
@@ -52,9 +58,13 @@ Run them with `cargo run -p synonz-examples --bin <name>`:
 ## Documentation
 
 - Architecture decisions: `docs/adr/` (ADR-0001 and onward)
-- Architecture overview: `docs/architecture/s2.zh-CN.md` (current; the v1
-  document is retained as the S1-era snapshot)
-- Implementation plan: `docs/design/implementation-plan-v1.zh-CN.md`
+- Architecture overview: `docs/architecture/v4.zh-CN.md` (the 0.3.0
+  target-state view; the v3 / s2 / v1 documents are retained as era
+  snapshots)
+- Implementation plan: `docs/design/implementation-plan-0.3.0.zh-CN.md`
+  (the 0.2.0 plan is retained for its stage record)
+- Changelog: `CHANGELOG.md` (0.3.0 ships the contract-convergence and
+  event-bus waves in one breaking wave — migration tables inside)
 
 ## Status
 

@@ -4,6 +4,17 @@ All notable changes to Synonz are documented in this file. The format
 follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 versions follow [Semantic Versioning](https://semver.org/).
 
+## [0.3.1] - 2026-09-10
+
+### Fixed
+
+- Documentation packaging: the five crate-level `README.md` files
+  (what crates.io renders per crate) were 0.1.1-era snapshots pointing
+  at the s2 architecture and the v1 plan — synced to the current
+  repository README (0.3.0 reality: v4 architecture, the 0.3.0
+  implementation plan, the bus examples table). Docs-only release; no
+  code changes.
+
 ## [0.3.0] - 2026-09-09
 
 The reaction-architecture release: the event bus, the Agent-level
