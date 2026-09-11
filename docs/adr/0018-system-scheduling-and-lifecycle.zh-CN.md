@@ -7,7 +7,13 @@
   `sweep_stale` 退役**——Monitor（系统调度器任务）为唯一清扫路径；
   内部 sweep 逻辑保留为任务体（框架内部）；公开方法与其计数返回
   删除（0.4.0 破坏波内）；测试改走真实 Monitor 路径（短超时 +
-  轮询断言）；②**版本承载号定为 0.4.0**（破坏性单波）。
+  轮询断言）；②**版本承载号定为 0.4.0**（破坏性单波）；③**W1 缺失
+  执行环境形态**：配置 `conversation_idle_timeout` 时，build 必须
+  获得执行环境（宿主 async 上下文自动捕获或 builder 显式注入）；
+  两者皆无 = 配置错误——**build panic**，消息指明两种修复方式；
+  ④**drain 超时值 = 固定 60s**（按会话总预算，非每任务累加；测试
+  经内部覆盖机制，不开公开配置面）；⑤**sweep tick =
+  `clamp(idle_timeout / 4, 100ms, 60s)`**。
 - 性质: 调度与生命周期地基——新增公开 `Scheduler` 组件与内部系统
   调度器、Monitor 空闲清扫（时间驱动的生命周期完备）、显式
   shutdown 收尾、ConversationStore 查询面升级；破坏性变化随下一
@@ -184,8 +190,9 @@ Runtime build（宿主 async 上下文内或显式注入 Handle）
   计时线程只触发，执行在宿主 worker pool；
 - **Handle 获取**：Runtime build 在宿主 async 上下文内调用时自动
   捕获（常规路径：`#[tokio::main]` 内 build）；同步构建场景经
-  builder 显式注入；两者皆无的失败形态为实施草案级细节（见
-  开放项）；
+  builder 显式注入；两者皆无且配置了 `conversation_idle_timeout` =
+  **配置错误——build panic**，消息指明两种修复方式（见头部评审
+  修订③）；
 - Scheduler 不自持执行池、不与应用形成双池。
 
 ### 5. 并发策略（OverlapPolicy）
@@ -288,7 +295,7 @@ Runtime build（宿主 async 上下文内或显式注入 Handle）
   收尾流程（不再无界挂起），并发出 `FlowFailed` 事实。
 - **panic 可见化**：维护任务 panic（JoinError）不再吞没，经总线
   以 `FlowFailed` 事实可见。
-- 超时值等参数为实施草案级（§开放项）。
+- 超时值为 60s（按会话总预算；见头部评审修订④）。
 
 ### 10. 公开面变更清单
 
@@ -394,10 +401,10 @@ Scheduler 专用事件词条。
 
 ## 开放项
 
-- 实施草案级：drain 超时值、sweep tick 间隔派生、只读快照字段集、
-  会话表内部结构、W1 缺失执行环境的失败形态、flush 屏障实现
-  形态、零任务时计时线程形态；
 - 命名终稿（实施期按命名立法执行）。
 
-> 已决项（见头部评审修订）：版本承载号 = 0.4.0；手动清扫入口
-> `sweep_stale` 退役（Monitor 为唯一清扫路径）。
+> 已决项（见头部评审修订与 0.4.0 计划 §5）：版本承载号 = 0.4.0；
+> 手动清扫入口 `sweep_stale` 退役；W1 缺失执行环境形态（build
+> panic）；drain 超时值 = 60s；sweep tick 派生公式；只读快照字段
+> 语义、会话表内部结构、flush 屏障形态、零任务计时线程形态（实施
+> 决议与记录见 0.4.0 计划）。
