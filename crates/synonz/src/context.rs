@@ -25,7 +25,6 @@
 //! the payload at every call (behavior and data meet at the payload, the
 //! runtime orchestrates).
 
-use std::future::Future;
 use std::sync::Arc;
 
 use futures::future::BoxFuture;
@@ -36,6 +35,7 @@ use crate::event::{CallPurpose, MemoryFlowStage, ModelEvent, TurnEvent};
 use crate::memory::{L1Entry, Memory, SummaryBlock, Topic};
 use crate::message::Message;
 use crate::model::Model;
+use crate::runtime::TaskRegistry;
 use crate::subject::Subject;
 
 // ── Failure type ──
@@ -407,15 +407,15 @@ impl Context for DefaultContext {
             }
 
             // 3. Background segment: compaction (topic-shift flush + L1
-            //    floor) and distillation (L2 floor) — one maintenance job
-            //    per turn, the flows in sequence (the distillation reads
-            //    the L2 the compaction just wrote). Spawned through the
-            //    runtime's maintenance registry — the system schedules
-            //    what the engine produces; the conversation-end teardown
-            //    drains them.
+            //    floor) and distillation (L2 floor) — one background
+            //    maintenance task per turn, the flows in sequence (the
+            //    distillation reads the L2 the compaction just wrote).
+            //    Spawned through the runtime's task registry — the system
+            //    schedules what the engine produces; the conversation-end
+            //    teardown drains them.
             let shift_flush = decision.shifted;
             let l1_window = self.l1_window;
-            let engine_jobs = MaintenanceJobs {
+            let jobs = BackgroundMaintenanceTask {
                 summarizer: Arc::clone(&self.summarizer),
                 memory: ctx.memory.clone(),
                 sink: ctx.events.clone(),
@@ -425,7 +425,6 @@ impl Context for DefaultContext {
                 topic: decision.topic.clone(),
                 l2_cap: self.l2_cap,
             };
-            let jobs = engine_jobs;
             ctx.tasks.spawn(async move {
                 if shift_flush {
                     jobs.compact(true, l1_window).await;
@@ -439,11 +438,11 @@ impl Context for DefaultContext {
     }
 }
 
-/// The background maintenance jobs of the default engine (an owned bundle
-/// a spawned task carries; clones share nothing — every clone is its own
-/// job).
+/// The default engine's background maintenance task: the owned inputs and
+/// steps of one per-turn maintenance run (a spawned task carries it;
+/// clones share nothing — every clone is its own task).
 #[derive(Clone)]
-struct MaintenanceJobs {
+struct BackgroundMaintenanceTask {
     summarizer: Arc<dyn MemorySummarizer>,
     memory: Memory,
     sink: EventSink,
@@ -454,7 +453,7 @@ struct MaintenanceJobs {
     l2_cap: usize,
 }
 
-impl MaintenanceJobs {
+impl BackgroundMaintenanceTask {
     /// Compacts L1 overflow into an L2 summary: summarize the oldest
     /// entries (a shift flush compacts the whole window; the floor
     /// compacts the overflow), append the summary, then pop the entries —
@@ -612,45 +611,6 @@ impl MaintenanceJobs {
                 conversation_id: self.conversation_id.clone(),
                 count: distilled,
             });
-        }
-    }
-}
-
-/// The maintenance-task registry handle: how an engine spawns background
-/// work the runtime schedules (and drains at conversation end).
-///
-/// Clones are scoped to the same conversation; spawned tasks attach to
-/// the conversation's entry in the runtime's conversation table.
-#[derive(Clone)]
-pub struct TaskRegistry {
-    table: crate::runtime::ConversationTable,
-    conversation_id: String,
-}
-
-impl TaskRegistry {
-    pub(crate) fn new(
-        table: crate::runtime::ConversationTable,
-        conversation_id: impl Into<String>,
-    ) -> Self {
-        Self {
-            table,
-            conversation_id: conversation_id.into(),
-        }
-    }
-
-    /// Spawns a background maintenance task and registers it under this
-    /// handle's conversation (the conversation-end teardown drains them).
-    ///
-    /// A conversation the runtime does not own has no table entry; the
-    /// task then runs untracked.
-    pub fn spawn(&self, task: impl Future<Output = ()> + Send + 'static) {
-        let handle = tokio::spawn(task);
-        let mut table = self
-            .table
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        if let Some(entry) = table.get_mut(&self.conversation_id) {
-            entry.tasks.push(handle);
         }
     }
 }

@@ -121,9 +121,11 @@ impl AgentBuilder {
         Self::default()
     }
 
-    /// Sets the runtime (required): the environment the agent lives in.
-    /// The agent and every conversation it executes against must come from
-    /// the same runtime (enforced at the execution entry).
+    /// Sets the runtime (required): the environment the agent lives in —
+    /// runs persist and observe through it. A conversation is pure data
+    /// (it carries no runtime reference); operations use the operator's
+    /// runtime, so keep one runtime per application rather than mixing a
+    /// conversation across runtimes.
     pub fn runtime(mut self, runtime: &SynonzRuntime) -> Self {
         self.runtime = Some(runtime.clone());
         self

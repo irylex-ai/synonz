@@ -47,8 +47,8 @@ pub use bus::{
 };
 pub use context::{
     AssemblyFailure, Context, ContextAssembler, ContextAssemblerInput, ContextAssemblerOutput,
-    ConversationTopicDetector, DefaultContext, MemoryFlowError, MemorySummarizer, TaskRegistry,
-    TopicDecision, TurnContext,
+    ConversationTopicDetector, DefaultContext, MemoryFlowError, MemorySummarizer, TopicDecision,
+    TurnContext,
 };
 pub use conversation::{
     Conversation, ConversationCursor, ConversationPage, ConversationQuery, ConversationState,
@@ -69,7 +69,7 @@ pub use message::{
     validate_conversation,
 };
 pub use model::{Model, ModelParams, ModelRequest, ModelStream, ModelStreamItem, complete};
-pub use runtime::{RuntimeBuilder, SynonzRuntime};
+pub use runtime::{RuntimeBuilder, SynonzRuntime, TaskRegistry};
 pub use scheduler::{OverlapPolicy, Schedule, Scheduler, TaskHandle, TaskInfo};
 pub use subject::{Subject, SubjectType};
 pub use tokio_util::sync::CancellationToken;

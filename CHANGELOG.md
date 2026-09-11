@@ -50,6 +50,8 @@ with the table below.
   an execution environment — call `build()` inside an async context or
   inject a handle via `RuntimeBuilder::executor`; otherwise `build()`
   panics (a configuration error).
+- `TaskRegistry` moved from `synonz::context` to `synonz::runtime`
+  (the root re-export `synonz::TaskRegistry` is unchanged).
 - `ConversationEndReason::Shutdown` and `MemoryFlowStage::Drain` added
   (additive variants).
 

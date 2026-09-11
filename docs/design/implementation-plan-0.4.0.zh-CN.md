@@ -299,3 +299,17 @@ shutdown 停止调度器并消费会话表（M25）；收尾扫全局。
 - **发布决策**：**未执行**——等 irylex 代码评审后确认（发布执行
   检查单：bump 五 crate 0.3.1→0.4.0 → dry-run → 依序 publish →
   tag v0.4.0 → GitHub Release）。
+
+### 评审跟进记录（2026-09-11，代码评审期决议）
+
+- **命名**：`MaintenanceJobs` → `BackgroundMaintenanceTask`（消歧：
+  广义"调度"包含 executor 的 spawn——它每轮一个、经 `tokio::spawn`
+  派发；但与 Scheduler 组件的计时周期任务无关）；
+- **TaskRegistry 归属**：移入 `runtime.rs`（与会话表/条目同居；消除
+  runtime → context 向上依赖；根导出 `synonz::TaskRegistry` 不变，
+  模块路径变化记入 CHANGELOG）；
+- **Runtime 单例立场**：维持显式、无全局访问器；`agent.rs` 过时注释
+  一并修正（"enforced at the execution entry" 在纯数据会话重构后
+  已不成立）；v5 澄清"全局单例 = 逻辑角色"；
+- **Context 概念**：维持"Agent 持有的配置值"（评审确认，不改为
+  runtime 绑定服务）。

@@ -190,6 +190,43 @@ pub(crate) struct ConversationEntry {
 pub(crate) type ConversationTable =
     Arc<std::sync::Mutex<std::collections::HashMap<String, ConversationEntry>>>;
 
+/// The maintenance-task registry handle: how an engine spawns background
+/// work the runtime schedules (and drains at conversation end).
+///
+/// The type is public (the engine payload carries it); construction stays
+/// with the runtime. Clones are scoped to the same conversation; spawned
+/// tasks attach to that conversation's entry in the runtime's table.
+#[derive(Clone)]
+pub struct TaskRegistry {
+    table: ConversationTable,
+    conversation_id: String,
+}
+
+impl TaskRegistry {
+    pub(crate) fn new(table: ConversationTable, conversation_id: impl Into<String>) -> Self {
+        Self {
+            table,
+            conversation_id: conversation_id.into(),
+        }
+    }
+
+    /// Spawns a background maintenance task and registers it under this
+    /// handle's conversation (the conversation-end teardown drains them).
+    ///
+    /// A conversation the runtime does not own has no table entry; the
+    /// task then runs untracked.
+    pub fn spawn(&self, task: impl std::future::Future<Output = ()> + Send + 'static) {
+        let handle = tokio::spawn(task);
+        let mut table = self
+            .table
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if let Some(entry) = table.get_mut(&self.conversation_id) {
+            entry.tasks.push(handle);
+        }
+    }
+}
+
 /// The runtime's shared state (one `Arc` per runtime; clones are cheap).
 struct RuntimeInner {
     conversation_store: Arc<dyn ConversationStore>,
@@ -278,8 +315,8 @@ impl SynonzRuntime {
     }
 
     /// A maintenance-task registry handle scoped to one conversation.
-    pub(crate) fn task_registry(&self, conversation_id: &str) -> crate::context::TaskRegistry {
-        crate::context::TaskRegistry::new(Arc::clone(&self.inner.conversations), conversation_id)
+    pub(crate) fn task_registry(&self, conversation_id: &str) -> TaskRegistry {
+        TaskRegistry::new(Arc::clone(&self.inner.conversations), conversation_id)
     }
 
     /// Registers an owned conversation in the conversation table (entry =
