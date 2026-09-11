@@ -312,4 +312,7 @@ shutdown 停止调度器并消费会话表（M25）；收尾扫全局。
   一并修正（"enforced at the execution entry" 在纯数据会话重构后
   已不成立）；v5 澄清"全局单例 = 逻辑角色"；
 - **Context 概念**：维持"Agent 持有的配置值"（评审确认，不改为
-  runtime 绑定服务）。
+  runtime 绑定服务）；
+- **TaskRegistry 构造内聚**：`new` 降为模块私有（唯一构造点 =
+  Runtime 工厂）；保持"表 + id"形态不变——id 查找即归属复核，避免
+  直接持条目（Arc）导致已 drain 列表被迟到 spawn 静默写入。

@@ -203,7 +203,8 @@ pub struct TaskRegistry {
 }
 
 impl TaskRegistry {
-    pub(crate) fn new(table: ConversationTable, conversation_id: impl Into<String>) -> Self {
+    /// The sole construction site is [`SynonzRuntime::task_registry`].
+    fn new(table: ConversationTable, conversation_id: impl Into<String>) -> Self {
         Self {
             table,
             conversation_id: conversation_id.into(),
