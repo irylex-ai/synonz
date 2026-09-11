@@ -31,6 +31,7 @@ pub mod memory;
 pub mod message;
 pub mod model;
 pub mod runtime;
+pub mod scheduler;
 pub mod subject;
 pub mod tool;
 
@@ -69,6 +70,7 @@ pub use message::{
 };
 pub use model::{Model, ModelParams, ModelRequest, ModelStream, ModelStreamItem, complete};
 pub use runtime::{RuntimeBuilder, SynonzRuntime};
+pub use scheduler::{OverlapPolicy, Schedule, Scheduler, TaskHandle, TaskInfo};
 pub use subject::{Subject, SubjectType};
 pub use tokio_util::sync::CancellationToken;
 pub use tool::{Tool, ToolContext, ToolError, ToolSpec};

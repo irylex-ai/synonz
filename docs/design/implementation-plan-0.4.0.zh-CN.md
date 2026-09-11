@@ -1,6 +1,6 @@
 # Synonz 0.4.0 实现计划
 
-- 状态: IMPLEMENTING（2026-09-11，计划 APPROVED；M21-M22 完成）
+- 状态: IMPLEMENTING（2026-09-11，计划 APPROVED；M21-M23 完成）
 - 日期: 2026-09-11
 - 依据: ADR-0018（APPROVED——系统调度与生命周期完备）、架构设计
   文档 v5（APPROVED）、ADR-0011/0017 修订注记
@@ -212,3 +212,23 @@ shutdown 停止调度器并消费会话表（M25）；收尾扫全局。
 - **测试**：单元测试 5 项（过滤排序/游标分页/并列 id/关键字三字段）
   + 跨页 sweep（130 会话）+ 外部查询面测试；全量回归 147/147 全绿、
   clippy 零警告、fmt 干净。
+
+### M23 Scheduler 组件 ✅（2026-09-11）
+
+- **核心实现**：`Scheduler`（单条计时线程：登记 / deadline 计算 /
+  等待 / 触发 / 提交，不执行任何任务体）+ 任务登记表（deadline /
+  period / policy / inflight / pending / body）+ 固定速率推进 +
+  追赶保护（过载后按周期倍数跳过积压，不补发一串触发）；
+- **触发-执行分离**：触发 → 非阻塞提交宿主 Executor
+  （`Handle::spawn`）；执行完成回接经 RAII guard（panic/取消安全
+  释放运行位）；
+- **三策略**：Skip（运行中丢弃）/ Concurrent（总是提交、可重叠）/
+  Queue（合并：至多一次 pending、完成即背靠背续跑）；
+- **公开 API**：`Scheduler::new(executor)`、`schedule`、`schedule_named`
+  （B 类增补：与 `TaskInfo.name` 字段对称，用户任务可命名）、
+  `TaskHandle::cancel`、`tasks()` 只读信息；`Schedule::every`（立即
+  首触发）；停止随实例消亡（`stop` 供 Runtime 停机调用）；
+- **零任务形态**：计时线程随首个任务注册启动（无任务不空转）；
+- **测试**：7 项（立即首触发 / 三策略语义 / 长任务不阻塞短任务触发
+  / panic 不杀循环 / 任务快照）；全量回归 154/154 全绿、clippy 零
+  警告、fmt 干净。
