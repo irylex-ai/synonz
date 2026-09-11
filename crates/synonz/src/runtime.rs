@@ -196,6 +196,10 @@ pub(crate) type ConversationTable =
 /// The type is public (the engine payload carries it); construction stays
 /// with the runtime. Clones are scoped to the same conversation; spawned
 /// tasks attach to that conversation's entry in the runtime's table.
+///
+/// The handle is a transient value (created per turn payload and dropped
+/// with it) and owns no tasks; the spawned handles live in the
+/// conversation's table entry until the conversation-end drain.
 #[derive(Clone)]
 pub struct TaskRegistry {
     table: ConversationTable,
@@ -320,8 +324,9 @@ impl SynonzRuntime {
         TaskRegistry::new(Arc::clone(&self.inner.conversations), conversation_id)
     }
 
-    /// Registers an owned conversation in the conversation table (entry =
-    /// conversation handle + its background tasks).
+    /// Registers an owned conversation in the conversation table: creates
+    /// the entry (once per conversation, called from the factory family)
+    /// that carries the conversation handle plus its background tasks.
     pub(crate) fn register_conversation(&self, conversation: &Conversation) {
         let mut table = self
             .inner
