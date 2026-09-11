@@ -1,6 +1,6 @@
 # Synonz 0.4.0 实现计划
 
-- 状态: IMPLEMENTING（2026-09-11，计划 APPROVED；M21-M23 完成）
+- 状态: IMPLEMENTING（2026-09-11，计划 APPROVED；M21-M24 完成）
 - 日期: 2026-09-11
 - 依据: ADR-0018（APPROVED——系统调度与生命周期完备）、架构设计
   文档 v5（APPROVED）、ADR-0011/0017 修订注记
@@ -232,3 +232,26 @@ shutdown 停止调度器并消费会话表（M25）；收尾扫全局。
 - **测试**：7 项（立即首触发 / 三策略语义 / 长任务不阻塞短任务触发
   / panic 不杀循环 / 任务快照）；全量回归 154/154 全绿、clippy 零
   警告、fmt 干净。
+
+### M24 系统调度器与 Monitor ✅（2026-09-11）
+
+- **Runtime 内部重构**：`SynonzRuntime` → `Arc<RuntimeInner>`（克隆
+  共享）；Monitor 任务体持 `Weak<RuntimeInner>`——无引用循环，
+  Runtime 消亡即触发调度器停止与线程收口；
+- **build 装配（W1）**：捕获宿主 Executor Handle
+  （`Handle::try_current`）或 builder 显式注入 `.executor(handle)`；
+  两者皆无且配置 `conversation_idle_timeout` → build panic（消息
+  指明修复方式；程序配置错误）；
+- **Monitor 注册**：配置 `idle_timeout` 时于 build 注册（Skip、立即
+  首触发、tick = `clamp(timeout/4, 100ms, 60s)`、命名 `monitor`）；
+  无配置零任务（无计时线程）；
+- **崩溃孤儿对账**：立即首扫发现 store 中陈旧未结束会话并终结
+  （`IdleSwept`）——测试以预置 store 模拟上一进程遗留；
+- **只读快照**：`runtime.scheduler_snapshot() -> Vec<TaskInfo>`
+  （名称/周期/策略/距下次触发/运行中）；系统调度器无注册入口；
+- **清扫入口退役**：公开 `sweep_stale` 删除；内部 `sweep_idle`
+  （Monitor 任务体）与 `sweep_idle_before`（阈值核心，可测）；外部
+  sweep 测试迁移为真实 Monitor 路径（轮询 + 宽裕余量）；
+- **测试**：新增单元测试 6 项（自动清扫/孤儿对账/快照×2/缺失环境
+  panic/显式注入）+ 外部测试迁移；全量回归 160/160 全绿、clippy
+  零警告、fmt 干净。

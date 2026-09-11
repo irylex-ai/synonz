@@ -316,7 +316,7 @@ async fn end_is_idempotent_and_notifies_once() {
 }
 
 #[tokio::test]
-async fn sweep_ends_idle_conversations_and_skips_ended_ones() {
+async fn monitor_ends_idle_conversations_and_skips_ended_ones() {
     let recorder = LifecycleRecorder::default();
     let runtime = SynonzRuntime::builder()
         .observer(recorder.clone())
@@ -324,18 +324,25 @@ async fn sweep_ends_idle_conversations_and_skips_ended_ones() {
         .build();
     let subject = Subject::of(SubjectType::User, "lifecycle");
 
-    // Two conversations, backdated past the idle threshold; one already
-    // ended.
+    // Two conversations; one is ended explicitly, one goes idle.
     let _idle = Conversation::with_id(&runtime, &subject, "idle-one");
     let already = Conversation::with_id(&runtime, &subject, "already-ended");
     already.end(&runtime).await;
 
-    tokio::time::sleep(Duration::from_millis(1100)).await; // past the threshold
-    let swept = runtime.sweep_stale().await;
-    assert_eq!(swept, 1, "only the idle, un-ended conversation swept");
-
-    let idle_after = Conversation::of(&runtime, &subject, "idle-one").unwrap();
-    assert!(idle_after.is_ended());
+    // The Monitor sweeps the idle conversation once past the threshold
+    // (poll with a generous deadline: the exact tick is not asserted).
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        let idle_after = Conversation::of(&runtime, &subject, "idle-one").unwrap();
+        if idle_after.is_ended() {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the Monitor must sweep the idle conversation"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
     let already_after = Conversation::of(&runtime, &subject, "already-ended").unwrap();
     assert!(already_after.is_ended());
 
