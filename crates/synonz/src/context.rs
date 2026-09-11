@@ -20,7 +20,7 @@
 //!
 //! The engine is **pure behavior**: it holds strategy slots and floor
 //! parameters, no instance state — background maintenance tasks register
-//! with the runtime's session maintenance table (the system schedules
+//! with the runtime's conversation table (the system schedules
 //! what the application's engine produces), and memory arrives through
 //! the payload at every call (behavior and data meet at the payload, the
 //! runtime orchestrates).
@@ -107,7 +107,7 @@ pub struct ContextAssemblerInput<'a> {
     pub subject: &'a Subject,
     /// The conversation whose layers are assembled.
     pub conversation_id: &'a str,
-    /// The session's current topic.
+    /// The conversation's current topic.
     pub topic: &'a str,
     /// The turn's user input text.
     pub input: &'a str,
@@ -194,11 +194,11 @@ pub trait MemorySummarizer: Send + Sync + 'static {
     ) -> BoxFuture<'a, Result<String, String>>;
 }
 
-/// The topic strategy: the session topic state machine.
+/// The topic strategy: the conversation topic state machine.
 ///
 /// Detects the topic of a turn and whether it shifted from the current
 /// one. A shift's consequences are structural: the pre-shift turns are
-/// compacted into L2 (the compaction semantics of the session context)
+/// compacted into L2 (the compaction semantics of the conversation context)
 /// and a `TopicShifted` fact is emitted.
 pub trait ConversationTopicDetector: Send + Sync + 'static {
     /// Returns the topic for `input` given the `current` topic; `shifted`
@@ -620,16 +620,16 @@ impl MaintenanceJobs {
 /// work the runtime schedules (and drains at conversation end).
 ///
 /// Clones are scoped to the same conversation; spawned tasks attach to
-/// the conversation's entry in the runtime's session table.
+/// the conversation's entry in the runtime's conversation table.
 #[derive(Clone)]
 pub struct TaskRegistry {
-    table: crate::runtime::SessionTable,
+    table: crate::runtime::ConversationTable,
     conversation_id: String,
 }
 
 impl TaskRegistry {
     pub(crate) fn new(
-        table: crate::runtime::SessionTable,
+        table: crate::runtime::ConversationTable,
         conversation_id: impl Into<String>,
     ) -> Self {
         Self {
@@ -641,7 +641,7 @@ impl TaskRegistry {
     /// Spawns a background maintenance task and registers it under this
     /// handle's conversation (the conversation-end teardown drains them).
     ///
-    /// A conversation the runtime does not own has no session entry; the
+    /// A conversation the runtime does not own has no table entry; the
     /// task then runs untracked.
     pub fn spawn(&self, task: impl Future<Output = ()> + Send + 'static) {
         let handle = tokio::spawn(task);

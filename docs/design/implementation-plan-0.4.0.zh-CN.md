@@ -270,6 +270,10 @@ shutdown 停止调度器并消费会话表（M25）；收尾扫全局。
 - **观测 flush**：内部 `EventBus::flush()`（队列 Barrier + oneshot
   确认；溢出丢弃不复活）；
 - **词表**：`ConversationEndReason` 增 `Shutdown` 变体；
+- **命名备注**：会话表相关内部标识按 §5 命名立法采用 Conversation
+  命名（`register_conversation` / `ConversationEntry` /
+  `ConversationTable`，字段 `conversations`）——不使用 Session
+  近义词（一个概念一个名字）；仅内部面，无公开 API 变化；
 - **测试**：新增单元测试 4 项（收尾与事件/flush/幂等/归属范围）+
   外部公开面测试；两轮全量回归 165/165 全绿、clippy 零警告、fmt
   干净（顺带修复 scheduler 快照测试的瞬时状态断言——改为确定性

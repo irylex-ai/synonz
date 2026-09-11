@@ -94,7 +94,7 @@ impl SummaryBlock {
 pub struct L1Entry {
     /// The conversation this turn belongs to.
     pub conversation_id: String,
-    /// The turn's topic (inherited from the session topic state machine).
+    /// The turn's topic (inherited from the conversation topic state machine).
     pub topic: Topic,
     /// The canonical messages of that turn.
     pub messages: Vec<crate::Message>,

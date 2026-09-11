@@ -52,7 +52,7 @@ pub struct ConversationState {
     pub id: String,
     /// The recorded turns, in order.
     pub turns: Vec<Turn>,
-    /// The session topic state machine's current topic.
+    /// The conversation topic state machine's current topic.
     pub topic: Option<String>,
     /// Epoch seconds of the last activity (idle-timeout tracking).
     pub last_active: u64,
@@ -72,7 +72,7 @@ pub struct ConversationSummary {
     pub id: String,
     /// The owning subject's full identity (`(type, id)`).
     pub subject_id: String,
-    /// The session topic, when one has been established.
+    /// The conversation topic, when one has been established.
     pub topic: Option<String>,
     /// Epoch seconds of the last activity.
     pub last_active: u64,
@@ -339,7 +339,7 @@ impl Conversation {
     }
 
     /// Creates a new conversation with an application-supplied id (ticket
-    /// numbers, user session keys, ...) — the same three lifecycle acts.
+    /// numbers, external system keys, ...) — the same three lifecycle acts.
     pub fn with_id(runtime: &SynonzRuntime, subject: &Subject, id: impl Into<String>) -> Self {
         let conversation = Self {
             id: id.into(),
@@ -349,7 +349,7 @@ impl Conversation {
             ended: Arc::new(Mutex::new(false)),
         };
         conversation.enter_lifecycle(runtime);
-        runtime.register_session(&conversation);
+        runtime.register_conversation(&conversation);
         conversation
     }
 
@@ -373,7 +373,7 @@ impl Conversation {
             ended: Arc::new(Mutex::new(state.ended)),
         };
         if !conversation.is_ended() {
-            runtime.register_session(&conversation);
+            runtime.register_conversation(&conversation);
         }
         Ok(conversation)
     }
@@ -409,7 +409,7 @@ impl Conversation {
         &self.subject
     }
 
-    /// The current topic (session topic state machine), if any.
+    /// The current topic (conversation topic state machine), if any.
     pub(crate) fn topic(&self) -> Option<String> {
         self.topic.lock().unwrap_or_else(|p| p.into_inner()).clone()
     }

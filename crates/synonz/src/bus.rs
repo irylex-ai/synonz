@@ -97,7 +97,7 @@ pub enum ConversationEvent {
         /// Which of the two end paths fired.
         reason: ConversationEndReason,
     },
-    /// The session topic shifted (the detector's verdict, emitted by the
+    /// The conversation topic shifted (the detector's verdict, emitted by the
     /// state engine's maintenance).
     TopicShifted {
         /// The conversation's identity.

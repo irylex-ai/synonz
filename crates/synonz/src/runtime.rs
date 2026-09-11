@@ -164,7 +164,7 @@ impl RuntimeBuilder {
                     .unwrap_or_else(|| Arc::new(InProcessMemoryL3Store::default())),
             ),
             event_bus: EventBus::new(self.observers),
-            sessions: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+            conversations: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
             conversation_idle_timeout: self.conversation_idle_timeout,
             maintenance_drain_timeout: MAINTENANCE_DRAIN_TIMEOUT,
             scheduler: executor.map(Scheduler::new),
@@ -177,18 +177,18 @@ impl RuntimeBuilder {
     }
 }
 
-/// One owned conversation in the session table: the handle plus its
+/// One owned conversation in the conversation table: the handle plus its
 /// spawned background maintenance tasks (drained at conversation end).
-pub(crate) struct SessionEntry {
+pub(crate) struct ConversationEntry {
     pub(crate) conversation: Conversation,
     pub(crate) tasks: Vec<tokio::task::JoinHandle<()>>,
 }
 
-/// The session table: conversation id → owned conversation — the
+/// The conversation table: conversation id → owned conversation — the
 /// runtime's ownership registry (shutdown's teardown list) and the
 /// background-task bookkeeping in one structure.
-pub(crate) type SessionTable =
-    Arc<std::sync::Mutex<std::collections::HashMap<String, SessionEntry>>>;
+pub(crate) type ConversationTable =
+    Arc<std::sync::Mutex<std::collections::HashMap<String, ConversationEntry>>>;
 
 /// The runtime's shared state (one `Arc` per runtime; clones are cheap).
 struct RuntimeInner {
@@ -197,9 +197,9 @@ struct RuntimeInner {
     /// storage slots at build time; the runtime is its single authority).
     memory: Memory,
     event_bus: EventBus,
-    /// The session table: owned conversations and their background
+    /// The conversation table: owned conversations and their background
     /// maintenance tasks (the Monitor and shutdown both consume it).
-    sessions: SessionTable,
+    conversations: ConversationTable,
     conversation_idle_timeout: Option<Duration>,
     /// The per-conversation budget for draining background maintenance
     /// tasks at conversation end (bounded teardown).
@@ -279,20 +279,20 @@ impl SynonzRuntime {
 
     /// A maintenance-task registry handle scoped to one conversation.
     pub(crate) fn task_registry(&self, conversation_id: &str) -> crate::context::TaskRegistry {
-        crate::context::TaskRegistry::new(Arc::clone(&self.inner.sessions), conversation_id)
+        crate::context::TaskRegistry::new(Arc::clone(&self.inner.conversations), conversation_id)
     }
 
-    /// Registers an owned conversation in the session table (entry =
+    /// Registers an owned conversation in the conversation table (entry =
     /// conversation handle + its background tasks).
-    pub(crate) fn register_session(&self, conversation: &Conversation) {
-        let mut sessions = self
+    pub(crate) fn register_conversation(&self, conversation: &Conversation) {
+        let mut table = self
             .inner
-            .sessions
+            .conversations
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        sessions
+        table
             .entry(conversation.id().to_string())
-            .or_insert_with(|| SessionEntry {
+            .or_insert_with(|| ConversationEntry {
                 conversation: conversation.clone(),
                 tasks: Vec::new(),
             });
@@ -318,12 +318,12 @@ impl SynonzRuntime {
         }
         // 2. End every owned conversation (end_with is idempotent).
         let conversations: Vec<Conversation> = {
-            let sessions = self
+            let table = self
                 .inner
-                .sessions
+                .conversations
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
-            sessions
+            table
                 .values()
                 .map(|entry| entry.conversation.clone())
                 .collect()
@@ -372,7 +372,7 @@ impl SynonzRuntime {
         //    panicked tasks surface as FlowFailed facts.
         let entry = self
             .inner
-            .sessions
+            .conversations
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .remove(conversation.id());
@@ -482,7 +482,7 @@ impl SynonzRuntime {
     }
 
     /// Lists conversations matching a metadata keyword with keyset
-    /// pagination — the Low Level track (session management, diagnostics).
+    /// pagination — the Low Level track (conversation management, diagnostics).
     ///
     /// Ordering is `last_active` descending, `id` ascending; pass a
     /// previous page's `next` back through [`ConversationQuery::with_after`]

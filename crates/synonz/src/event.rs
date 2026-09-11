@@ -231,7 +231,7 @@ pub enum MemoryFlowStage {
     AssembleRead,
     /// Writing the L1 archive after a completed turn.
     Archive,
-    /// Updating the session topic.
+    /// Updating the conversation topic.
     TopicUpdate,
     /// Summarizing demoted L1 turns into L2.
     Summarize,
