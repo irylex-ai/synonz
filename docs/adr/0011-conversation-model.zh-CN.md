@@ -6,6 +6,11 @@
   （truncate_last/clear/fork）、push_turn 公开性、执行体自落账
   机制被 ADR-0015 取代（会话必选、全入史 + outcome、API 收敛、
   归档归 Context）
+- 被修订（ADR-0018，2026-09-11）：本 ADR 决策 7 推迟的
+  **ConversationStore 契约**，其查询面由 ADR-0018 演进——新增
+  `list_stale` 下推查询（空闲清扫专用）；`list` 升级为查询面
+  （元数据关键字 + 游标分页 + 摘要返回，旧全量形态退役）；破坏性
+  变化随下一单波发布
 - 日期: 2026-08-29
 - 决策者: irylex（人类确认）
 
