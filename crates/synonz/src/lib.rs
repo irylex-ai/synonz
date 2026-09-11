@@ -50,8 +50,8 @@ pub use context::{
     TopicDecision, TurnContext,
 };
 pub use conversation::{
-    Conversation, ConversationState, ConversationStore, ConversationStoreError, Turn, TurnInput,
-    TurnOutcome,
+    Conversation, ConversationCursor, ConversationPage, ConversationQuery, ConversationState,
+    ConversationStore, ConversationStoreError, ConversationSummary, Turn, TurnInput, TurnOutcome,
 };
 pub use error::{AgentError, ModelError};
 pub use event::{

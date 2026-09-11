@@ -12,7 +12,10 @@ use std::collections::HashMap;
 use std::sync::Mutex;
 
 use crate::Subject;
-use crate::conversation::{ConversationState, ConversationStore, ConversationStoreError};
+use crate::conversation::{
+    ConversationCursor, ConversationPage, ConversationQuery, ConversationState, ConversationStore,
+    ConversationStoreError, ConversationSummary,
+};
 use crate::memory::{
     KnowledgeFragment, L1Entry, MemoryL1Store, MemoryL2Store, MemoryL3Store, MemoryStoreError,
     SummaryBlock, Topic,
@@ -49,9 +52,203 @@ impl ConversationStore for InProcessConversationStore {
         Ok(())
     }
 
-    fn list(&self) -> Result<Vec<ConversationState>, ConversationStoreError> {
+    fn list_stale(
+        &self,
+        before: u64,
+        after: Option<ConversationCursor>,
+        limit: usize,
+    ) -> Result<ConversationPage, ConversationStoreError> {
         let map = self.state.lock().unwrap_or_else(|p| p.into_inner());
-        Ok(map.values().cloned().collect())
+        let states = map
+            .values()
+            .filter(|state| !state.ended && state.last_active > 0 && state.last_active <= before);
+        Ok(page_of(states, after, limit))
+    }
+
+    fn list(&self, query: ConversationQuery) -> Result<ConversationPage, ConversationStoreError> {
+        let map = self.state.lock().unwrap_or_else(|p| p.into_inner());
+        let ConversationQuery {
+            keyword,
+            after,
+            limit,
+        } = query;
+        let states = map.values().filter(|state| match &keyword {
+            Some(keyword) => matches_keyword(state, keyword),
+            None => true,
+        });
+        Ok(page_of(states, after, limit))
+    }
+}
+
+/// Projects matching states into one keyset page. The listing order is
+/// `last_active` descending, `id` ascending; `next` points strictly past
+/// the last returned item when more matches exist.
+fn page_of<'a>(
+    states: impl Iterator<Item = &'a ConversationState>,
+    after: Option<ConversationCursor>,
+    limit: usize,
+) -> ConversationPage {
+    let mut items: Vec<ConversationSummary> = states
+        .map(|state| {
+            ConversationSummary::new(
+                state.id.clone(),
+                state.subject_id.clone(),
+                state.topic.clone(),
+                state.last_active,
+                state.ended,
+            )
+        })
+        .collect();
+    items.sort_by(|a, b| {
+        b.last_active
+            .cmp(&a.last_active)
+            .then_with(|| a.id.cmp(&b.id))
+    });
+    if limit == 0 {
+        return ConversationPage::new(Vec::new(), None);
+    }
+    let start = match after {
+        Some(cursor) => items
+            .iter()
+            .position(|item| is_after(item, &cursor))
+            .unwrap_or(items.len()),
+        None => 0,
+    };
+    let remaining = items.len() - start;
+    let take = remaining.min(limit);
+    let page_items: Vec<ConversationSummary> = items[start..start + take].to_vec();
+    let next = if remaining > take {
+        page_items
+            .last()
+            .map(|item| ConversationCursor::new(item.last_active, item.id.clone()))
+    } else {
+        None
+    };
+    ConversationPage::new(page_items, next)
+}
+
+/// Whether `item` sits strictly after the cursor in the listing order.
+fn is_after(item: &ConversationSummary, cursor: &ConversationCursor) -> bool {
+    item.last_active < cursor.last_active
+        || (item.last_active == cursor.last_active && item.id > cursor.id)
+}
+
+/// Metadata keyword match: case-insensitive substring over `id`,
+/// `subject_id`, or `topic` (an empty keyword matches everything).
+fn matches_keyword(state: &ConversationState, keyword: &str) -> bool {
+    let needle = keyword.to_lowercase();
+    let contains = |value: &str| value.to_lowercase().contains(&needle);
+    contains(&state.id)
+        || contains(&state.subject_id)
+        || state.topic.as_deref().is_some_and(contains)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::subject::SubjectType;
+
+    fn state(
+        subject: &Subject,
+        id: &str,
+        last_active: u64,
+        ended: bool,
+        topic: Option<&str>,
+    ) -> ConversationState {
+        ConversationState {
+            subject_id: subject.to_string(),
+            id: id.to_string(),
+            turns: Vec::new(),
+            topic: topic.map(str::to_string),
+            last_active,
+            ended,
+        }
+    }
+
+    #[test]
+    fn list_stale_filters_and_orders() {
+        let store = InProcessConversationStore::default();
+        let subject = Subject::of(SubjectType::User, "u-1");
+        store
+            .save(state(&subject, "old", 100, false, None))
+            .unwrap();
+        store
+            .save(state(&subject, "new", 300, false, None))
+            .unwrap();
+        store
+            .save(state(&subject, "ended", 50, true, None))
+            .unwrap();
+        store
+            .save(state(&subject, "unstamped", 0, false, None))
+            .unwrap();
+
+        let page = store.list_stale(200, None, 10).unwrap();
+        let ids: Vec<&str> = page.items.iter().map(|item| item.id.as_str()).collect();
+        assert_eq!(ids, vec!["old"], "only not-ended, stamped, <= before");
+        assert!(page.next.is_none());
+    }
+
+    #[test]
+    fn list_stale_paginates_by_cursor() {
+        let store = InProcessConversationStore::default();
+        let subject = Subject::of(SubjectType::User, "u-2");
+        for (id, last_active) in [("a", 400u64), ("b", 300), ("c", 200), ("d", 100)] {
+            store
+                .save(state(&subject, id, last_active, false, None))
+                .unwrap();
+        }
+
+        let first = store.list_stale(1000, None, 2).unwrap();
+        let ids: Vec<&str> = first.items.iter().map(|item| item.id.as_str()).collect();
+        assert_eq!(ids, vec!["a", "b"]);
+        let next = first.next.expect("a second page exists");
+        assert_eq!((next.last_active, next.id.as_str()), (300, "b"));
+
+        let second = store.list_stale(1000, Some(next), 2).unwrap();
+        let ids: Vec<&str> = second.items.iter().map(|item| item.id.as_str()).collect();
+        assert_eq!(ids, vec!["c", "d"]);
+        assert!(second.next.is_none());
+    }
+
+    #[test]
+    fn list_stale_ties_break_by_id_ascending() {
+        let store = InProcessConversationStore::default();
+        let subject = Subject::of(SubjectType::User, "u-3");
+        store.save(state(&subject, "b", 500, false, None)).unwrap();
+        store.save(state(&subject, "a", 500, false, None)).unwrap();
+
+        let page = store.list_stale(1000, None, 10).unwrap();
+        let ids: Vec<&str> = page.items.iter().map(|item| item.id.as_str()).collect();
+        assert_eq!(ids, vec!["a", "b"]);
+    }
+
+    #[test]
+    fn list_matches_metadata_keyword_case_insensitively() {
+        let store = InProcessConversationStore::default();
+        let subject = Subject::of(SubjectType::User, "Alice");
+        store
+            .save(state(&subject, "Alpha-1", 10, false, None))
+            .unwrap();
+        store
+            .save(state(&subject, "beta-2", 20, false, Some("Billing")))
+            .unwrap();
+
+        let by_id = store
+            .list(ConversationQuery::new(10).with_keyword("alpha"))
+            .unwrap();
+        assert_eq!(by_id.items.len(), 1);
+        assert_eq!(by_id.items[0].id, "Alpha-1");
+
+        let by_subject = store
+            .list(ConversationQuery::new(10).with_keyword("alice"))
+            .unwrap();
+        assert_eq!(by_subject.items.len(), 2);
+
+        let by_topic = store
+            .list(ConversationQuery::new(10).with_keyword("bill"))
+            .unwrap();
+        assert_eq!(by_topic.items.len(), 1);
+        assert_eq!(by_topic.items[0].id, "beta-2");
     }
 }
 

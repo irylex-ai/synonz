@@ -367,3 +367,24 @@ async fn of_restores_the_ended_state() {
     let restored = Conversation::of(&runtime, &subject, "ended-state").unwrap();
     assert!(restored.is_ended());
 }
+
+#[tokio::test]
+async fn list_conversations_searches_metadata() {
+    let runtime = SynonzRuntime::builder().build();
+    let subject = Subject::of(SubjectType::User, "lister");
+    let _alpha = Conversation::with_id(&runtime, &subject, "alpha-one");
+    let _beta = Conversation::with_id(&runtime, &subject, "beta-two");
+
+    let page = runtime
+        .list_conversations(synonz::ConversationQuery::new(10).with_keyword("alpha"))
+        .expect("list");
+    assert_eq!(page.items.len(), 1);
+    assert_eq!(page.items[0].id, "alpha-one");
+
+    let all = runtime
+        .list_conversations(synonz::ConversationQuery::new(10))
+        .expect("list");
+    let mut ids: Vec<&str> = all.items.iter().map(|item| item.id.as_str()).collect();
+    ids.sort_unstable();
+    assert_eq!(ids, vec!["alpha-one", "beta-two"]);
+}

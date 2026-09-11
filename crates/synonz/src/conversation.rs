@@ -62,6 +62,122 @@ pub struct ConversationState {
     pub ended: bool,
 }
 
+/// A conversation-list entry: identity and listing metadata without the
+/// recorded turns (full state loads through [`ConversationStore::load`] /
+/// [`Conversation::of`]).
+#[non_exhaustive]
+#[derive(Debug, Clone, PartialEq)]
+pub struct ConversationSummary {
+    /// The conversation id.
+    pub id: String,
+    /// The owning subject's full identity (`(type, id)`).
+    pub subject_id: String,
+    /// The session topic, when one has been established.
+    pub topic: Option<String>,
+    /// Epoch seconds of the last activity.
+    pub last_active: u64,
+    /// Whether the conversation has ended.
+    pub ended: bool,
+}
+
+impl ConversationSummary {
+    /// Creates a summary entry (store implementations build these when
+    /// answering list queries).
+    pub fn new(
+        id: impl Into<String>,
+        subject_id: impl Into<String>,
+        topic: Option<String>,
+        last_active: u64,
+        ended: bool,
+    ) -> Self {
+        Self {
+            id: id.into(),
+            subject_id: subject_id.into(),
+            topic,
+            last_active,
+            ended,
+        }
+    }
+}
+
+/// A keyset pagination position: the `(last_active, id)` of one item.
+///
+/// The listing order is **`last_active` descending, `id` ascending**; a
+/// cursor resumes strictly after that position.
+#[non_exhaustive]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConversationCursor {
+    /// The item's activity stamp.
+    pub last_active: u64,
+    /// The item's conversation id.
+    pub id: String,
+}
+
+impl ConversationCursor {
+    /// Creates a cursor at the given position.
+    pub fn new(last_active: u64, id: impl Into<String>) -> Self {
+        Self {
+            last_active,
+            id: id.into(),
+        }
+    }
+}
+
+/// One page of a conversation listing.
+#[non_exhaustive]
+#[derive(Debug, Clone, PartialEq)]
+pub struct ConversationPage {
+    /// The page's entries, in listing order (up to the requested limit).
+    pub items: Vec<ConversationSummary>,
+    /// The cursor to resume from when the store observed at least one
+    /// more matching conversation; `None` when the page is the last.
+    pub next: Option<ConversationCursor>,
+}
+
+impl ConversationPage {
+    /// Creates a page (store implementations build these when answering
+    /// list queries).
+    pub fn new(items: Vec<ConversationSummary>, next: Option<ConversationCursor>) -> Self {
+        Self { items, next }
+    }
+}
+
+/// The conversation listing query: metadata keyword + keyset pagination.
+#[non_exhaustive]
+#[derive(Debug, Clone, PartialEq)]
+pub struct ConversationQuery {
+    /// Metadata keyword: case-insensitive substring over `id`,
+    /// `subject_id`, or `topic`; `None` matches all.
+    pub keyword: Option<String>,
+    /// Resume strictly after this position; `None` starts from the top.
+    pub after: Option<ConversationCursor>,
+    /// The maximum number of entries to return.
+    pub limit: usize,
+}
+
+impl ConversationQuery {
+    /// Creates a query returning up to `limit` entries.
+    pub fn new(limit: usize) -> Self {
+        Self {
+            keyword: None,
+            after: None,
+            limit,
+        }
+    }
+
+    /// Filters by a metadata keyword (case-insensitive substring).
+    pub fn with_keyword(mut self, keyword: impl Into<String>) -> Self {
+        self.keyword = Some(keyword.into());
+        self
+    }
+
+    /// Resumes after a cursor (a previous page's `next`).
+    pub fn with_after(mut self, cursor: ConversationCursor) -> Self {
+        self.after = Some(cursor);
+        self
+    }
+}
+
 /// The conversation persistence contract, sibling of the
 /// [`Memory`] facade and its three store contracts. Implementations own
 /// storage; the
@@ -78,8 +194,22 @@ pub trait ConversationStore: Send + Sync + 'static {
     /// Saves (upserts) a conversation's state.
     fn save(&self, state: ConversationState) -> Result<(), ConversationStoreError>;
 
-    /// Lists all stored conversation states (idle-timeout sweeping).
-    fn list(&self) -> Result<Vec<ConversationState>, ConversationStoreError>;
+    /// Lists stale conversations for the idle sweep: not ended, with
+    /// `0 < last_active <= before`. Ordered by `(last_active descending,
+    /// id ascending)` and keyset-paginated from `after`. The filter is
+    /// pushed down — indexed implementations answer without loading
+    /// everything.
+    fn list_stale(
+        &self,
+        before: u64,
+        after: Option<ConversationCursor>,
+        limit: usize,
+    ) -> Result<ConversationPage, ConversationStoreError>;
+
+    /// Lists conversations matching the query's metadata keyword over
+    /// `id` / `subject_id` / `topic` (case-insensitive substring). Same
+    /// ordering and keyset pagination as [`ConversationStore::list_stale`].
+    fn list(&self, query: ConversationQuery) -> Result<ConversationPage, ConversationStoreError>;
 }
 
 /// How a turn ended. Every turn enters the history, marked with its

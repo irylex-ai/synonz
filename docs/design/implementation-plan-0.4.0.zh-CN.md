@@ -1,6 +1,6 @@
 # Synonz 0.4.0 实现计划
 
-- 状态: IMPLEMENTING（2026-09-11，计划 APPROVED；M21 完成）
+- 状态: IMPLEMENTING（2026-09-11，计划 APPROVED；M21-M22 完成）
 - 日期: 2026-09-11
 - 依据: ADR-0018（APPROVED——系统调度与生命周期完备）、架构设计
   文档 v5（APPROVED）、ADR-0011/0017 修订注记
@@ -195,3 +195,20 @@ shutdown 停止调度器并消费会话表（M25）；收尾扫全局。
 - **测试**：单元测试 2 项（挂死任务 → 有界收尾 + 超时事实可见；
   panic 任务 → 事实可见）；全量回归 141/141 全绿、clippy 零警告、
   fmt 干净。
+
+### M22 存储查询面 ✅（2026-09-11）
+
+- **查询类型（新公开）**：`ConversationSummary` / `ConversationCursor`
+  / `ConversationPage` / `ConversationQuery`（`#[non_exhaustive]` +
+  公开构造器；全序 `(last_active 降序, id 升序)`）；
+- **ConversationStore 契约**：`list()` 全量形态退役 → 新增
+  `list_stale(before, after, limit)`（清扫下推：非 ended 且
+  `0 < last_active <= before`）+ `list(query)`（元数据关键字：id /
+  subject_id / topic 大小写不敏感子串；游标分页）；
+- **应用面出口（B 类决议）**：`runtime.list_conversations(query)`
+  （Low Level track——查询面可达性出口；`save`/`load` 仍不公开）；
+- **sweep 改造**：分页循环（`SWEEP_PAGE_SIZE = 128`），游标越过失败
+  条目（下一 tick 重试），去除「全量拉回 + `of` 二次加载」；
+- **测试**：单元测试 5 项（过滤排序/游标分页/并列 id/关键字三字段）
+  + 跨页 sweep（130 会话）+ 外部查询面测试；全量回归 147/147 全绿、
+  clippy 零警告、fmt 干净。

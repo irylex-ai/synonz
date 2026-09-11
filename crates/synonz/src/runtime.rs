@@ -15,7 +15,9 @@ use std::time::Duration;
 use crate::bus::{
     ConversationEndReason, EventBus, MemoryEvent, MemoryFlowFailedMoment, SynonzEvent,
 };
-use crate::conversation::{Conversation, ConversationStore};
+use crate::conversation::{
+    Conversation, ConversationPage, ConversationQuery, ConversationStore, ConversationStoreError,
+};
 use crate::event::MemoryFlowStage;
 use crate::inprocess::{
     InProcessConversationStore, InProcessMemoryL1Store, InProcessMemoryL2Store,
@@ -108,6 +110,10 @@ impl RuntimeBuilder {
 /// The per-conversation drain budget: how long conversation-end teardown
 /// waits for background maintenance tasks before proceeding without them.
 const MAINTENANCE_DRAIN_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// How many stale conversations one sweep page holds (fixed by design:
+/// the sweep pages through the store instead of loading everything).
+const SWEEP_PAGE_SIZE: usize = 128;
 
 /// The process-level environment handle.
 ///
@@ -287,12 +293,25 @@ impl SynonzRuntime {
         }
     }
 
+    /// Lists conversations matching a metadata keyword with keyset
+    /// pagination — the Low Level track (session management, diagnostics).
+    ///
+    /// Ordering is `last_active` descending, `id` ascending; pass a
+    /// previous page's `next` back through [`ConversationQuery::with_after`]
+    /// to continue.
+    pub fn list_conversations(
+        &self,
+        query: ConversationQuery,
+    ) -> Result<ConversationPage, ConversationStoreError> {
+        self.conversation_store.list(query)
+    }
+
     /// Sweeps conversations with no activity past the idle timeout,
     /// running their ConversationEnd flows. Returns how many were ended.
     ///
-    /// The idle-timeout fallback: applications schedule this (or an
-    /// equivalent periodic task); the explicit [`Conversation::end`]
-    /// remains the primary trigger with the initiating side in control.
+    /// Pages through the store's stale query: the cursor advances past
+    /// failed entries (retried on the next sweep), so one bad conversation
+    /// never blocks the rest.
     pub async fn sweep_stale(&self) -> usize {
         let Some(timeout) = self.conversation_idle_timeout else {
             return 0;
@@ -303,32 +322,29 @@ impl SynonzRuntime {
             .unwrap_or(0);
         let threshold = now.saturating_sub(timeout.as_secs().max(1));
 
-        let stale = match self.conversation_store.list() {
-            Ok(states) => states
-                .into_iter()
-                // Ended conversations are structurally skipped (the
-                // ended state is persisted).
-                .filter(|state| {
-                    !state.ended && state.last_active <= threshold && state.last_active > 0
-                })
-                .collect::<Vec<_>>(),
-            Err(_) => return 0,
-        };
-
+        let mut cursor = None;
         let mut ended = 0;
-        for state in stale {
-            // Rebuild the subject from the stored full identity (encode and
-            // decode are symmetric — the reconstruction previously wrapped
-            // the display string a second time, silently skipping every
-            // conversation).
-            let Some(subject) = crate::Subject::parse(&state.subject_id) else {
-                continue;
-            };
-            if let Ok(conversation) = Conversation::of(self, &subject, &state.id) {
-                conversation
-                    .end_with(self, ConversationEndReason::IdleSwept)
-                    .await;
-                ended += 1;
+        while let Ok(page) = self
+            .conversation_store
+            .list_stale(threshold, cursor, SWEEP_PAGE_SIZE)
+        {
+            if page.items.is_empty() {
+                break;
+            }
+            for summary in &page.items {
+                let Some(subject) = crate::Subject::parse(&summary.subject_id) else {
+                    continue;
+                };
+                if let Ok(conversation) = Conversation::of(self, &subject, &summary.id) {
+                    conversation
+                        .end_with(self, ConversationEndReason::IdleSwept)
+                        .await;
+                    ended += 1;
+                }
+            }
+            match page.next {
+                Some(next) => cursor = Some(next),
+                None => break,
             }
         }
         ended
@@ -417,5 +433,31 @@ mod tests {
                 .any(|fact| fact.contains("maintenance task failed")),
             "the task panic must be visible: {facts:?}"
         );
+    }
+
+    #[tokio::test]
+    async fn sweep_pages_through_many_stale_conversations() {
+        let runtime = SynonzRuntime::builder()
+            .conversation_idle_timeout(Duration::from_millis(1))
+            .build();
+        let subject = Subject::of(SubjectType::User, "u-sweep");
+        let stale_stamp = now_epoch().saturating_sub(3600);
+        let total = 130usize;
+        for index in 0..total {
+            runtime
+                .conversation_store
+                .save(crate::conversation::ConversationState {
+                    subject_id: subject.to_string(),
+                    id: format!("sweep-{index:03}"),
+                    turns: Vec::new(),
+                    topic: None,
+                    last_active: stale_stamp,
+                    ended: false,
+                })
+                .unwrap();
+        }
+
+        let ended = runtime.sweep_stale().await;
+        assert_eq!(ended, total, "the sweep must page past one page size");
     }
 }
