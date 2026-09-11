@@ -1,6 +1,6 @@
 # Synonz 0.4.0 实现计划
 
-- 状态: IMPLEMENTING（2026-09-11，计划 APPROVED；M21-M24 完成）
+- 状态: IMPLEMENTING（2026-09-11，计划 APPROVED；M21-M25 完成）
 - 日期: 2026-09-11
 - 依据: ADR-0018（APPROVED——系统调度与生命周期完备）、架构设计
   文档 v5（APPROVED）、ADR-0011/0017 修订注记
@@ -255,3 +255,21 @@ shutdown 停止调度器并消费会话表（M25）；收尾扫全局。
 - **测试**：新增单元测试 6 项（自动清扫/孤儿对账/快照×2/缺失环境
   panic/显式注入）+ 外部测试迁移；全量回归 160/160 全绿、clippy
   零警告、fmt 干净。
+
+### M25 统一会话表与 shutdown ✅（2026-09-11）
+
+- **会话表升级**：维护表 → 会话表（条目 = {会话句柄 + 后台任务}）；
+  `new`/`with_id` 登记、`of`（非 ended）登记，任何 end 路径经
+  finalize 移除并 drain；`TaskRegistry` 对接（无条目时任务不追踪，
+  文档写明）；
+- **shutdown**：`runtime.shutdown().await` —— 停系统调度器（幂等；
+  在途执行不等待）→ 快照会话表 → 逐会话 `end_with(Shutdown)` →
+  观测 flush → 返回；幂等（内部异步锁 + 完成标志，并发调用等待）；
+  只收本 runtime 拥有的会话；在途 turn 不等待；
+- **观测 flush**：内部 `EventBus::flush()`（队列 Barrier + oneshot
+  确认；溢出丢弃不复活）；
+- **词表**：`ConversationEndReason` 增 `Shutdown` 变体；
+- **测试**：新增单元测试 4 项（收尾与事件/flush/幂等/归属范围）+
+  外部公开面测试；两轮全量回归 165/165 全绿、clippy 零警告、fmt
+  干净（顺带修复 scheduler 快照测试的瞬时状态断言——改为确定性
+  轮询）。

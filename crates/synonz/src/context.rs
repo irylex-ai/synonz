@@ -619,21 +619,17 @@ impl MaintenanceJobs {
 /// The maintenance-task registry handle: how an engine spawns background
 /// work the runtime schedules (and drains at conversation end).
 ///
-/// Clones are scoped to the same conversation; spawned tasks are
-/// registered under that conversation in the runtime's session
-/// maintenance table.
+/// Clones are scoped to the same conversation; spawned tasks attach to
+/// the conversation's entry in the runtime's session table.
 #[derive(Clone)]
 pub struct TaskRegistry {
-    table:
-        Arc<std::sync::Mutex<std::collections::HashMap<String, Vec<tokio::task::JoinHandle<()>>>>>,
+    table: crate::runtime::SessionTable,
     conversation_id: String,
 }
 
 impl TaskRegistry {
     pub(crate) fn new(
-        table: Arc<
-            std::sync::Mutex<std::collections::HashMap<String, Vec<tokio::task::JoinHandle<()>>>>,
-        >,
+        table: crate::runtime::SessionTable,
         conversation_id: impl Into<String>,
     ) -> Self {
         Self {
@@ -644,16 +640,18 @@ impl TaskRegistry {
 
     /// Spawns a background maintenance task and registers it under this
     /// handle's conversation (the conversation-end teardown drains them).
+    ///
+    /// A conversation the runtime does not own has no session entry; the
+    /// task then runs untracked.
     pub fn spawn(&self, task: impl Future<Output = ()> + Send + 'static) {
         let handle = tokio::spawn(task);
         let mut table = self
             .table
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        table
-            .entry(self.conversation_id.clone())
-            .or_default()
-            .push(handle);
+        if let Some(entry) = table.get_mut(&self.conversation_id) {
+            entry.tasks.push(handle);
+        }
     }
 }
 

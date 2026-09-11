@@ -16,6 +16,7 @@
 //! registration; a read-only snapshot is exposed instead.
 
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use tokio::runtime::Handle;
@@ -163,16 +164,31 @@ impl RuntimeBuilder {
                     .unwrap_or_else(|| Arc::new(InProcessMemoryL3Store::default())),
             ),
             event_bus: EventBus::new(self.observers),
-            maintenance: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+            sessions: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
             conversation_idle_timeout: self.conversation_idle_timeout,
             maintenance_drain_timeout: MAINTENANCE_DRAIN_TIMEOUT,
             scheduler: executor.map(Scheduler::new),
+            shutdown_lock: tokio::sync::Mutex::new(()),
+            shutdown_done: AtomicBool::new(false),
         });
         let runtime = SynonzRuntime { inner };
         runtime.start_monitor();
         runtime
     }
 }
+
+/// One owned conversation in the session table: the handle plus its
+/// spawned background maintenance tasks (drained at conversation end).
+pub(crate) struct SessionEntry {
+    pub(crate) conversation: Conversation,
+    pub(crate) tasks: Vec<tokio::task::JoinHandle<()>>,
+}
+
+/// The session table: conversation id → owned conversation — the
+/// runtime's ownership registry (shutdown's teardown list) and the
+/// background-task bookkeeping in one structure.
+pub(crate) type SessionTable =
+    Arc<std::sync::Mutex<std::collections::HashMap<String, SessionEntry>>>;
 
 /// The runtime's shared state (one `Arc` per runtime; clones are cheap).
 struct RuntimeInner {
@@ -181,12 +197,9 @@ struct RuntimeInner {
     /// storage slots at build time; the runtime is its single authority).
     memory: Memory,
     event_bus: EventBus,
-    /// The session maintenance table: conversation id → the background
-    /// maintenance tasks the agents' engines spawned there (the system
-    /// schedules what applications produce; conversation-end teardown
-    /// drains them).
-    maintenance:
-        Arc<std::sync::Mutex<std::collections::HashMap<String, Vec<tokio::task::JoinHandle<()>>>>>,
+    /// The session table: owned conversations and their background
+    /// maintenance tasks (the Monitor and shutdown both consume it).
+    sessions: SessionTable,
     conversation_idle_timeout: Option<Duration>,
     /// The per-conversation budget for draining background maintenance
     /// tasks at conversation end (bounded teardown).
@@ -194,6 +207,10 @@ struct RuntimeInner {
     /// The system scheduler (created when an execution environment is
     /// available; its first task is the Monitor).
     scheduler: Option<Scheduler>,
+    /// Serializes shutdown calls (idempotency).
+    shutdown_lock: tokio::sync::Mutex<()>,
+    /// Whether shutdown completed.
+    shutdown_done: AtomicBool,
 }
 
 /// The process-level environment handle.
@@ -262,7 +279,63 @@ impl SynonzRuntime {
 
     /// A maintenance-task registry handle scoped to one conversation.
     pub(crate) fn task_registry(&self, conversation_id: &str) -> crate::context::TaskRegistry {
-        crate::context::TaskRegistry::new(Arc::clone(&self.inner.maintenance), conversation_id)
+        crate::context::TaskRegistry::new(Arc::clone(&self.inner.sessions), conversation_id)
+    }
+
+    /// Registers an owned conversation in the session table (entry =
+    /// conversation handle + its background tasks).
+    pub(crate) fn register_session(&self, conversation: &Conversation) {
+        let mut sessions = self
+            .inner
+            .sessions
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        sessions
+            .entry(conversation.id().to_string())
+            .or_insert_with(|| SessionEntry {
+                conversation: conversation.clone(),
+                tasks: Vec::new(),
+            });
+    }
+
+    /// Stops the system scheduler, ends every conversation this runtime
+    /// owns (`ConversationEndReason::Shutdown`), and flushes the
+    /// observation queue — the explicit end-of-life teardown.
+    ///
+    /// Idempotent: the first call performs the teardown; concurrent and
+    /// later calls wait for its completion. In-flight turns are not
+    /// awaited (quiesce before calling); conversations left open by a
+    /// hard kill are reconciled by the next runtime's Monitor.
+    pub async fn shutdown(&self) {
+        let _guard = self.inner.shutdown_lock.lock().await;
+        if self.inner.shutdown_done.load(Ordering::Acquire) {
+            return;
+        }
+        // 1. Stop the system scheduler: no new sweeps compete with the
+        //    teardown (in-flight executions are not awaited).
+        if let Some(scheduler) = &self.inner.scheduler {
+            scheduler.stop();
+        }
+        // 2. End every owned conversation (end_with is idempotent).
+        let conversations: Vec<Conversation> = {
+            let sessions = self
+                .inner
+                .sessions
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            sessions
+                .values()
+                .map(|entry| entry.conversation.clone())
+                .collect()
+        };
+        for conversation in conversations {
+            conversation
+                .end_with(self, ConversationEndReason::Shutdown)
+                .await;
+        }
+        // 3. Flush: the facts emitted above have reached their observers.
+        self.inner.event_bus.flush().await;
+        self.inner.shutdown_done.store(true, Ordering::Release);
     }
 
     /// Test-only override for the drain budget (kept off the public
@@ -297,13 +370,14 @@ impl SynonzRuntime {
         //    drain is bounded per conversation: a stuck task delays
         //    teardown by at most the configured budget; stuck tasks and
         //    panicked tasks surface as FlowFailed facts.
-        let handles = self
+        let entry = self
             .inner
-            .maintenance
+            .sessions
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .remove(conversation.id());
-        if let Some(handles) = handles {
+        if let Some(entry) = entry {
+            let handles = entry.tasks;
             let deadline = tokio::time::Instant::now() + self.inner.maintenance_drain_timeout;
             let total = handles.len();
             let mut timed_out = 0usize;
@@ -702,5 +776,97 @@ mod tests {
             .build();
         assert_eq!(runtime.scheduler_snapshot().len(), 1);
         drop(runtime);
+    }
+
+    #[tokio::test]
+    async fn shutdown_ends_owned_open_conversations() {
+        let recorder = EndRecorder::default();
+        let runtime = SynonzRuntime::builder().observer(recorder.clone()).build();
+        let subject = Subject::of(SubjectType::User, "u-shutdown");
+        let open = Conversation::with_id(&runtime, &subject, "shutdown-open");
+        let ended = Conversation::with_id(&runtime, &subject, "shutdown-ended");
+        ended.end(&runtime).await;
+
+        runtime.shutdown().await;
+
+        assert!(open.is_ended());
+        assert!(
+            Conversation::of(&runtime, &subject, "shutdown-open")
+                .unwrap()
+                .is_ended()
+        );
+        let ends = recorder.ends.lock().unwrap();
+        assert!(
+            ends.iter().any(|end| end == "shutdown-open:Shutdown"),
+            "the shutdown end reason must be visible: {ends:?}"
+        );
+        assert_eq!(
+            ends.iter()
+                .filter(|end| end.starts_with("shutdown-ended:"))
+                .count(),
+            1,
+            "an explicitly ended conversation is not ended again: {ends:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn shutdown_is_idempotent() {
+        let recorder = EndRecorder::default();
+        let runtime = SynonzRuntime::builder().observer(recorder.clone()).build();
+        let subject = Subject::of(SubjectType::User, "u-idem");
+        let _conversation = Conversation::with_id(&runtime, &subject, "idem-1");
+
+        runtime.shutdown().await;
+        runtime.shutdown().await;
+
+        let ends = recorder.ends.lock().unwrap();
+        assert_eq!(
+            ends.iter().filter(|end| end.starts_with("idem-1:")).count(),
+            1,
+            "shutdown ends each owned conversation exactly once: {ends:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn shutdown_only_ends_conversations_the_runtime_owns() {
+        let store = crate::inprocess::InProcessConversationStore::default();
+        let subject = Subject::of(SubjectType::User, "u-owner");
+        store
+            .save(crate::conversation::ConversationState {
+                subject_id: subject.to_string(),
+                id: "not-owned".to_string(),
+                turns: Vec::new(),
+                topic: None,
+                last_active: now_epoch(),
+                ended: false,
+            })
+            .unwrap();
+        let runtime = SynonzRuntime::builder().conversation_store(store).build();
+
+        runtime.shutdown().await;
+
+        assert!(
+            !Conversation::of(&runtime, &subject, "not-owned")
+                .unwrap()
+                .is_ended(),
+            "an unowned stored conversation is not touched"
+        );
+    }
+
+    #[tokio::test]
+    async fn shutdown_flushes_observation_before_returning() {
+        let recorder = EndRecorder::default();
+        let runtime = SynonzRuntime::builder().observer(recorder.clone()).build();
+        let subject = Subject::of(SubjectType::User, "u-flush");
+        let _conversation = Conversation::with_id(&runtime, &subject, "flush-1");
+
+        runtime.shutdown().await;
+
+        // No sleep: the flush guarantees delivery before return.
+        let ends = recorder.ends.lock().unwrap();
+        assert!(
+            ends.iter().any(|end| end == "flush-1:Shutdown"),
+            "shutdown must flush observation: {ends:?}"
+        );
     }
 }

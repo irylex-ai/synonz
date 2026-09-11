@@ -611,16 +611,31 @@ mod tests {
         let handle = scheduler.schedule(
             Schedule::every(Duration::from_secs(60)),
             OverlapPolicy::Queue,
-            || async {},
+            || async { tokio::time::sleep(Duration::from_millis(200)).await },
         );
         let named = scheduler.schedule_named(
             "system-heartbeat",
             Schedule::every(Duration::from_secs(30)),
             OverlapPolicy::Skip,
-            || async {},
+            || async { tokio::time::sleep(Duration::from_millis(200)).await },
         );
+
+        // The immediate first runs start soon after registration (poll:
+        // the exact start time is not asserted).
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        loop {
+            let infos = scheduler.tasks();
+            if infos.len() == 2 && infos.iter().all(|info| info.running) {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the immediate runs must start"
+            );
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+
         let infos = scheduler.tasks();
-        assert_eq!(infos.len(), 2);
         let info = infos
             .iter()
             .find(|info| info.id == handle.id())
@@ -628,7 +643,7 @@ mod tests {
         assert_eq!(info.policy, OverlapPolicy::Queue);
         assert_eq!(info.schedule.period(), Duration::from_secs(60));
         assert!(info.name.is_none());
-        assert!(!info.running);
+        assert!(info.running);
         let named_info = infos
             .iter()
             .find(|info| info.id == named.id())

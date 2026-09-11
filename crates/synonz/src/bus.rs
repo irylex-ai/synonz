@@ -30,7 +30,7 @@ use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, oneshot};
 
 use crate::event::{MemoryFlowStage, TurnEvent};
 
@@ -56,6 +56,8 @@ pub enum ConversationEndReason {
     Explicit,
     /// The idle-timeout fallback swept the conversation.
     IdleSwept,
+    /// The runtime's shutdown (process teardown) ended the conversation.
+    Shutdown,
 }
 
 /// The moment a memory-flow failure happened.
@@ -220,10 +222,14 @@ pub trait Observer: Send + Sync + 'static {
 
 // ── The bus ──
 
-/// One queued notification: the event plus its execution attribution.
-struct BusItem {
-    execution_id: Option<u64>,
-    event: SynonzEvent,
+/// One queued bus item: an event with its execution attribution, or the
+/// internal flush barrier.
+enum BusItem {
+    Event {
+        execution_id: Option<u64>,
+        event: SynonzEvent,
+    },
+    Barrier(oneshot::Sender<()>),
 }
 
 struct BusCore {
@@ -277,13 +283,26 @@ impl EventBus {
 
     fn emit_inner(&self, execution_id: Option<u64>, event: SynonzEvent) {
         self.ensure_dispatcher();
-        let item = BusItem {
+        let item = BusItem::Event {
             execution_id,
             event,
         };
         if self.core.sender.try_send(item).is_err() {
             self.core.dropped.fetch_add(1, Ordering::Relaxed);
         }
+    }
+
+    /// Waits until everything emitted so far has been delivered to the
+    /// observers — the internal shutdown barrier (not part of the public
+    /// surface). Overflow-dropped events stay dropped; the barrier only
+    /// orders what is still queued.
+    pub(crate) async fn flush(&self) {
+        self.ensure_dispatcher();
+        let (ack, waited) = oneshot::channel();
+        if self.core.sender.send(BusItem::Barrier(ack)).await.is_err() {
+            return; // the dispatcher is gone; nothing to wait for
+        }
+        let _ = waited.await;
     }
 
     /// Spawns the resident dispatcher once an async context is available.
@@ -335,31 +354,41 @@ fn spawn_dispatcher(
         // this loop exits only after delivering everything, terminal
         // included.
         while let Some(item) = receiver.recv().await {
-            let ctx = ObserverContext::new(item.execution_id);
-            for (index, observer) in observers.iter().enumerate() {
-                if disabled[index] {
-                    continue;
-                }
-                let delivery =
-                    std::panic::AssertUnwindSafe(|| observer.on_event(&ctx, &item.event));
-                if std::panic::catch_unwind(delivery).is_err() {
-                    disabled[index] = true;
-                }
-            }
-            let total_dropped = dropped.load(Ordering::Relaxed);
-            if total_dropped > reported_lag {
-                for (index, observer) in observers.iter().enumerate() {
-                    if disabled[index] {
-                        continue;
+            match item {
+                BusItem::Event {
+                    execution_id,
+                    event,
+                } => {
+                    let ctx = ObserverContext::new(execution_id);
+                    for (index, observer) in observers.iter().enumerate() {
+                        if disabled[index] {
+                            continue;
+                        }
+                        let delivery =
+                            std::panic::AssertUnwindSafe(|| observer.on_event(&ctx, &event));
+                        if std::panic::catch_unwind(delivery).is_err() {
+                            disabled[index] = true;
+                        }
                     }
-                    let report = std::panic::AssertUnwindSafe(|| {
-                        observer.on_lagged(&ctx, total_dropped);
-                    });
-                    if std::panic::catch_unwind(report).is_err() {
-                        disabled[index] = true;
+                    let total_dropped = dropped.load(Ordering::Relaxed);
+                    if total_dropped > reported_lag {
+                        for (index, observer) in observers.iter().enumerate() {
+                            if disabled[index] {
+                                continue;
+                            }
+                            let report = std::panic::AssertUnwindSafe(|| {
+                                observer.on_lagged(&ctx, total_dropped);
+                            });
+                            if std::panic::catch_unwind(report).is_err() {
+                                disabled[index] = true;
+                            }
+                        }
+                        reported_lag = total_dropped;
                     }
                 }
-                reported_lag = total_dropped;
+                BusItem::Barrier(ack) => {
+                    let _ = ack.send(());
+                }
             }
         }
     });

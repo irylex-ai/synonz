@@ -395,3 +395,17 @@ async fn list_conversations_searches_metadata() {
     ids.sort_unstable();
     assert_eq!(ids, vec!["alpha-one", "beta-two"]);
 }
+
+#[tokio::test]
+async fn shutdown_ends_open_conversations() {
+    let runtime = SynonzRuntime::builder().build();
+    let subject = Subject::of(SubjectType::User, "lifecycle");
+    let conv = Conversation::with_id(&runtime, &subject, "shutdown-me");
+    runtime.shutdown().await;
+    assert!(conv.is_ended());
+    assert!(
+        Conversation::of(&runtime, &subject, "shutdown-me")
+            .unwrap()
+            .is_ended()
+    );
+}

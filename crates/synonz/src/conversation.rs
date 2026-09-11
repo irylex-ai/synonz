@@ -349,6 +349,7 @@ impl Conversation {
             ended: Arc::new(Mutex::new(false)),
         };
         conversation.enter_lifecycle(runtime);
+        runtime.register_session(&conversation);
         conversation
     }
 
@@ -364,13 +365,17 @@ impl Conversation {
         id: &str,
     ) -> Result<Self, ConversationStoreError> {
         let state = runtime.conversation_store().load(subject, id)?;
-        Ok(Self {
+        let conversation = Self {
             id: state.id,
             subject: subject.clone(),
             turns: Arc::new(Mutex::new(state.turns)),
             topic: Arc::new(Mutex::new(state.topic)),
             ended: Arc::new(Mutex::new(state.ended)),
-        })
+        };
+        if !conversation.is_ended() {
+            runtime.register_session(&conversation);
+        }
+        Ok(conversation)
     }
 
     /// The lifecycle entry: persist the initial state, notify the bus.
