@@ -100,9 +100,14 @@ impl RuntimeBuilder {
             event_bus: EventBus::new(self.observers),
             maintenance: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
             conversation_idle_timeout: self.conversation_idle_timeout,
+            maintenance_drain_timeout: MAINTENANCE_DRAIN_TIMEOUT,
         }
     }
 }
+
+/// The per-conversation drain budget: how long conversation-end teardown
+/// waits for background maintenance tasks before proceeding without them.
+const MAINTENANCE_DRAIN_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// The process-level environment handle.
 ///
@@ -125,6 +130,9 @@ pub struct SynonzRuntime {
     maintenance:
         Arc<std::sync::Mutex<std::collections::HashMap<String, Vec<tokio::task::JoinHandle<()>>>>>,
     conversation_idle_timeout: Option<Duration>,
+    /// The per-conversation budget for draining background maintenance
+    /// tasks at conversation end (bounded teardown).
+    maintenance_drain_timeout: Duration,
 }
 
 impl SynonzRuntime {
@@ -158,6 +166,13 @@ impl SynonzRuntime {
         crate::context::TaskRegistry::new(Arc::clone(&self.maintenance), conversation_id)
     }
 
+    /// Test-only override for the drain budget (kept off the public
+    /// configuration surface by design).
+    #[cfg(test)]
+    pub(crate) fn set_maintenance_drain_timeout(&mut self, timeout: Duration) {
+        self.maintenance_drain_timeout = timeout;
+    }
+
     /// The conversation-end teardown (the system's structural behavior):
     /// drains the conversation's background maintenance tasks, then
     /// mechanically promotes all L2 blocks into L3 (no model call, no
@@ -165,15 +180,47 @@ impl SynonzRuntime {
     /// AtConversationEnd }` memory facts; success surfaces as `Promoted`.
     pub(crate) async fn finalize_conversation(&self, conversation: &Conversation) {
         // 1. Drain: the conversation's in-flight maintenance completes
-        //    before the promotion reads L2 — no unfinished blocks.
+        //    before the promotion reads L2 — no unfinished blocks. The
+        //    drain is bounded per conversation: a stuck task delays
+        //    teardown by at most the configured budget; stuck tasks and
+        //    panicked tasks surface as FlowFailed facts.
         let handles = self
             .maintenance
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .remove(conversation.id());
         if let Some(handles) = handles {
+            let deadline = tokio::time::Instant::now() + self.maintenance_drain_timeout;
+            let total = handles.len();
+            let mut timed_out = 0usize;
             for handle in handles {
-                let _ = handle.await; // job failures already surfaced via the bus
+                let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+                if remaining.is_zero() {
+                    timed_out += 1;
+                    continue;
+                }
+                match tokio::time::timeout(remaining, handle).await {
+                    Ok(Ok(())) => {}
+                    Ok(Err(join_error)) => {
+                        self.event_bus
+                            .emit(SynonzEvent::Memory(MemoryEvent::FlowFailed {
+                                stage: MemoryFlowStage::Drain,
+                                detail: format!("maintenance task failed: {join_error}"),
+                                moment: MemoryFlowFailedMoment::AtConversationEnd,
+                            }));
+                    }
+                    Err(_) => timed_out += 1,
+                }
+            }
+            if timed_out > 0 {
+                self.event_bus
+                    .emit(SynonzEvent::Memory(MemoryEvent::FlowFailed {
+                        stage: MemoryFlowStage::Drain,
+                        detail: format!(
+                            "drain timed out: {timed_out} of {total} maintenance task(s) still running"
+                        ),
+                        moment: MemoryFlowFailedMoment::AtConversationEnd,
+                    }));
             }
         }
 
@@ -293,4 +340,82 @@ fn now_epoch() -> u64 {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::bus::{Observer, ObserverContext};
+    use crate::conversation::Conversation;
+    use crate::subject::{Subject, SubjectType};
+    use std::sync::{Arc, Mutex};
+
+    /// Records memory-flow failure facts for assertions.
+    #[derive(Default, Clone)]
+    struct FactRecorder {
+        facts: Arc<Mutex<Vec<String>>>,
+    }
+
+    impl Observer for FactRecorder {
+        fn on_event(&self, _ctx: &ObserverContext, event: &SynonzEvent) {
+            if let SynonzEvent::Memory(MemoryEvent::FlowFailed { detail, .. }) = event {
+                self.facts.lock().unwrap().push(detail.clone());
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn finalize_drain_is_bounded_and_visible() {
+        let recorder = FactRecorder::default();
+        let mut runtime = SynonzRuntime::builder().observer(recorder.clone()).build();
+        runtime.set_maintenance_drain_timeout(Duration::from_millis(50));
+        let subject = Subject::of(SubjectType::User, "u-drain");
+        let conversation = Conversation::with_id(&runtime, &subject, "drain-bounded");
+
+        runtime
+            .task_registry(conversation.id())
+            .spawn(std::future::pending::<()>());
+
+        let started = std::time::Instant::now();
+        conversation.end(&runtime).await;
+        assert!(conversation.is_ended());
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "the drain must be bounded (took {:?})",
+            started.elapsed()
+        );
+
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        let facts = recorder.facts.lock().unwrap();
+        assert!(
+            facts.iter().any(|fact| fact.contains("drain timed out")),
+            "the timeout must be visible: {facts:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn finalize_drain_surfaces_task_panics() {
+        let recorder = FactRecorder::default();
+        let runtime = SynonzRuntime::builder().observer(recorder.clone()).build();
+        let subject = Subject::of(SubjectType::User, "u-panic");
+        let conversation = Conversation::with_id(&runtime, &subject, "drain-panic");
+
+        runtime
+            .task_registry(conversation.id())
+            .spawn(async { panic!("maintenance boom") });
+        // Let the task panic before teardown awaits it.
+        tokio::time::sleep(Duration::from_millis(20)).await;
+
+        conversation.end(&runtime).await;
+        assert!(conversation.is_ended());
+
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        let facts = recorder.facts.lock().unwrap();
+        assert!(
+            facts
+                .iter()
+                .any(|fact| fact.contains("maintenance task failed")),
+            "the task panic must be visible: {facts:?}"
+        );
+    }
 }

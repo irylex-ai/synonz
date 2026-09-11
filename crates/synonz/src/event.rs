@@ -237,6 +237,9 @@ pub enum MemoryFlowStage {
     Summarize,
     /// Distilling L2 overflow into L3.
     Distill,
+    /// Waiting for background maintenance tasks during conversation-end
+    /// teardown (the bounded drain).
+    Drain,
 }
 
 /// The product-narrative event of the execution face.

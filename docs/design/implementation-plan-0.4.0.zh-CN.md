@@ -1,6 +1,6 @@
 # Synonz 0.4.0 实现计划
 
-- 状态: APPROVED（2026-09-11，irylex 人工评审通过）
+- 状态: IMPLEMENTING（2026-09-11，计划 APPROVED；M21 完成）
 - 日期: 2026-09-11
 - 依据: ADR-0018（APPROVED——系统调度与生命周期完备）、架构设计
   文档 v5（APPROVED）、ADR-0011/0017 修订注记
@@ -179,3 +179,19 @@ shutdown 停止调度器并消费会话表（M25）；收尾扫全局。
 |---|---|
 | 发布节奏 | M26 发布执行等 irylex 单独确认 |
 | 后台专用模型 | 0.4.0 后优先，不在本计划 |
+
+---
+
+## 6. 里程碑完成记录
+
+### M21 前提工程 ✅（2026-09-11）
+
+- **drain 有界化**：`finalize_conversation` 的后台任务等待改为每会话
+  总预算（固定 60s；测试经 `#[cfg(test)]` 内部覆盖，不开公开配置
+  面）；超时后放弃等待（不取消任务），失败经
+  `FlowFailed { stage: Drain, moment: AtConversationEnd }` 可见；
+- **panic 可见化**：JoinError 不再吞没，经同一 `FlowFailed` 事实可见；
+- **词表**：`MemoryFlowStage` 增 `Drain` 变体（non_exhaustive，附加性）；
+- **测试**：单元测试 2 项（挂死任务 → 有界收尾 + 超时事实可见；
+  panic 任务 → 事实可见）；全量回归 141/141 全绿、clippy 零警告、
+  fmt 干净。
