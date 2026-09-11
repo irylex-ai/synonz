@@ -4,6 +4,72 @@ All notable changes to Synonz are documented in this file. The format
 follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 versions follow [Semantic Versioning](https://semver.org/).
 
+## [0.4.0] - 2026-09-11
+
+The scheduling-and-lifecycle release: the time-driven Scheduler
+component, the automatic conversation lifecycle (Monitor), explicit
+shutdown, and the conversation query surface. **Breaking** — migrate
+with the table below.
+
+### Highlights
+
+- **Scheduler component**: the public `Scheduler` — periodic tasks with
+  an immediate first fire, three overlap policies (`Skip` /
+  `Concurrent` / `Queue`, the coalescing catch-up), a read-only
+  `tasks()` snapshot, and per-task cancellation. One lightweight timing
+  thread per scheduler; executions run on the host executor (the worker
+  pool), never on the timing thread.
+- **Automatic lifecycle (Monitor)**: configuring
+  `conversation_idle_timeout` registers the Monitor at build; the
+  runtime automatically ends idle conversations (`IdleSwept`) and
+  reconciles conversations left open by a previous process (the
+  immediate first sweep — crash recovery).
+- **Explicit shutdown**: `runtime.shutdown().await` stops the system
+  scheduler, ends every conversation the runtime owns
+  (`ConversationEndReason::Shutdown`), and flushes the observation queue
+  before returning. Idempotent.
+- **Conversation query surface**: `ConversationStore::list_stale`
+  (sweep pushdown) and `list` (metadata keyword + keyset pagination)
+  with `ConversationSummary` / `ConversationCursor` / `ConversationPage`
+  / `ConversationQuery`; `runtime.list_conversations` is the access
+  path.
+- **Read-only system snapshot**: `runtime.scheduler_snapshot()`
+  (name / period / policy / next trigger / running) — the system
+  scheduler is not reachable for registration.
+
+### Breaking Changes
+
+- **`ConversationStore::list()` removed**: replaced by
+  `list_stale(before, after, limit)` and `list(query)` (both keyset
+  paginated, returning `ConversationSummary` entries without turns).
+  Trait implementations must be updated.
+- **`SynonzRuntime::sweep_stale()` removed**: the Monitor is the only
+  sweep path. Rely on the automatic Monitor (configure
+  `conversation_idle_timeout`) or call `shutdown()` for teardown.
+- **Build contract**: configuring `conversation_idle_timeout` requires
+  an execution environment — call `build()` inside an async context or
+  inject a handle via `RuntimeBuilder::executor`; otherwise `build()`
+  panics (a configuration error).
+- `ConversationEndReason::Shutdown` and `MemoryFlowStage::Drain` added
+  (additive variants).
+
+### Migration
+
+| Before (0.3.x) | After (0.4.0) |
+|---|---|
+| `store.list()` | `store.list_stale(before, cursor, limit)` / `store.list(ConversationQuery::new(limit)…)` |
+| full `ConversationState` in listings | `ConversationSummary` (turns stay on `load` / `Conversation::of`) |
+| `runtime.sweep_stale().await` | automatic Monitor; `runtime.shutdown().await` for end-of-life teardown |
+| `runtime` built anywhere | `build()` inside an async context (or `.executor(handle)`) when `conversation_idle_timeout` is set |
+| maintenance table (internal) | session table (internal): `new` / `with_id` / `of` register, any end removes |
+
+### Notes
+
+- The Monitor tick derives from the idle timeout:
+  `clamp(timeout / 4, 100ms, 60s)`.
+- The conversation-end drain is bounded (60s per conversation); stuck or
+  panicked maintenance tasks surface as `FlowFailed { stage: Drain }`.
+
 ## [0.3.1] - 2026-09-10
 
 ### Fixed

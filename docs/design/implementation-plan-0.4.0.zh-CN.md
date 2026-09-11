@@ -1,6 +1,7 @@
 # Synonz 0.4.0 实现计划
 
-- 状态: IMPLEMENTING（2026-09-11，计划 APPROVED；M21-M25 完成）
+- 状态: VERIFIED（2026-09-11，M21-M26 完成；165/165 全绿、clippy/doc
+  零警告、fmt 干净；发布决策待 irylex 代码评审后）
 - 日期: 2026-09-11
 - 依据: ADR-0018（APPROVED——系统调度与生命周期完备）、架构设计
   文档 v5（APPROVED）、ADR-0011/0017 修订注记
@@ -273,3 +274,24 @@ shutdown 停止调度器并消费会话表（M25）；收尾扫全局。
   外部公开面测试；两轮全量回归 165/165 全绿、clippy 零警告、fmt
   干净（顺带修复 scheduler 快照测试的瞬时状态断言——改为确定性
   轮询）。
+
+### M26 收尾与验证 ✅（2026-09-11）
+
+- **测试**：全量回归 165/165 全绿（--all-features）、clippy 零警告、
+  fmt 干净；示例 `scheduler` 实跑验证（Queue 合并背靠背 3 次、系统
+  快照 `monitor` 60s、shutdown 收尾会话）；
+- **文档同步**：CHANGELOG 0.4.0（Highlights / 破坏项 / 迁移表 /
+  备注）；README（文档指针 v4→v5、实施计划 0.3.0→0.4.0、示例表加
+  `scheduler`、核心 crate 描述补系统调度）；v5 落点核对通过；
+  rustdoc 无 ADR 编号引用（顺带修复 3 处存量文档链接警告，`cargo
+  doc` 构建零警告）；
+- **示例**：新增 `examples/scheduler.rs`（用户调度器自动保存 +
+  系统生命周期）并在 `examples/Cargo.toml` 注册；
+- **命名终稿**：Scheduler 族（`Scheduler` / `Schedule` /
+  `OverlapPolicy` / `TaskHandle` / `TaskInfo`）、查询类型
+  （`ConversationSummary` / `ConversationCursor` / `ConversationPage`
+  / `ConversationQuery`）、快照（`scheduler_snapshot`）按 coding.md
+  §5 核对通过；
+- **发布决策**：**未执行**——等 irylex 代码评审后确认（发布执行
+  检查单：bump 五 crate 0.3.1→0.4.0 → dry-run → 依序 publish →
+  tag v0.4.0 → GitHub Release）。

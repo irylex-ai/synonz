@@ -179,8 +179,8 @@ impl ConversationQuery {
 }
 
 /// The conversation persistence contract, sibling of the
-/// [`Memory`] facade and its three store contracts. Implementations own
-/// storage; the
+/// [`Memory`](crate::Memory) facade and its three store contracts.
+/// Implementations own storage; the
 /// framework owns when saves happen (auto-save on turn completion,
 /// High Level).
 pub trait ConversationStore: Send + Sync + 'static {

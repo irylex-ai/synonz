@@ -11,7 +11,7 @@
 //! - [`io`] — run boundary types (input and final output).
 //! - [`tool`] — the tool contract (capabilities).
 //! - [`model`] — the model contract (LLM inference).
-//! - [`mock`] — deterministic test doubles (feature `test-util`).
+//! - `mock` — deterministic test doubles (feature `test-util`).
 //!
 //! Cancellation adopts the ecosystem primitive:
 //! [`CancellationToken`] is re-exported here as the framework's cancellation

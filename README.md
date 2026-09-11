@@ -36,7 +36,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 | Crate | Purpose |
 |---|---|
-| `synonz` | Core: `Agent`, the Context state engine, the event bus and `SynonzEvent` vocabulary, the three-slot `Memory`, canonical messages, the reasoning loop |
+| `synonz` | Core: `Agent`, the Context state engine, the event bus and `SynonzEvent` vocabulary, the three-slot `Memory`, the time-driven scheduler, canonical messages, the reasoning loop |
 | `synonz-derive` | `#[derive(Tool)]` typed tool ergonomics (re-exported by `synonz`) |
 | `synonz-openai` | OpenAI-compatible `Model` adapter |
 | `synonz-anthropic` | Anthropic `Model` adapter |
@@ -51,6 +51,7 @@ Run them with `cargo run -p synonz-examples --bin <name>`:
 | `custom_tool` | `#[derive(Tool)]` + agent loop (offline) |
 | `events` | Observing the full event stream on the bus (offline) |
 | `cancellation` | External cancel signal / timeout / drop entries (offline) |
+| `scheduler` | Custom scheduled tasks + the system lifecycle: Monitor and `shutdown()` (offline) |
 | `mcp_tools` | Bridging an embedded MCP server (offline) |
 | `openai_chat` | Real chat, needs `SYNONZ_OPENAI_API_KEY` |
 | `anthropic_chat` | Real chat, needs `SYNONZ_ANTHROPIC_API_KEY` |
@@ -58,13 +59,13 @@ Run them with `cargo run -p synonz-examples --bin <name>`:
 ## Documentation
 
 - Architecture decisions: `docs/adr/` (ADR-0001 and onward)
-- Architecture overview: `docs/architecture/v4.zh-CN.md` (the 0.3.0
-  target-state view; the v3 / s2 / v1 documents are retained as era
+- Architecture overview: `docs/architecture/v5.zh-CN.md` (the 0.4.0
+  target-state view; the v4 / v3 / s2 / v1 documents are retained as era
   snapshots)
-- Implementation plan: `docs/design/implementation-plan-0.3.0.zh-CN.md`
-  (the 0.2.0 plan is retained for its stage record)
-- Changelog: `CHANGELOG.md` (0.3.0 ships the contract-convergence and
-  event-bus waves in one breaking wave — migration tables inside)
+- Implementation plan: `docs/design/implementation-plan-0.4.0.zh-CN.md`
+  (the 0.3.0 / 0.2.0 plans are retained for their stage records)
+- Changelog: `CHANGELOG.md` (migration tables inside for the breaking
+  waves)
 
 ## Status
 

@@ -129,7 +129,8 @@ impl AgentBuilder {
         self
     }
 
-    /// Sets the state engine (default: [`DefaultContext`] fully
+    /// Sets the state engine (default:
+    /// [`DefaultContext`](crate::DefaultContext) fully
     /// defaulted). The engine is the agent's context — its materialization
     /// (assembly) and maintenance (archive/compaction/distillation)
     /// strategy; each agent carries its own (multi-agent strategy
