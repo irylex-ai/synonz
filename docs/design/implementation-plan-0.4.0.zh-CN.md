@@ -1,8 +1,7 @@
 # Synonz 0.4.0 实现计划
 
-- 状态: IMPLEMENTING（2026-09-12，M27 增补中——两个适配器的运行时可调
-  选项；M21-M26 已完成，165/165 全绿、clippy/doc 零警告、fmt 干净；
-  发布决策待 irylex 代码评审后）
+- 状态: VERIFIED（2026-09-12，M21-M27 完成；172/172 全绿、clippy/doc
+  零警告、fmt 干净；发布决策待 irylex 代码评审后）
 - 日期: 2026-09-11
 - 依据: ADR-0018（APPROVED——系统调度与生命周期完备）、架构设计
   文档 v5（APPROVED）、ADR-0011/0017 修订注记
@@ -151,7 +150,7 @@ M27 增补背景：真实开发场景（TUI 示例）验证公开 API 时发现�
 
 ## 4. 验收总标准
 
-1. 六里程碑逐项完成，每波全量回归绿；
+1. 七里程碑（含增补 M27）逐项完成，每波全量回归绿；
 2. 行为验收：自动空闲清扫（零应用调用，`IdleSwept`）/ 崩溃孤儿
    对账 / 三策略语义（Skip/Concurrent/Queue-合并）/ 触发隔离
    （长任务不阻塞触发）/ shutdown 幂等与停机顺序 / flush 送达 /
@@ -326,6 +325,31 @@ M27 增补背景：真实开发场景（TUI 示例）验证公开 API 时发现�
 - **发布决策**：**未执行**——等 irylex 代码评审后确认（发布执行
   检查单：bump 五 crate 0.3.1→0.4.0 → dry-run → 依序 publish →
   tag v0.4.0 → GitHub Release）。
+
+### M27 适配器运行时可调选项 ✅（2026-09-12）
+
+- **共享态模式（两适配器同构）**：连接/凭据构造绑定；`model`+`options`
+  进 `Arc<RwLock>`；clone 共享活动配置（文档写明）；`new`/`params`
+  保留兼容；新增 `options()`（快照）/ `set_options()` / `set_model()`
+  ——下一条请求生效、零重建（实证：clone 调整 → 原 client 发请求，
+  mock 断言请求体）；
+- **OpenAI**：`ModelOptions { #[serde(flatten)] params, reasoning_effort }`
+  + `ReasoningEffort { Off, Minimal, Low, Medium, High, ExtraHigh, Max }`
+  （wire `none/minimal/low/medium/high/xhigh/max`）；请求体按快照发
+  `reasoning_effort`；
+- **Anthropic**：`ModelOptions { #[serde(flatten)] params, effort,
+  thinking }` + `Effort { Low, Medium, High, ExtraHigh, Max }` +
+  `ThinkingMode { Adaptive, Disabled }`；请求体 `output_config.effort`
+  + `thinking.type`；含 thinking 块/delta 的流由现有忽略路径安全处理
+  （测试锁定）；
+- **serde**：`ModelOptions` 往返可用（flatten：无嵌套 `params` 键、
+  缺省字段为 None）——应用配置文件场景就绪；
+- **测试**：新增单元 5 项（OpenAI 档位映射/省略、serde 往返；Anthropic
+  effort+thinking 体形、serde 往返、thinking 流兼容）+ 集成 2 项
+  （两适配器运行期调参生效断言）；全量回归 **172/172** 全绿、clippy
+  零警告、`cargo doc --workspace` 零警告、fmt 干净；
+- **记录**：CHANGELOG 0.4.0 加性条目（Added：运行时可调选项；
+  Changed：clone 共享语义）；核心零改动、无 ADR/TODO。
 
 ### 评审跟进记录（2026-09-11，代码评审期决议）
 
