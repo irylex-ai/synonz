@@ -9,7 +9,10 @@
 pub mod sse;
 pub mod translate;
 
+use std::sync::{Arc, RwLock};
+
 use futures::StreamExt;
+use serde::{Deserialize, Serialize};
 
 use synonz::{BoxFuture, ModelError, ModelStream, ModelStreamItem};
 
@@ -24,17 +27,110 @@ pub const DEFAULT_MAX_TOKENS: u32 = 1024;
 /// The Anthropic API version header value.
 pub const ANTHROPIC_VERSION: &str = "2023-06-01";
 
+/// The request options of an Anthropic Messages API call, adjustable at
+/// runtime through [`Client::set_options`].
+///
+/// Serialization-friendly (usable in an application's config records):
+/// the provider-neutral parameters stay in
+/// [`ModelParams`][synonz::ModelParams]; `effort` and `thinking` are
+/// Anthropic-specific. Unset fields are omitted from requests (provider
+/// defaults apply).
+#[non_exhaustive]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct ModelOptions {
+    /// The provider-neutral parameters (temperature, token budget).
+    #[serde(flatten)]
+    pub params: synonz::ModelParams,
+    /// The reasoning effort (`output_config.effort`), when the model
+    /// supports it.
+    pub effort: Option<Effort>,
+    /// The thinking mode (`thinking.type`): adaptive or disabled.
+    pub thinking: Option<ThinkingMode>,
+}
+
+/// The effort level of an Anthropic call.
+///
+/// Levels map to the wire values `low`, `medium`, `high`, `xhigh`, and
+/// `max`. Support and acceptance are model-specific; the adapter does not
+/// pre-validate — the provider rejects unsupported levels.
+#[non_exhaustive]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Effort {
+    /// Low effort (`low`).
+    #[serde(rename = "low")]
+    Low,
+    /// Medium effort (`medium`).
+    #[serde(rename = "medium")]
+    Medium,
+    /// High effort (`high`).
+    #[serde(rename = "high")]
+    High,
+    /// Extra-high effort (`xhigh`).
+    #[serde(rename = "xhigh")]
+    ExtraHigh,
+    /// Maximum effort (`max`).
+    #[serde(rename = "max")]
+    Max,
+}
+
+impl Effort {
+    /// The wire value.
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::Low => "low",
+            Self::Medium => "medium",
+            Self::High => "high",
+            Self::ExtraHigh => "xhigh",
+            Self::Max => "max",
+        }
+    }
+}
+
+/// Whether the model thinks before answering (`thinking.type`).
+///
+/// `Adaptive` lets the model decide when and how deeply to think;
+/// `Disabled` turns thinking off. Models that think by default need no
+/// mode at all (leave unset).
+#[non_exhaustive]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ThinkingMode {
+    /// Adaptive thinking (`adaptive`).
+    #[serde(rename = "adaptive")]
+    Adaptive,
+    /// Thinking disabled (`disabled`).
+    #[serde(rename = "disabled")]
+    Disabled,
+}
+
+impl ThinkingMode {
+    /// The wire value.
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::Adaptive => "adaptive",
+            Self::Disabled => "disabled",
+        }
+    }
+}
+
 /// An Anthropic Messages API client implementing [`Model`][synonz::Model].
 ///
-/// Inference parameters are bound here: parameters are model
-/// behavior); leave them unset for provider defaults.
+/// Connection and credentials are bound at construction; the model name
+/// and the request options are **runtime-adjustable** through
+/// [`Client::set_model`] / [`Client::set_options`] and apply to the next
+/// request. Clones share the same live state (setting options on any
+/// clone affects all).
 #[derive(Clone)]
 pub struct Client {
     http: reqwest::Client,
     base_url: String,
-    model_name: String,
     api_key: String,
-    params: synonz::ModelParams,
+    state: Arc<RwLock<ClientState>>,
+}
+
+/// The runtime-adjustable part of a client (shared by its clones).
+struct ClientState {
+    model_name: String,
+    options: ModelOptions,
 }
 
 impl Client {
@@ -50,18 +146,48 @@ impl Client {
         Self {
             http: reqwest::Client::new(),
             base_url: base_url.into(),
-            model_name: model_name.into(),
             api_key: api_key.into(),
-            params: synonz::ModelParams::default(),
+            state: Arc::new(RwLock::new(ClientState {
+                model_name: model_name.into(),
+                options: ModelOptions::default(),
+            })),
         }
     }
 
-    /// Binds inference parameters (temperature, token budget). Unset
-    /// fields fall back to provider defaults (note: Anthropic requires
-    /// `max_tokens`; the documented default applies when unset).
-    pub fn params(mut self, params: synonz::ModelParams) -> Self {
-        self.params = params;
+    /// Binds the initial inference parameters (temperature, token budget).
+    /// Unset fields fall back to provider defaults (note: Anthropic
+    /// requires `max_tokens`; the documented default applies when unset).
+    /// Adjust them later through [`Client::set_options`].
+    pub fn params(self, params: synonz::ModelParams) -> Self {
+        let mut options = self.options();
+        options.params = params;
+        self.set_options(options);
         self
+    }
+
+    /// A snapshot of the current request options.
+    pub fn options(&self) -> ModelOptions {
+        self.state
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .options
+            .clone()
+    }
+
+    /// Replaces the request options: the next request uses them.
+    pub fn set_options(&self, options: ModelOptions) {
+        self.state
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .options = options;
+    }
+
+    /// Replaces the model name: the next request uses it.
+    pub fn set_model(&self, model_name: impl Into<String>) {
+        self.state
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .model_name = model_name.into();
     }
 
     /// Creates a client from the environment.
@@ -91,7 +217,14 @@ impl synonz::Model for Client {
         request: synonz::ModelRequest,
     ) -> BoxFuture<'_, Result<ModelStream, ModelError>> {
         Box::pin(async move {
-            let body = translate::request_body(&self.model_name, &request, &self.params)?;
+            let (model_name, options) = {
+                let state = self
+                    .state
+                    .read()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                (state.model_name.clone(), state.options.clone())
+            };
+            let body = translate::request_body(&model_name, &request, &options)?;
             let response = self
                 .http
                 .post(self.endpoint("v1/messages"))

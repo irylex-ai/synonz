@@ -21,7 +21,7 @@ use synonz::{ModelDelta, ModelError, ModelStreamItem, TokenUsage};
 pub(crate) fn request_body(
     model_name: &str,
     request: &synonz::ModelRequest,
-    params: &synonz::ModelParams,
+    options: &crate::ModelOptions,
 ) -> Result<Value, ModelError> {
     let mut system = String::new();
     let mut messages = Vec::new();
@@ -54,7 +54,10 @@ pub(crate) fn request_body(
     let mut body = json!({
         "model": model_name,
         // Anthropic requires max_tokens; the default is documented.
-        "max_tokens": params.max_tokens.unwrap_or(crate::DEFAULT_MAX_TOKENS),
+        "max_tokens": options
+            .params
+            .max_tokens
+            .unwrap_or(crate::DEFAULT_MAX_TOKENS),
         "stream": true,
         "messages": messages,
     });
@@ -76,8 +79,14 @@ pub(crate) fn request_body(
                 .collect(),
         );
     }
-    if let Some(temperature) = params.temperature {
+    if let Some(temperature) = options.params.temperature {
         body["temperature"] = json!(temperature);
+    }
+    if let Some(effort) = options.effort {
+        body["output_config"] = json!({ "effort": effort.as_str() });
+    }
+    if let Some(mode) = options.thinking {
+        body["thinking"] = json!({ "type": mode.as_str() });
     }
     Ok(body)
 }
@@ -330,7 +339,7 @@ mod tests {
         let body = request_body(
             "claude-sonnet-4-5",
             &request,
-            &synonz::ModelParams::default(),
+            &crate::ModelOptions::default(),
         )
         .unwrap();
         assert_eq!(body["system"], "weather assistant");
@@ -382,10 +391,72 @@ mod tests {
         let body = request_body(
             "claude-sonnet-4-5",
             &request,
-            &synonz::ModelParams::default(),
+            &crate::ModelOptions::default(),
         )
         .unwrap();
         assert_eq!(body["max_tokens"], crate::DEFAULT_MAX_TOKENS);
+    }
+
+    #[test]
+    fn effort_and_thinking_are_sent_when_set_and_omitted() {
+        let request = synonz::ModelRequest::new(vec![Message::user("hi")], vec![]);
+        let options = crate::ModelOptions {
+            params: synonz::ModelParams::default(),
+            effort: Some(crate::Effort::ExtraHigh),
+            thinking: Some(crate::ThinkingMode::Adaptive),
+        };
+        let body = request_body("claude-opus-5", &request, &options).unwrap();
+        assert_eq!(body["output_config"]["effort"], "xhigh");
+        assert_eq!(body["thinking"]["type"], "adaptive");
+
+        let body =
+            request_body("claude-opus-5", &request, &crate::ModelOptions::default()).unwrap();
+        assert!(body.get("output_config").is_none());
+        assert!(body.get("thinking").is_none());
+        assert!(body.get("temperature").is_none());
+    }
+
+    #[test]
+    fn model_options_serde_round_trip() {
+        let options: crate::ModelOptions =
+            serde_json::from_value(json!({"effort": "high", "thinking": "disabled"})).unwrap();
+        assert_eq!(options.effort, Some(crate::Effort::High));
+        assert_eq!(options.thinking, Some(crate::ThinkingMode::Disabled));
+        assert!(options.params.temperature.is_none());
+
+        let value = serde_json::to_value(&options).unwrap();
+        assert_eq!(value["effort"], "high");
+        assert_eq!(value["thinking"], "disabled");
+        assert!(value.get("params").is_none(), "params are flattened");
+    }
+
+    #[test]
+    fn thinking_blocks_are_ignored() {
+        let mut accumulator = ResponseAccumulator::default();
+        let events: Vec<Value> = vec![
+            json!({"type":"message_start","message":{"usage":{"input_tokens":7}}}),
+            json!({"type":"content_block_start","index":0,"content_block":{"type":"thinking","thinking":""}}),
+            json!({"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"hmm "}}),
+            json!({"type":"content_block_stop","index":0}),
+            json!({"type":"content_block_start","index":1,"content_block":{"type":"text","text":""}}),
+            json!({"type":"content_block_delta","index":1,"delta":{"type":"text_delta","text":"pong"}}),
+            json!({"type":"content_block_stop","index":1}),
+            json!({"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":1}}),
+            json!({"type":"message_stop"}),
+        ];
+        let mut deltas = Vec::new();
+        let mut finish = None;
+        for event in &events {
+            if let Some(item) = accumulator.apply_event(event).unwrap() {
+                match item {
+                    ModelStreamItem::Delta(ModelDelta::Text { text }) => deltas.push(text),
+                    item @ ModelStreamItem::Finish { .. } => finish = Some(item),
+                    other => panic!("unexpected stream item: {other:?}"),
+                }
+            }
+        }
+        assert_eq!(deltas, vec!["pong".to_string()]);
+        assert!(finish.is_some(), "the stream must still terminate");
     }
 
     #[test]

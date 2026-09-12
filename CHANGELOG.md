@@ -37,6 +37,21 @@ with the table below.
   (name / period / policy / next trigger / running) — the system
   scheduler is not reachable for registration.
 
+### Added
+
+- **Runtime-adjustable model options** (`synonz-openai` /
+  `synonz-anthropic`): `Client::options` / `set_options` / `set_model` —
+  changes take effect on the next request, no rebuild. Each adapter
+  exposes its provider-specific `ModelOptions` (serde; usable in
+  application config records): `reasoning_effort` (OpenAI) and `effort`
+  + `thinking` (Anthropic).
+
+### Changed
+
+- Adapter `Client` clones share the same live options and model name
+  (previously clones carried independent copies); connection and
+  credentials stay construction-bound.
+
 ### Breaking Changes
 
 - **`ConversationStore::list()` removed**: replaced by

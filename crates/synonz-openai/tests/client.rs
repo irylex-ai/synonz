@@ -7,7 +7,7 @@
 //! credentials.
 
 use futures::StreamExt;
-use wiremock::matchers::{method, path};
+use wiremock::matchers::{body_partial_json, method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
 use synonz::message::Message;
@@ -85,6 +85,36 @@ async fn error_status_maps_to_model_error() {
         Ok(_) => panic!("429 must surface as an error"),
     };
     assert!(matches!(error, ModelError::RateLimited { .. }));
+}
+
+#[tokio::test]
+async fn runtime_options_and_model_apply_to_the_next_request() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/chat/completions"))
+        .and(body_partial_json(serde_json::json!({
+            "model": "gpt-5",
+            "reasoning_effort": "high",
+        })))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "text/event-stream")
+                .set_body_string(SSE_BODY),
+        )
+        .mount(&server)
+        .await;
+
+    let client = Client::new(server.uri(), "test-key", "gpt-4o-mini");
+    // Clones share the live state: adjust through the clone, request
+    // through the original — the next request must carry the changes.
+    let clone = client.clone();
+    clone.set_model("gpt-5");
+    let mut options = clone.options();
+    options.reasoning_effort = Some(synonz_openai::ReasoningEffort::High);
+    clone.set_options(options);
+
+    // The request is sent eagerly; the mock asserts the body.
+    let _stream = client.stream(smoke_request()).await.unwrap();
 }
 
 /// Opt-in smoke test against the real API. Skipped (not failed) when

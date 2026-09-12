@@ -12,13 +12,15 @@
 
 use serde_json::{Value, json};
 use synonz::message::{ContentBlock, Message, Role, ToolResult};
-use synonz::{ModelDelta, ModelError, ModelParams, ModelStreamItem};
+use synonz::{ModelDelta, ModelError, ModelStreamItem};
+
+use crate::ModelOptions;
 
 /// Builds the chat-completions request body.
 pub(crate) fn request_body(
     model_name: &str,
     request: &synonz::ModelRequest,
-    params: &ModelParams,
+    options: &ModelOptions,
 ) -> Result<Value, ModelError> {
     let mut body = json!({
         "model": model_name,
@@ -26,11 +28,14 @@ pub(crate) fn request_body(
         "stream": true,
         "stream_options": { "include_usage": true },
     });
-    if let Some(temperature) = params.temperature {
+    if let Some(temperature) = options.params.temperature {
         body["temperature"] = json!(temperature);
     }
-    if let Some(max_tokens) = params.max_tokens {
+    if let Some(max_tokens) = options.params.max_tokens {
         body["max_tokens"] = json!(max_tokens);
+    }
+    if let Some(effort) = options.reasoning_effort {
+        body["reasoning_effort"] = json!(effort.as_str());
     }
     if !request.tools.is_empty() {
         body["tools"] = Value::Array(
@@ -326,15 +331,56 @@ mod tests {
                 json!({"type": "object"}),
             )],
         );
-        let params = synonz::ModelParams::default()
-            .with_temperature(0.3)
-            .with_max_tokens(256);
-        let body = request_body("gpt-4o-mini", &request, &params).unwrap();
+        let options = crate::ModelOptions {
+            params: synonz::ModelParams::default()
+                .with_temperature(0.3)
+                .with_max_tokens(256),
+            reasoning_effort: Some(crate::ReasoningEffort::High),
+        };
+        let body = request_body("gpt-4o-mini", &request, &options).unwrap();
         assert_eq!(body["model"], "gpt-4o-mini");
         assert_eq!(body["stream"], true);
         assert_eq!(body["temperature"], json!(0.3_f32));
         assert_eq!(body["max_tokens"], 256);
+        assert_eq!(body["reasoning_effort"], "high");
         assert_eq!(body["tools"][0]["function"]["name"], "weather");
+    }
+
+    #[test]
+    fn reasoning_effort_maps_and_omits() {
+        let request = synonz::ModelRequest::new(vec![Message::user("hi")], vec![]);
+
+        let options = crate::ModelOptions {
+            params: synonz::ModelParams::default(),
+            reasoning_effort: Some(crate::ReasoningEffort::ExtraHigh),
+        };
+        let body = request_body("gpt-5", &request, &options).unwrap();
+        assert_eq!(body["reasoning_effort"], "xhigh");
+
+        let options = crate::ModelOptions {
+            params: synonz::ModelParams::default(),
+            reasoning_effort: Some(crate::ReasoningEffort::Off),
+        };
+        let body = request_body("gpt-5", &request, &options).unwrap();
+        assert_eq!(body["reasoning_effort"], "none");
+
+        let body = request_body("gpt-5", &request, &crate::ModelOptions::default()).unwrap();
+        assert!(body.get("reasoning_effort").is_none());
+        assert!(body.get("temperature").is_none());
+        assert!(body.get("max_tokens").is_none());
+    }
+
+    #[test]
+    fn model_options_serde_round_trip() {
+        let options: crate::ModelOptions =
+            serde_json::from_value(json!({"reasoning_effort": "low"})).unwrap();
+        assert_eq!(options.reasoning_effort, Some(crate::ReasoningEffort::Low));
+        assert!(options.params.temperature.is_none());
+        assert!(options.params.max_tokens.is_none());
+
+        let value = serde_json::to_value(&options).unwrap();
+        assert_eq!(value["reasoning_effort"], "low");
+        assert!(value.get("params").is_none(), "params are flattened");
     }
 
     #[test]

@@ -10,7 +10,10 @@
 pub mod sse;
 pub mod translate;
 
+use std::sync::{Arc, RwLock};
+
 use futures::StreamExt;
+use serde::{Deserialize, Serialize};
 
 use synonz::BoxFuture;
 use synonz::ModelDelta;
@@ -21,18 +24,91 @@ use synonz::ModelStreamItem;
 /// The default public API base URL.
 pub const DEFAULT_BASE_URL: &str = "https://api.openai.com/v1";
 
+/// The request options of an OpenAI-compatible model call, adjustable at
+/// runtime through [`Client::set_options`].
+///
+/// Serialization-friendly (usable in an application's config records):
+/// the provider-neutral parameters stay in
+/// [`ModelParams`][synonz::ModelParams]; `reasoning_effort` is
+/// OpenAI-specific. Unset fields are omitted from requests (provider
+/// defaults apply).
+#[non_exhaustive]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct ModelOptions {
+    /// The provider-neutral parameters (temperature, token budget).
+    #[serde(flatten)]
+    pub params: synonz::ModelParams,
+    /// The reasoning effort, when the model supports it.
+    pub reasoning_effort: Option<ReasoningEffort>,
+}
+
+/// The reasoning effort level of an OpenAI-compatible model call.
+///
+/// Levels map to the wire values `none`, `minimal`, `low`, `medium`,
+/// `high`, `xhigh`, and `max`. Support and acceptance are model-specific;
+/// the adapter does not pre-validate — the provider rejects unsupported
+/// levels.
+#[non_exhaustive]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ReasoningEffort {
+    /// No reasoning (`none`).
+    #[serde(rename = "none")]
+    Off,
+    /// Minimal reasoning (`minimal`).
+    #[serde(rename = "minimal")]
+    Minimal,
+    /// Low effort (`low`).
+    #[serde(rename = "low")]
+    Low,
+    /// Medium effort (`medium`).
+    #[serde(rename = "medium")]
+    Medium,
+    /// High effort (`high`).
+    #[serde(rename = "high")]
+    High,
+    /// Extra-high effort (`xhigh`).
+    #[serde(rename = "xhigh")]
+    ExtraHigh,
+    /// Maximum effort (`max`).
+    #[serde(rename = "max")]
+    Max,
+}
+
+impl ReasoningEffort {
+    /// The wire value.
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::Off => "none",
+            Self::Minimal => "minimal",
+            Self::Low => "low",
+            Self::Medium => "medium",
+            Self::High => "high",
+            Self::ExtraHigh => "xhigh",
+            Self::Max => "max",
+        }
+    }
+}
+
 /// An OpenAI-compatible chat-completions client implementing
 /// [`Model`][synonz::Model].
 ///
-/// Inference parameters are bound here: parameters are model
-/// behavior); leave them unset for provider defaults.
+/// Connection and credentials are bound at construction; the model name
+/// and the request options are **runtime-adjustable** through
+/// [`Client::set_model`] / [`Client::set_options`] and apply to the next
+/// request. Clones share the same live state (setting options on any
+/// clone affects all).
 #[derive(Clone)]
 pub struct Client {
     http: reqwest::Client,
     base_url: String,
-    model_name: String,
     api_key: String,
-    params: synonz::ModelParams,
+    state: Arc<RwLock<ClientState>>,
+}
+
+/// The runtime-adjustable part of a client (shared by its clones).
+struct ClientState {
+    model_name: String,
+    options: ModelOptions,
 }
 
 impl Client {
@@ -48,17 +124,47 @@ impl Client {
         Self {
             http: reqwest::Client::new(),
             base_url: base_url.into(),
-            model_name: model_name.into(),
             api_key: api_key.into(),
-            params: synonz::ModelParams::default(),
+            state: Arc::new(RwLock::new(ClientState {
+                model_name: model_name.into(),
+                options: ModelOptions::default(),
+            })),
         }
     }
 
-    /// Binds inference parameters (temperature, token budget). Unset
-    /// fields fall back to provider defaults.
-    pub fn params(mut self, params: synonz::ModelParams) -> Self {
-        self.params = params;
+    /// Binds the initial inference parameters (temperature, token budget).
+    /// Unset fields fall back to provider defaults; adjust them later
+    /// through [`Client::set_options`].
+    pub fn params(self, params: synonz::ModelParams) -> Self {
+        let mut options = self.options();
+        options.params = params;
+        self.set_options(options);
         self
+    }
+
+    /// A snapshot of the current request options.
+    pub fn options(&self) -> ModelOptions {
+        self.state
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .options
+            .clone()
+    }
+
+    /// Replaces the request options: the next request uses them.
+    pub fn set_options(&self, options: ModelOptions) {
+        self.state
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .options = options;
+    }
+
+    /// Replaces the model name: the next request uses it.
+    pub fn set_model(&self, model_name: impl Into<String>) {
+        self.state
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .model_name = model_name.into();
     }
 
     /// Creates a client from the environment.
@@ -86,7 +192,14 @@ impl synonz::Model for Client {
         request: synonz::ModelRequest,
     ) -> BoxFuture<'_, Result<ModelStream, ModelError>> {
         Box::pin(async move {
-            let body = translate::request_body(&self.model_name, &request, &self.params)?;
+            let (model_name, options) = {
+                let state = self
+                    .state
+                    .read()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                (state.model_name.clone(), state.options.clone())
+            };
+            let body = translate::request_body(&model_name, &request, &options)?;
             let response = self
                 .http
                 .post(self.endpoint("chat/completions"))

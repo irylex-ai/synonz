@@ -7,7 +7,7 @@
 //! credentials.
 
 use futures::StreamExt;
-use wiremock::matchers::{header, method, path};
+use wiremock::matchers::{body_partial_json, header, method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
 use synonz::message::Message;
@@ -95,6 +95,38 @@ async fn error_status_maps_to_model_error() {
         Ok(_) => panic!("429 must surface as an error"),
     };
     assert!(matches!(error, ModelError::RateLimited { .. }));
+}
+
+#[tokio::test]
+async fn runtime_options_and_model_apply_to_the_next_request() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/messages"))
+        .and(body_partial_json(serde_json::json!({
+            "model": "claude-opus-5",
+            "output_config": { "effort": "high" },
+            "thinking": { "type": "adaptive" },
+        })))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "text/event-stream")
+                .set_body_string(SSE_BODY),
+        )
+        .mount(&server)
+        .await;
+
+    let client = Client::new(server.uri(), "test-key", "claude-sonnet-4-5");
+    // Clones share the live state: adjust through the clone, request
+    // through the original — the next request must carry the changes.
+    let clone = client.clone();
+    clone.set_model("claude-opus-5");
+    let mut options = clone.options();
+    options.effort = Some(synonz_anthropic::Effort::High);
+    options.thinking = Some(synonz_anthropic::ThinkingMode::Adaptive);
+    clone.set_options(options);
+
+    // The request is sent eagerly; the mock asserts the body.
+    let _stream = client.stream(smoke_request()).await.unwrap();
 }
 
 /// Opt-in smoke test against the real API. Skipped (not failed) when
