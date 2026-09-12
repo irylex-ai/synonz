@@ -55,6 +55,7 @@ Run them with `cargo run -p synonz-examples --bin <name>`:
 | `mcp_tools` | Bridging an embedded MCP server (offline) |
 | `openai_chat` | Real chat, needs `SYNONZ_OPENAI_API_KEY` |
 | `anthropic_chat` | Real chat, needs `SYNONZ_ANTHROPIC_API_KEY` |
+| `chat_tui` | Interactive TUI chat; configure the endpoint on first screen |
 
 ## Documentation
 
