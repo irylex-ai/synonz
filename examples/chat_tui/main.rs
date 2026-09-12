@@ -40,6 +40,27 @@ Use them when the user asks about files or the directory. Keep answers concise."
 /// The terminal type used throughout.
 type ChatTerminal = Terminal<CrosstermBackend<io::Stdout>>;
 
+/// Wraps the model to dump each outgoing canonical request when
+/// `SYNONZ_CHAT_TUI_TRACE` is set (protocol debugging aid).
+struct TracedModel {
+    inner: Client,
+}
+
+impl synonz::Model for TracedModel {
+    fn stream(
+        &self,
+        request: synonz::ModelRequest,
+    ) -> synonz::BoxFuture<'_, Result<synonz::ModelStream, synonz::ModelError>> {
+        if std::env::var_os("SYNONZ_CHAT_TUI_TRACE").is_some() {
+            match serde_json::to_string(&request.messages) {
+                Ok(json) => eprintln!("[chat_tui trace] messages: {json}"),
+                Err(error) => eprintln!("[chat_tui trace] unserializable: {error}"),
+            }
+        }
+        self.inner.stream(request)
+    }
+}
+
 #[tokio::main]
 async fn main() -> io::Result<()> {
     install_panic_hook();
@@ -89,7 +110,9 @@ async fn run(terminal: &mut ChatTerminal) -> io::Result<()> {
     }
     let agent = Agent::builder()
         .runtime(&runtime)
-        .model(client.clone())
+        .model(TracedModel {
+            inner: client.clone(),
+        })
         .system_prompt(SYSTEM_PROMPT)
         .tool(tools::ReadFile {
             path: String::new(),

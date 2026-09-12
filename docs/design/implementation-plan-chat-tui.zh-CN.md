@@ -291,3 +291,31 @@ irylex 第三轮实跑反馈与处置：
 
 验证：全量回归 **200/200** 全绿、clippy 零警告、`cargo doc --workspace`
 零警告、fmt 干净。
+
+## 14. 第四轮运行反馈（2026-09-12）
+
+irylex 第四轮实跑：工具已能执行（`list_dir` 返回结果），但**工具结果
+回传后的第二次模型调用**被 provider 拒绝（`invalid arguments`）。
+
+根因与修复：
+
+1. **工具结果消息数组嵌套（真实缺陷）**：`to_wire_messages` 对
+   `Role::Tool` 返回 `Value::Array`（一条消息可展开为多条工具结果
+   消息），但未展平——请求 `messages` 里出现嵌套子数组，provider 直接
+   400。修复：`to_wire_messages` 展平（`Array` 逐条拼接进外层）；补
+   tool round 的精确线格式测试（assistant tool_calls → tool result
+   逐字段断言）；
+2. **兼容加固**：assistant 带 tool_calls 且无文本时按官方形态发送
+   `content: null`（此前省略字段，部分 provider 拒绝）；provider 未
+   返回 tool call id 时生成本地回退 id（`call_{index}`），保证
+   assistant 消息与其 tool 结果正确配对；
+3. **诊断开关**：示例新增 `TracedModel`——`SYNONZ_CHAT_TUI_TRACE=1`
+   时把每次外发的 canonical 消息 dump 到 stderr，便于对齐 provider
+   协议问题（用公开 `Model` trait 实现，示例自身零核心改动）。
+
+澄清（回应 irylex 的疑问）：框架**不写死**工具调用——请求只声明可用
+工具（`tool_choice` 默认 auto），是否调用完全由模型决定；本次
+`list_dir` 即模型自行判断后发出的。
+
+验证：全量回归 **202/202** 全绿、clippy 零警告、`cargo doc --workspace`
+零警告、fmt 干净。
