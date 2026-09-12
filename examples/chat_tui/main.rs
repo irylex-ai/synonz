@@ -33,9 +33,15 @@ use app::{ChatState, Entry, Status};
 use setup::{Outcome, Setup};
 
 /// The agent's system prompt (tools + sandbox explained to the model).
+///
+/// Deliberately conservative: tools are declared but the model is told to
+/// use them only on an explicit file/directory request and to ask on
+/// ambiguous prompts (declaring tools alone already invites tool use).
 const SYSTEM_PROMPT: &str = "You are a helpful assistant in a terminal chat. \
 You have read-only tools for the working directory: read_file, list_dir, and file_info. \
-Use them when the user asks about files or the directory. Keep answers concise.";
+Call a tool only when the user's request explicitly asks you to read a file or inspect \
+the directory; for vague or general questions, ask what they mean instead of guessing. \
+Keep answers concise.";
 
 /// The terminal type used throughout.
 type ChatTerminal = Terminal<CrosstermBackend<io::Stdout>>;
