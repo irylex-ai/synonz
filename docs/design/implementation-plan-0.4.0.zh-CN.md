@@ -1,7 +1,8 @@
 # Synonz 0.4.0 实现计划
 
-- 状态: VERIFIED（2026-09-11，M21-M26 完成；165/165 全绿、clippy/doc
-  零警告、fmt 干净；发布决策待 irylex 代码评审后）
+- 状态: IMPLEMENTING（2026-09-12，M27 增补中——两个适配器的运行时可调
+  选项；M21-M26 已完成，165/165 全绿、clippy/doc 零警告、fmt 干净；
+  发布决策待 irylex 代码评审后）
 - 日期: 2026-09-11
 - 依据: ADR-0018（APPROVED——系统调度与生命周期完备）、架构设计
   文档 v5（APPROVED）、ADR-0011/0017 修订注记
@@ -20,7 +21,7 @@
 ## 1. 总览
 
 0.4.0 是**调度与生命周期完备落地波**：把 ADR-0018 与 v5 的全部
-决策一次性实施为代码。六个里程碑按依赖链排序：
+决策一次性实施为代码。七个里程碑按依赖链排序（M27 为评审期增补）：
 
 ```
 M21 前提工程（drain 有界化 + panic 可见化）
@@ -34,12 +35,18 @@ M24 系统调度器与 Monitor（build 装配 + 空闲清扫 + 崩溃孤儿对�
 M25 统一会话表与 shutdown（会话表升级 + 停机顺序 + 观测 flush）
   ↓
 M26 收尾与验证（测试迁移、文档同步、示例、命名终稿、全量回归、发布决策）
+  ↓
+M27 增补：适配器运行时可调选项（OpenAI reasoning_effort / Anthropic effort + thinking）
 ```
 
 依赖理由：前提工程先填终结可靠性的两个洞（M21）；查询面与 sweep
 分页是 Monitor 的数据通路（M22）；Scheduler 是系统调度与用户调度
 的共同底座（M23）；Monitor 是系统调度器的首个注册任务（M24）；
 shutdown 停止调度器并消费会话表（M25）；收尾扫全局。
+
+M27 增补背景：真实开发场景（TUI 示例）验证公开 API 时发现的适配器
+缺口——请求选项（尤其思考档位）只能在构造期绑定、运行期不可调；
+增补并入本波发布（不改变 M21-M26 成果）。
 
 **每一波的完成定义**：子项全部落地 + 新增/迁移测试绿 + 全量回归绿
 （`cargo fmt --check` / `clippy --workspace --all-targets --all-features`
@@ -112,6 +119,18 @@ shutdown 停止调度器并消费会话表（M25）；收尾扫全局。
 | 4 | 命名终稿 | 按 coding.md §5 命名立法执行（Scheduler 族、查询类型、快照类型） |
 | 5 | 发布决策 | 单波发布流程（bump 五 crate 0.3.1→0.4.0 → dry-run → 依序 publish → tag v0.4.0 → GitHub Release）——**等 irylex 确认后执行** |
 
+### M27 增补：适配器运行时可调选项（评审期新增）
+
+| # | 子项 | 要点 |
+|---|---|---|
+| 1 | 共享态模式（两适配器同构） | 连接/凭据构造绑定；`model`+`options` 进 `Arc<RwLock>`；clone 共享（文档写明）；`new`/`params` 保留兼容 |
+| 2 | OpenAI 选项 | `ModelOptions { #[serde(flatten)] params, reasoning_effort }`；`ReasoningEffort { Off, Minimal, Low, Medium, High, ExtraHigh, Max }`（`Off`→`none`、`ExtraHigh`→`xhigh`；均 non_exhaustive + serde）；请求体按快照发 `reasoning_effort` |
+| 3 | Anthropic 选项 | `ModelOptions { #[serde(flatten)] params, effort, thinking }`；`Effort { Low, Medium, High, ExtraHigh, Max }`、`ThinkingMode { Adaptive, Disabled }`（non_exhaustive + serde）；请求体 `output_config.effort` + `thinking.type` |
+| 4 | 运行期 API | `options()`（快照）/ `set_options()` / `set_model()`；下一条请求生效、零重建 |
+| 5 | 流兼容 | Anthropic 含 thinking 块/delta 的流仍正确解析（现有忽略路径）+ 测试 |
+| 6 | 测试 | 两适配器：发出/省略、set 后下请求生效（mock 断言请求体）、换模型生效、clone 共享、serde 往返；Anthropic 另加 effort+thinking 体形与 thinking 流兼容 |
+| 7 | 记录 | CHANGELOG 0.4.0 两 crate 加性条目 + clone 共享语义注记；无核心改动、无 ADR/TODO |
+
 ---
 
 ## 3. 迁移映射表（旧 → 新）
@@ -144,7 +163,11 @@ shutdown 停止调度器并消费会话表（M25）；收尾扫全局。
 5. 文档一致：v5 与代码落点核对通过；CHANGELOG 0.4.0 完整（破坏项 +
    迁移指引）；README 指针更新；rustdoc 无 ADR 编号引用；
 6. 延期项记录在案：调度扩展暂缓项 / 后台专用模型 / S3 / 控制流
-   影响 / ended 状态门。
+   影响 / ended 状态门；
+7. M27 增补验收：两个适配器 `set_model`/`set_options` 生效于下一条
+   请求（mock 断言请求体）；clone 共享活动配置；档位词表与 wire 字段
+   正确；Anthropic thinking 流兼容测试绿；`ModelOptions` serde 往返
+   可用（配置文件场景）。
 
 ---
 
@@ -163,6 +186,10 @@ shutdown 停止调度器并消费会话表（M25）；收尾扫全局。
 | 零任务时计时线程 | 首个任务注册即启动；零任务不空转（配置 `idle_timeout` 的正常路径随 build 启动） |
 | 测试稳定性 | 短周期 + 宽裕余量；新引入 flaky 即缺陷 |
 | 多实例计时线程成本 | 文档写明（每 Scheduler 一条线程，进程级环境通常一个） |
+| M27 选项命名 | `ModelOptions`（生态对齐：opencode `options` / Continue `requestOptions`）；两个适配器各自 crate 同名 |
+| M27 档位词表 | OpenAI `Off/Minimal/Low/Medium/High/ExtraHigh/Max` → `none/minimal/low/medium/high/xhigh/max`；Anthropic `Effort {Low/Medium/High/ExtraHigh/Max}` + `ThinkingMode {Adaptive, Disabled}` |
+| M27 抽象策略 | 不抽公共抽象——两个 in-tree 适配器各实现共享态样板；第三个适配器出现时再评估 |
+| M27 核心影响 | 零——核心契约与 `ModelParams` 不动；provider 特有选项住各自适配器 |
 
 **实施期决策协议**（对涌现事项——实施中新出现的决策点）：
 
