@@ -239,6 +239,28 @@ fn handle_command(command: &str, client: &Client, chat: &mut ChatState) {
             }
         }
         "quit" | "exit" => chat.should_quit = true,
+        "think" => match argument {
+            "" => {
+                let visible = chat.toggle_thinking();
+                chat.transcript.push(Entry::Note(format!(
+                    "thinking display {}",
+                    if visible { "on" } else { "off" }
+                )));
+            }
+            "on" => {
+                chat.show_thinking = true;
+                chat.transcript
+                    .push(Entry::Note("thinking display on".to_string()));
+            }
+            "off" => {
+                chat.show_thinking = false;
+                chat.transcript
+                    .push(Entry::Note("thinking display off".to_string()));
+            }
+            other => chat.transcript.push(Entry::Error(format!(
+                "unknown /think argument {other:?}: use on or off"
+            ))),
+        },
         _ => chat
             .transcript
             .push(Entry::Error(format!("unknown command: /{name}"))),
@@ -272,6 +294,9 @@ fn apply_input_key(chat: &mut ChatState, key: KeyEvent) {
         KeyCode::End => chat.input.end(),
         KeyCode::Up => chat.history_prev(),
         KeyCode::Down => chat.history_next(),
+        KeyCode::Tab => {
+            chat.complete_command();
+        }
         KeyCode::PageUp | KeyCode::PageDown => chat.handle_scroll_key(key.code),
         _ => {}
     }
@@ -286,7 +311,6 @@ fn setup_terminal() -> io::Result<ChatTerminal> {
     let mut stdout = io::stdout();
     execute!(stdout, EnterAlternateScreen)?;
     let mut terminal = Terminal::new(CrosstermBackend::new(stdout))?;
-    terminal.hide_cursor()?;
     terminal.clear()?;
     Ok(terminal)
 }

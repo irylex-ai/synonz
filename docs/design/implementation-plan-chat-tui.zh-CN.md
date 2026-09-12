@@ -224,3 +224,25 @@ examples/chat_tui/
 - **验证**：示例单测 16 项 + 装配测试 1 项；全量回归 **189/189** 全绿、
   clippy 零警告、`cargo doc --workspace` 零警告、fmt 干净；TUI 实跑由
   irylex 本机带 key 验证（无 TTY 环境不可自动化）。
+
+## 11. 运行反馈迭代（2026-09-12）
+
+irylex 首轮实跑反馈四项与处置：
+
+1. **版本显示**：实跑输出的 `… 0.3.1` 是工作区 manifest 版本号
+   （0.4.0 尚未 bump；发布检查单第一步才更新）——非缺陷，无需改动；
+2. **光标不闪**：原因是实现隐藏了终端光标、改用反色假光标；改为
+   **真实终端光标**（`Frame::set_cursor_position`，聊天输入行与向导
+   聚焦字段均定位真实光标），是否闪烁交由终端自身配置；
+3. **thinking 不显示**：新增核心 `ModelDelta::Reasoning`（narration
+   only，不进 canonical 消息），OpenAI-compatible 适配器透传
+   `reasoning_content` / `reasoning` / `reasoning_text`，Anthropic
+   适配器映射 `thinking_delta`；TUI 新增 `Entry::Reasoning`（品红
+   斜体）与 `/think [on|off]` 显示开关（默认显示，切换即时生效）；
+4. **斜杠无提示**：输入 `/` 前缀时在输入框上方显示命令候选（用法 +
+   一行描述），`Tab` 补全第一个匹配命令。
+
+验证：示例测试 **20/20**（含 1 项 `MockModel` 装配）；适配器新增测试
+（OpenAI reasoning 透传且不入 canonical 消息；Anthropic
+`thinking_delta` → reasoning delta）；全量回归 **193/193** 全绿、
+clippy 零警告、`cargo doc --workspace` 零警告、fmt 干净。

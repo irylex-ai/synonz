@@ -96,6 +96,8 @@ pub enum Entry {
     User(String),
     /// The assistant's streamed text.
     Assistant(String),
+    /// The model's streamed reasoning (display-only narration).
+    Reasoning(String),
     /// A tool call the model requested.
     ToolCall {
         /// The tool's name.
@@ -135,6 +137,8 @@ pub struct ChatState {
     pub model: String,
     /// The current thinking option (status bar + `/effort`).
     pub effort: Option<ReasoningEffort>,
+    /// Whether the model's thinking output is displayed.
+    pub show_thinking: bool,
     /// Sent messages (for history recall).
     pub history: Vec<String>,
     /// The history position while recalling (`None` = editing).
@@ -153,6 +157,8 @@ pub struct ChatState {
     pub should_quit: bool,
     /// The transcript index of the assistant entry being streamed.
     streaming: Option<usize>,
+    /// The transcript index of the reasoning entry being streamed.
+    reasoning_streaming: Option<usize>,
 }
 
 impl ChatState {
@@ -163,6 +169,7 @@ impl ChatState {
             input: TextInput::new(""),
             model,
             effort,
+            show_thinking: true,
             history: Vec::new(),
             history_pos: None,
             draft: String::new(),
@@ -172,6 +179,7 @@ impl ChatState {
             spinner: 0,
             should_quit: false,
             streaming: None,
+            reasoning_streaming: None,
         }
     }
 
@@ -202,6 +210,21 @@ impl ChatState {
                 self.follow = true;
                 false
             }
+            ExecutionEvent::Delta(ModelDelta::Reasoning { text }) => {
+                match self.reasoning_streaming {
+                    Some(index) => {
+                        if let Some(Entry::Reasoning(buffer)) = self.transcript.get_mut(index) {
+                            buffer.push_str(text);
+                        }
+                    }
+                    None => {
+                        self.transcript.push(Entry::Reasoning(text.clone()));
+                        self.reasoning_streaming = Some(self.transcript.len() - 1);
+                    }
+                }
+                self.follow = true;
+                false
+            }
             ExecutionEvent::ToolRequested(call) => {
                 self.transcript.push(Entry::ToolCall {
                     name: call.name.clone(),
@@ -219,6 +242,7 @@ impl ChatState {
                 false
             }
             ExecutionEvent::Completed(output) => {
+                self.reasoning_streaming = None;
                 let text = output.text().unwrap_or_default().to_string();
                 match self.streaming.take() {
                     Some(index) => {
@@ -233,11 +257,13 @@ impl ChatState {
             }
             ExecutionEvent::Failed(error) => {
                 self.streaming = None;
+                self.reasoning_streaming = None;
                 self.transcript.push(Entry::Error(error.to_string()));
                 true
             }
             ExecutionEvent::Cancelled(reason) => {
                 self.streaming = None;
+                self.reasoning_streaming = None;
                 self.transcript
                     .push(Entry::Note(format!("cancelled ({reason})")));
                 true
@@ -298,7 +324,73 @@ impl ChatState {
             _ => {}
         }
     }
+
+    /// The commands matching the current input (empty when not applicable).
+    pub fn command_matches(&self) -> Vec<&'static CommandSpec> {
+        let text = self.input.text();
+        if !text.starts_with('/') || text.contains(' ') {
+            return Vec::new();
+        }
+        COMMANDS
+            .iter()
+            .filter(|command| command.name.starts_with(text))
+            .collect()
+    }
+
+    /// Completes the input to the first matching command; returns whether
+    /// anything was completed.
+    pub fn complete_command(&mut self) -> bool {
+        let Some(command) = self.command_matches().first().copied() else {
+            return false;
+        };
+        if command.args.is_empty() {
+            self.input.set(command.name);
+        } else {
+            self.input.set(format!("{} ", command.name));
+        }
+        true
+    }
+
+    /// Toggles thinking display; returns the new visibility.
+    pub fn toggle_thinking(&mut self) -> bool {
+        self.show_thinking = !self.show_thinking;
+        self.show_thinking
+    }
 }
+
+/// One entry in the slash-command completion list.
+pub struct CommandSpec {
+    /// The command including the slash, e.g. `/model`.
+    pub name: &'static str,
+    /// The argument placeholder (empty when the command takes none).
+    pub args: &'static str,
+    /// A one-line description.
+    pub description: &'static str,
+}
+
+/// The commands offered by completion.
+pub const COMMANDS: [CommandSpec; 4] = [
+    CommandSpec {
+        name: "/model",
+        args: "<name>",
+        description: "switch model (next message)",
+    },
+    CommandSpec {
+        name: "/effort",
+        args: "<level>",
+        description: "set thinking level (next message)",
+    },
+    CommandSpec {
+        name: "/think",
+        args: "[on|off]",
+        description: "show or hide the model's thinking output",
+    },
+    CommandSpec {
+        name: "/quit",
+        args: "",
+        description: "exit the chat",
+    },
+];
 
 /// A short status label for a thinking option.
 pub fn effort_label(effort: Option<ReasoningEffort>) -> &'static str {
@@ -370,6 +462,58 @@ mod tests {
         let mut chat = ChatState::new("test-model".to_string(), None);
         assert!(chat.apply_event(&completed("pong")));
         assert!(matches!(chat.transcript.last(), Some(Entry::Assistant(text)) if text == "pong"));
+    }
+
+    #[test]
+    fn reasoning_fragments_coalesce() {
+        let mut chat = ChatState::new("test-model".to_string(), None);
+        assert!(
+            !chat.apply_event(&ExecutionEvent::Delta(ModelDelta::Reasoning {
+                text: "hmm ".into()
+            }))
+        );
+        assert!(
+            !chat.apply_event(&ExecutionEvent::Delta(ModelDelta::Reasoning {
+                text: "ok".into()
+            }))
+        );
+        assert!(chat.apply_event(&completed("pong")));
+        assert!(matches!(&chat.transcript[0], Entry::Reasoning(text) if text == "hmm ok"));
+        assert!(matches!(&chat.transcript[1], Entry::Assistant(text) if text == "pong"));
+    }
+
+    #[test]
+    fn command_completion_matches_prefixes() {
+        let mut chat = ChatState::new("test-model".to_string(), None);
+        chat.input.set("/mo");
+        let names: Vec<&str> = chat.command_matches().iter().map(|c| c.name).collect();
+        assert_eq!(names, vec!["/model"]);
+        assert!(chat.complete_command());
+        assert_eq!(chat.input.text(), "/model ");
+
+        chat.input.set("/think");
+        assert_eq!(chat.command_matches().len(), 1);
+        assert!(chat.complete_command());
+        assert_eq!(chat.input.text(), "/think ");
+        assert!(
+            chat.command_matches().is_empty(),
+            "arguments end completion"
+        );
+
+        chat.input.set("hello");
+        assert!(chat.command_matches().is_empty());
+        assert!(!chat.complete_command());
+
+        chat.input.set("/z");
+        assert!(chat.command_matches().is_empty());
+    }
+
+    #[test]
+    fn thinking_display_toggles() {
+        let mut chat = ChatState::new("test-model".to_string(), None);
+        assert!(chat.show_thinking);
+        assert!(!chat.toggle_thinking());
+        assert!(chat.toggle_thinking());
     }
 
     #[test]

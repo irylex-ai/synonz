@@ -4,9 +4,9 @@ use ratatui::Frame;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span, Text};
-use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
+use ratatui::widgets::{Block, Borders, Paragraph};
 
-use crate::app::{ChatState, Entry, Status, TextInput, effort_label};
+use crate::app::{ChatState, CommandSpec, Entry, Status, TextInput, effort_label};
 use crate::setup::{Setup, Step};
 
 const SPINNER: [&str; 4] = ["|", "/", "-", "\\"];
@@ -41,12 +41,14 @@ fn focused_style() -> Style {
         .add_modifier(Modifier::BOLD)
 }
 
-fn cursor_style() -> Style {
-    Style::default().add_modifier(Modifier::REVERSED)
-}
-
 fn hint_style() -> Style {
     Style::default().fg(Color::DarkGray)
+}
+
+fn reasoning_style() -> Style {
+    Style::default()
+        .fg(Color::Magenta)
+        .add_modifier(Modifier::ITALIC)
 }
 
 /// Draws the setup wizard.
@@ -64,18 +66,18 @@ pub fn draw_setup(frame: &mut Frame, setup: &Setup) {
     frame.render_widget(block, area);
 
     let width = inner.width.max(1) as usize;
-    let mut lines: Vec<Line<'static>> = Vec::new();
+    let mut rows: Vec<(Line<'static>, Option<u16>)> = Vec::new();
     match setup.step {
         Step::Api => {
-            lines.push(field_line(
+            rows.push(field_line(
                 "Base URL",
                 &setup.base_url,
                 setup.field == 0,
                 width,
                 false,
             ));
-            lines.push(Line::default());
-            lines.push(field_line(
+            rows.push((Line::default(), None));
+            rows.push(field_line(
                 "API key ",
                 &setup.api_key,
                 setup.field == 1,
@@ -84,24 +86,24 @@ pub fn draw_setup(frame: &mut Frame, setup: &Setup) {
             ));
         }
         Step::Model => {
-            lines.push(field_line(
+            rows.push(field_line(
                 "Model   ",
                 &setup.model,
                 setup.field == 0,
                 width,
                 false,
             ));
-            lines.push(Line::default());
-            lines.push(effort_line(setup, width));
+            rows.push((Line::default(), None));
+            rows.push(effort_line(setup, width));
         }
         Step::Chat => {}
     }
-    lines.push(Line::default());
+    rows.push((Line::default(), None));
     if let Some(error) = &setup.error {
-        lines.push(Line::from(Span::styled(
-            format!("! {error}"),
-            error_style(),
-        )));
+        rows.push((
+            Line::from(Span::styled(format!("! {error}"), error_style())),
+            None,
+        ));
     }
     let hint = match setup.step {
         Step::Api => "Tab: next field · Enter: continue · Esc: quit",
@@ -110,28 +112,72 @@ pub fn draw_setup(frame: &mut Frame, setup: &Setup) {
         }
         Step::Chat => "",
     };
-    lines.push(Line::from(Span::styled(hint.to_string(), hint_style())));
+    rows.push((
+        Line::from(Span::styled(hint.to_string(), hint_style())),
+        None,
+    ));
 
-    frame.render_widget(
-        Paragraph::new(Text::from(lines)).wrap(Wrap { trim: false }),
-        inner,
-    );
+    for (index, (line, caret)) in rows.into_iter().enumerate() {
+        let y = inner.y.saturating_add(index as u16);
+        if y >= inner.y.saturating_add(inner.height) {
+            break;
+        }
+        frame.render_widget(Paragraph::new(line), Rect::new(inner.x, y, inner.width, 1));
+        if let Some(column) = caret {
+            frame.set_cursor_position((inner.x + column, y));
+        }
+    }
 }
 
 /// Draws the chat screen.
 pub fn draw_chat(frame: &mut Frame, chat: &ChatState) {
     let area = frame.area();
+    let matches = chat.command_matches();
+    let suggestions_height = if matches.is_empty() {
+        0
+    } else {
+        (matches.len() as u16 + 2).min(8)
+    };
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Min(3),
+            Constraint::Length(suggestions_height),
             Constraint::Length(3),
             Constraint::Length(1),
         ])
         .split(area);
     draw_transcript(frame, chat, chunks[0]);
-    draw_input(frame, chat, chunks[1]);
-    draw_status(frame, chat, chunks[2]);
+    if !matches.is_empty() {
+        draw_suggestions(frame, &matches, chunks[1]);
+    }
+    draw_input(frame, chat, chunks[2]);
+    draw_status(frame, chat, chunks[3]);
+}
+
+fn draw_suggestions(frame: &mut Frame, matches: &[&'static CommandSpec], area: Rect) {
+    let block = Block::default().borders(Borders::ALL).title(" commands ");
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+    if inner.height == 0 {
+        return;
+    }
+    let lines: Vec<Line<'static>> = matches
+        .iter()
+        .take(inner.height as usize)
+        .map(|command| {
+            let usage = if command.args.is_empty() {
+                command.name.to_string()
+            } else {
+                format!("{} {}", command.name, command.args)
+            };
+            Line::from(vec![
+                Span::styled(format!(" {usage:<24}"), focused_style()),
+                Span::raw(command.description.to_string()),
+            ])
+        })
+        .collect();
+    frame.render_widget(Paragraph::new(lines), inner);
 }
 
 fn draw_transcript(frame: &mut Frame, chat: &ChatState, area: Rect) {
@@ -140,6 +186,9 @@ fn draw_transcript(frame: &mut Frame, chat: &ChatState, area: Rect) {
     let inner_height = area.height.saturating_sub(2) as usize;
     let mut lines: Vec<Line<'static>> = Vec::new();
     for entry in &chat.transcript {
+        if matches!(entry, Entry::Reasoning(_)) && !chat.show_thinking {
+            continue;
+        }
         lines.extend(entry_lines(entry, inner_width));
     }
     let max_scroll = lines.len().saturating_sub(inner_height);
@@ -164,10 +213,13 @@ fn draw_input(frame: &mut Frame, chat: &ChatState, area: Rect) {
     let block = Block::default().borders(Borders::ALL).title(title);
     let inner = block.inner(area);
     frame.render_widget(block, area);
-    let width = inner.width.max(1) as usize;
+    if inner.width == 0 || inner.height == 0 {
+        return;
+    }
     let cursor_chars = chat.input.text()[..chat.input.cursor()].chars().count();
-    let spans = input_spans(chat.input.text(), cursor_chars, width);
-    frame.render_widget(Paragraph::new(Line::from(spans)), inner);
+    let (visible, column) = input_window(chat.input.text(), cursor_chars, inner.width as usize);
+    frame.render_widget(Paragraph::new(visible), inner);
+    frame.set_cursor_position((inner.x + column, inner.y));
 }
 
 fn draw_status(frame: &mut Frame, chat: &ChatState, area: Rect) {
@@ -200,7 +252,7 @@ fn field_line(
     focused: bool,
     width: usize,
     masked: bool,
-) -> Line<'static> {
+) -> (Line<'static>, Option<u16>) {
     let style = if focused {
         focused_style()
     } else {
@@ -213,20 +265,26 @@ fn field_line(
     } else {
         input.text().to_string()
     };
+    // The masked form changes the character count, so its caret sits at
+    // the end of the visible value.
     let cursor_chars = if masked {
         value.chars().count()
     } else {
         input.text()[..input.cursor()].chars().count()
     };
     let available = width.saturating_sub(prefix_len + 2).max(1);
-    let mut spans = vec![Span::styled(prefix, style)];
-    spans.push(Span::styled("[", hint_style()));
-    spans.extend(input_spans(&value, cursor_chars, available));
-    spans.push(Span::styled("]", hint_style()));
-    Line::from(spans)
+    let (visible, column) = input_window(&value, cursor_chars, available);
+    let line = Line::from(vec![
+        Span::styled(prefix, style),
+        Span::styled("[", hint_style()),
+        Span::raw(visible),
+        Span::styled("]", hint_style()),
+    ]);
+    let caret = focused.then_some(prefix_len as u16 + 1 + column);
+    (line, caret)
 }
 
-fn effort_line(setup: &Setup, width: usize) -> Line<'static> {
+fn effort_line(setup: &Setup, width: usize) -> (Line<'static>, Option<u16>) {
     let focused = setup.field == 1;
     let prefix = "  Thinking  ";
     let selection = format!("‹ {} ›", setup.effort_label());
@@ -251,36 +309,23 @@ fn effort_line(setup: &Setup, width: usize) -> Line<'static> {
     if used < width {
         spans.push(Span::styled(hint.to_string(), hint_style()));
     }
-    Line::from(spans)
+    let caret = focused.then_some((prefix.chars().count() + selection.chars().count()) as u16);
+    (Line::from(spans), caret)
 }
 
-/// Renders `text` with the cursor rendered reversed; the view scrolls
-/// horizontally so the cursor stays visible within `width` columns.
-fn input_spans(text: &str, cursor_chars: usize, width: usize) -> Vec<Span<'static>> {
+/// The visible window of a single-line input and the caret's column in it.
+///
+/// The window scrolls horizontally so the caret stays visible.
+fn input_window(text: &str, cursor_chars: usize, width: usize) -> (String, u16) {
     let width = width.max(1);
     let chars: Vec<char> = text.chars().collect();
-    let scroll = cursor_chars.saturating_sub(width.saturating_sub(1));
-    let start = scroll.min(chars.len());
-    let end = (start + width).min(chars.len());
-    let mut spans = Vec::new();
-    let mut buffer = String::new();
-    for (index, ch) in chars.iter().enumerate().take(end).skip(start) {
-        if index == cursor_chars {
-            if !buffer.is_empty() {
-                spans.push(Span::raw(std::mem::take(&mut buffer)));
-            }
-            spans.push(Span::styled(ch.to_string(), cursor_style()));
-        } else {
-            buffer.push(*ch);
-        }
-    }
-    if !buffer.is_empty() {
-        spans.push(Span::raw(buffer));
-    }
-    if cursor_chars >= end && cursor_chars - start < width {
-        spans.push(Span::styled("▌".to_string(), cursor_style()));
-    }
-    spans
+    let scroll = cursor_chars
+        .saturating_sub(width.saturating_sub(1))
+        .min(chars.len());
+    let end = (scroll + width).min(chars.len());
+    let visible: String = chars[scroll..end].iter().collect();
+    let column = (cursor_chars - scroll).min(width - 1) as u16;
+    (visible, column)
 }
 
 /// Masks a secret, keeping the last four characters visible.
@@ -297,6 +342,7 @@ fn entry_lines(entry: &Entry, width: usize) -> Vec<Line<'static>> {
     let (label, style, body) = match entry {
         Entry::User(text) => ("you", user_style(), text.clone()),
         Entry::Assistant(text) => ("assistant", assistant_style(), text.clone()),
+        Entry::Reasoning(text) => ("thinking", reasoning_style(), text.clone()),
         Entry::ToolCall { name, arguments } => {
             ("tool", tool_style(), format!("{name}({arguments})"))
         }
@@ -382,9 +428,20 @@ mod tests {
     }
 
     #[test]
-    fn input_spans_show_a_cursor_when_empty() {
-        let spans = input_spans("", 0, 10);
-        assert_eq!(spans.len(), 1);
-        assert_eq!(spans[0].content, "▌");
+    fn input_window_scrolls_to_keep_the_caret_visible() {
+        // Caret mid-text: the window starts at zero, caret on "d".
+        let (visible, column) = input_window("abcdef", 3, 4);
+        assert_eq!(visible, "abcd");
+        assert_eq!(column, 3);
+
+        // Caret at the end: the window scrolls so the caret sits right
+        // after the last visible character.
+        let (visible, column) = input_window("abcdef", 6, 4);
+        assert_eq!(visible, "def");
+        assert_eq!(column, 3);
+
+        let (visible, column) = input_window("", 0, 10);
+        assert_eq!(visible, "");
+        assert_eq!(column, 0);
     }
 }
