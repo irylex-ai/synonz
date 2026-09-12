@@ -5,6 +5,7 @@ use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{Block, Borders, Clear, Paragraph};
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::app::{ChatState, CommandSpec, Entry, Status, TextInput, effort_label};
 use crate::setup::{PopupKind, Setup, Step};
@@ -307,8 +308,8 @@ fn draw_input(frame: &mut Frame, chat: &ChatState, area: Rect) {
     if inner.width == 0 || inner.height == 0 {
         return;
     }
-    let cursor_chars = chat.input.text()[..chat.input.cursor()].chars().count();
-    let (visible, column) = input_window(chat.input.text(), cursor_chars, inner.width as usize);
+    let (visible, column) =
+        input_window(chat.input.text(), chat.input.cursor(), inner.width as usize);
     frame.render_widget(Paragraph::new(visible), inner);
     frame.set_cursor_position((inner.x + column, inner.y));
 }
@@ -356,15 +357,11 @@ fn field_line(
     } else {
         input.text().to_string()
     };
-    // The masked form changes the character count, so its caret sits at
-    // the end of the visible value.
-    let cursor_chars = if masked {
-        value.chars().count()
-    } else {
-        input.text()[..input.cursor()].chars().count()
-    };
+    // The masked form changes the byte length, so its caret sits at the
+    // end of the visible value.
+    let cursor_bytes = if masked { value.len() } else { input.cursor() };
     let available = width.saturating_sub(prefix_len + 2).max(1);
-    let (visible, column) = input_window(&value, cursor_chars, available);
+    let (visible, column) = input_window(&value, cursor_bytes, available);
     let line = Line::from(vec![
         Span::styled(prefix, style),
         Span::styled("[", hint_style()),
@@ -452,16 +449,31 @@ fn start_row(setup: &Setup) -> (Line<'static>, Option<u16>) {
 
 /// The visible window of a single-line input and the caret's column in it.
 ///
-/// The window scrolls horizontally so the caret stays visible.
-fn input_window(text: &str, cursor_chars: usize, width: usize) -> (String, u16) {
+/// Columns are display cells (wide characters count two), and the window
+/// scrolls horizontally so the caret stays visible. `cursor_bytes` is a
+/// byte offset at a char boundary.
+fn input_window(text: &str, cursor_bytes: usize, width: usize) -> (String, u16) {
     let width = width.max(1);
-    let chars: Vec<char> = text.chars().collect();
-    let scroll = cursor_chars
-        .saturating_sub(width.saturating_sub(1))
-        .min(chars.len());
-    let end = (scroll + width).min(chars.len());
-    let visible: String = chars[scroll..end].iter().collect();
-    let column = (cursor_chars - scroll).min(width - 1) as u16;
+    let cursor_width = UnicodeWidthStr::width(&text[..cursor_bytes]);
+    let scroll = cursor_width.saturating_sub(width - 1);
+    let mut visible = String::new();
+    let mut visible_width = 0usize;
+    let mut skipped = 0usize;
+    let mut started = false;
+    for ch in text.chars() {
+        let ch_width = ch.width().unwrap_or(0);
+        if !started && skipped + ch_width <= scroll {
+            skipped += ch_width;
+            continue;
+        }
+        started = true;
+        if visible_width + ch_width > width {
+            break;
+        }
+        visible.push(ch);
+        visible_width += ch_width;
+    }
+    let column = cursor_width.saturating_sub(skipped).min(width - 1) as u16;
     (visible, column)
 }
 
@@ -506,44 +518,45 @@ fn entry_lines(entry: &Entry, width: usize) -> Vec<Line<'static>> {
     lines
 }
 
-/// Wraps text at `width` characters (spaces preferred; long words are
+/// Wraps text at `width` display columns (spaces preferred; long words are
 /// hard-broken). Newlines in the input always start a new line.
 fn wrap(text: &str, width: usize) -> Vec<String> {
     let width = width.max(1);
     let mut lines = Vec::new();
     for raw in text.split('\n') {
         let mut current = String::new();
-        let mut current_len = 0usize;
+        let mut current_width = 0usize;
         for word in raw.split(' ') {
-            let word_len = word.chars().count();
-            if current_len > 0 && current_len + 1 + word_len > width {
+            let word_width = UnicodeWidthStr::width(word);
+            if current_width > 0 && current_width + 1 + word_width > width {
                 lines.push(std::mem::take(&mut current));
-                current_len = 0;
+                current_width = 0;
             }
-            if word_len > width {
+            if word_width > width {
                 if !current.is_empty() {
                     lines.push(std::mem::take(&mut current));
                 }
                 let mut chunk = String::new();
-                let mut chunk_len = 0usize;
+                let mut chunk_width = 0usize;
                 for ch in word.chars() {
-                    if chunk_len == width {
+                    let ch_width = ch.width().unwrap_or(0);
+                    if chunk_width + ch_width > width {
                         lines.push(std::mem::take(&mut chunk));
-                        chunk_len = 0;
+                        chunk_width = 0;
                     }
                     chunk.push(ch);
-                    chunk_len += 1;
+                    chunk_width += ch_width;
                 }
                 current = chunk;
-                current_len = chunk_len;
+                current_width = chunk_width;
                 continue;
             }
-            if current_len > 0 {
+            if current_width > 0 {
                 current.push(' ');
-                current_len += 1;
+                current_width += 1;
             }
             current.push_str(word);
-            current_len += word_len;
+            current_width += word_width;
         }
         lines.push(current);
     }
@@ -577,8 +590,22 @@ mod tests {
         assert_eq!(visible, "def");
         assert_eq!(column, 3);
 
+        // Double-width characters occupy two display columns.
+        let (visible, column) = input_window("你好", 6, 10);
+        assert_eq!(visible, "你好");
+        assert_eq!(column, 4);
+
+        let (visible, column) = input_window("你好世界", 12, 4);
+        assert_eq!(visible, "世界");
+        assert_eq!(column, 3);
+
         let (visible, column) = input_window("", 0, 10);
         assert_eq!(visible, "");
         assert_eq!(column, 0);
+    }
+
+    #[test]
+    fn wrap_counts_double_width_characters() {
+        assert_eq!(wrap("你好世界", 4), vec!["你好", "世界"]);
     }
 }

@@ -22,6 +22,7 @@ synonz-anthropic.workspace = true
 synonz-mcp.workspace = true
 synonz-openai.workspace = true
 tokio = { workspace = true, features = ["full"] }
+unicode-width.workspace = true
 
 [[bin]]
 name = "custom_tool"

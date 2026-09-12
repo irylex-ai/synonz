@@ -2222,6 +2222,7 @@ dependencies = [
  "synonz-mcp",
  "synonz-openai",
  "tokio",
+ "unicode-width",
 ]
 
 [[package]]
