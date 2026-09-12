@@ -7,10 +7,12 @@ use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{Block, Borders, Clear, Paragraph};
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
-use crate::app::{ChatState, CommandSpec, Entry, Status, TextInput, effort_label};
+use crate::app::{ChatState, CommandSpec, Entry, Focus, Status, TextInput, effort_label};
 use crate::setup::{PopupKind, Setup, Step};
 
 const SPINNER: [&str; 4] = ["|", "/", "-", "\\"];
+/// Below this width the trace box is hidden (the chat needs the room).
+const TRACE_MIN_WIDTH: u16 = 80;
 
 fn user_style() -> Style {
     Style::default().fg(Color::Cyan)
@@ -221,30 +223,44 @@ fn centered_rect(area: Rect, percent_x: u16, percent_y: u16) -> Rect {
         .split(vertical[1])[1]
 }
 
-/// Draws the chat screen.
-pub fn draw_chat(frame: &mut Frame, chat: &ChatState) {
+/// Draws the chat screen: transcript and input on the left, the latest
+/// model request on the right (hidden on narrow terminals).
+pub fn draw_chat(frame: &mut Frame, chat: &mut ChatState) {
     let area = frame.area();
+    let (left, trace_area) = if area.width >= TRACE_MIN_WIDTH {
+        let columns = Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([Constraint::Min(40), Constraint::Percentage(32)])
+            .split(area);
+        (columns[0], Some(columns[1]))
+    } else {
+        (area, None)
+    };
+    chat.trace_area = trace_area;
+
     let matches = chat.command_matches();
     let suggestions_height = if matches.is_empty() {
         0
     } else {
         (matches.len() as u16 + 2).min(8)
     };
-    let chunks = Layout::default()
+    let rows = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Min(3),
             Constraint::Length(suggestions_height),
             Constraint::Length(3),
-            Constraint::Length(1),
         ])
-        .split(area);
-    draw_transcript(frame, chat, chunks[0]);
+        .split(left);
+    chat.chat_area = rows[0];
+    draw_transcript(frame, chat, rows[0]);
     if !matches.is_empty() {
-        draw_suggestions(frame, &matches, chunks[1]);
+        draw_suggestions(frame, &matches, rows[1]);
     }
-    draw_input(frame, chat, chunks[2]);
-    draw_status(frame, chat, chunks[3]);
+    draw_input(frame, chat, rows[2]);
+    if let Some(area) = trace_area {
+        draw_trace(frame, chat, area);
+    }
 }
 
 fn draw_suggestions(frame: &mut Frame, matches: &[&'static CommandSpec], area: Rect) {
@@ -272,10 +288,39 @@ fn draw_suggestions(frame: &mut Frame, matches: &[&'static CommandSpec], area: R
     frame.render_widget(Paragraph::new(lines), inner);
 }
 
-fn draw_transcript(frame: &mut Frame, chat: &ChatState, area: Rect) {
-    let block = Block::default().borders(Borders::ALL).title(" chat ");
-    let inner_width = area.width.saturating_sub(2).max(8) as usize;
-    let inner_height = area.height.saturating_sub(2) as usize;
+/// The border style of a box: highlighted while it owns the focus.
+fn border_style(focused: bool) -> Style {
+    if focused {
+        Style::default().fg(Color::Cyan)
+    } else {
+        Style::default().fg(Color::DarkGray)
+    }
+}
+
+fn draw_transcript(frame: &mut Frame, chat: &mut ChatState, area: Rect) {
+    let focused = chat.focus == Focus::Chat;
+    let state = match chat.status {
+        Status::Idle => "idle".to_string(),
+        Status::Running => format!("running {}", SPINNER[chat.spinner % SPINNER.len()]),
+    };
+    let title = format!(
+        " chat │ {} · thinking {} · {} ",
+        chat.model,
+        effort_label(chat.effort),
+        state
+    );
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title(title)
+        .border_style(border_style(focused));
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+    if inner.width == 0 || inner.height == 0 {
+        chat.last_max_scroll = 0;
+        return;
+    }
+    let inner_width = inner.width.max(8) as usize;
+    let inner_height = inner.height as usize;
     let mut lines: Vec<Line<'static>> = Vec::new();
     for entry in &chat.transcript {
         if matches!(entry, Entry::Reasoning(_)) && !chat.show_thinking {
@@ -284,25 +329,46 @@ fn draw_transcript(frame: &mut Frame, chat: &ChatState, area: Rect) {
         lines.extend(entry_lines(entry, inner_width));
     }
     let max_scroll = lines.len().saturating_sub(inner_height);
+    chat.last_max_scroll = max_scroll.min(u16::MAX as usize) as u16;
     let offset = if chat.follow {
         max_scroll
     } else {
         (chat.scroll as usize).min(max_scroll)
     };
     frame.render_widget(
-        Paragraph::new(Text::from(lines))
-            .block(block)
-            .scroll((offset.min(u16::MAX as usize) as u16, 0)),
-        area,
+        Paragraph::new(Text::from(lines)).scroll((offset.min(u16::MAX as usize) as u16, 0)),
+        inner,
     );
+    if chat.paused {
+        let marker = Rect::new(
+            inner.x + inner.width.saturating_sub(8),
+            inner.y + inner.height.saturating_sub(1),
+            inner.width.min(8),
+            1,
+        );
+        frame.render_widget(
+            Paragraph::new(Span::styled(
+                " ↓ new ",
+                Style::default()
+                    .fg(Color::Black)
+                    .bg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD),
+            )),
+            marker,
+        );
+    }
 }
 
 fn draw_input(frame: &mut Frame, chat: &ChatState, area: Rect) {
+    let focused = chat.focus == Focus::Input;
     let title = match chat.status {
-        Status::Idle => " message ",
+        Status::Idle => " message │ Enter send · Esc cancel · Tab focus ",
         Status::Running => " message (running — Esc cancels) ",
     };
-    let block = Block::default().borders(Borders::ALL).title(title);
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title(title)
+        .border_style(border_style(focused));
     let inner = block.inner(area);
     frame.render_widget(block, area);
     if inner.width == 0 || inner.height == 0 {
@@ -311,31 +377,67 @@ fn draw_input(frame: &mut Frame, chat: &ChatState, area: Rect) {
     let (visible, column) =
         input_window(chat.input.text(), chat.input.cursor(), inner.width as usize);
     frame.render_widget(Paragraph::new(visible), inner);
-    frame.set_cursor_position((inner.x + column, inner.y));
+    if focused {
+        frame.set_cursor_position((inner.x + column, inner.y));
+    }
 }
 
-fn draw_status(frame: &mut Frame, chat: &ChatState, area: Rect) {
-    let state = match chat.status {
-        Status::Idle => "idle".to_string(),
-        Status::Running => format!("running {}", SPINNER[chat.spinner % SPINNER.len()]),
-    };
-    let state_style = if chat.status == Status::Running {
-        tool_style()
-    } else {
-        note_style()
-    };
-    let line = Line::from(vec![
-        Span::styled(format!(" {} ", chat.model), assistant_style()),
-        Span::styled("· ", hint_style()),
-        Span::styled(
-            format!("thinking {} ", effort_label(chat.effort)),
-            note_style(),
+/// Draws the latest model request (the bus observer's trace).
+fn draw_trace(frame: &mut Frame, chat: &mut ChatState, area: Rect) {
+    let focused = chat.focus == Focus::Trace;
+    let entry = chat.trace.latest();
+    let title = match &entry {
+        Some(entry) => format!(
+            " trace #{} │ round {} · {} ",
+            entry.number,
+            entry
+                .round
+                .map(|round| round.to_string())
+                .unwrap_or_else(|| "–".to_string()),
+            entry.purpose
         ),
-        Span::styled("· ", hint_style()),
-        Span::styled(format!("{state} "), state_style),
-        Span::styled(" · Enter send · Esc cancel · Ctrl+C quit", hint_style()),
-    ]);
-    frame.render_widget(Paragraph::new(line), area);
+        None => " trace │ no request yet ".to_string(),
+    };
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title(title)
+        .border_style(border_style(focused));
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+    if inner.width == 0 || inner.height == 0 {
+        chat.last_trace_max = 0;
+        return;
+    }
+    let Some(entry) = entry else {
+        chat.last_trace_max = 0;
+        frame.render_widget(
+            Paragraph::new(Span::styled(
+                "(no model request yet — the trace appears on the first turn)",
+                hint_style(),
+            )),
+            inner,
+        );
+        return;
+    };
+    chat.sync_trace(&entry);
+    let header = format!(
+        "{} messages · tools: read_file, list_dir, file_info",
+        entry.messages.len()
+    );
+    let json = serde_json::to_string_pretty(&entry.messages)
+        .unwrap_or_else(|error| format!("<unserializable: {error}>"));
+    let mut lines: Vec<Line<'static>> = vec![
+        Line::from(Span::styled(header, hint_style())),
+        Line::default(),
+    ];
+    lines.extend(json.lines().map(|line| Line::raw(line.to_string())));
+    let max_scroll = lines.len().saturating_sub(inner.height as usize);
+    chat.last_trace_max = max_scroll.min(u16::MAX as usize) as u16;
+    let offset = (chat.trace_scroll as usize).min(max_scroll);
+    frame.render_widget(
+        Paragraph::new(lines).scroll((offset.min(u16::MAX as usize) as u16, 0)),
+        inner,
+    );
 }
 
 fn field_line(

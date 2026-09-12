@@ -1,8 +1,19 @@
-//! Application state: the transcript, input editing, and turn status.
+//! Application state: the transcript, input editing, scrolling, focus, and
+//! the latest model-request trace.
+
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 
 use crossterm::event::KeyCode;
-use synonz::{ExecutionEvent, ModelDelta, ToolContent, ToolResult};
+use ratatui::layout::Rect;
+use synonz::{
+    ExecutionEvent, Message, ModelDelta, ModelEvent, Observer, ObserverContext, SynonzEvent,
+    ToolContent, ToolResult, TurnEvent,
+};
 use synonz_openai::ReasoningEffort;
+
+/// Lines moved by one page-scroll key.
+const SCROLL_PAGE: u16 = 5;
 
 /// A character-safe single-line text input with a cursor.
 #[derive(Debug, Clone)]
@@ -127,18 +138,88 @@ pub enum Status {
     Running,
 }
 
+/// Which box receives scrolling keys.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Focus {
+    /// The message input box.
+    Input,
+    /// The transcript box.
+    Chat,
+    /// The trace box.
+    Trace,
+}
+
+/// One recorded model request (the bus observer's trace payload).
+pub struct TraceEntry {
+    /// Monotonic request number (1-based).
+    pub number: usize,
+    /// The reasoning-loop round, when inside the loop.
+    pub round: Option<usize>,
+    /// The call purpose (a debug label).
+    pub purpose: String,
+    /// The full canonical message list sent to the model.
+    pub messages: Vec<Message>,
+}
+
+/// The latest model request, shared between the bus observer and the UI.
+#[derive(Clone, Default)]
+pub struct TraceStore {
+    inner: Arc<Mutex<Option<Arc<TraceEntry>>>>,
+    counter: Arc<AtomicUsize>,
+}
+
+impl TraceStore {
+    /// Records one model request as the latest trace entry.
+    pub fn record(&self, round: Option<usize>, purpose: String, messages: Vec<Message>) {
+        let number = self.counter.fetch_add(1, Ordering::Relaxed) + 1;
+        let entry = Arc::new(TraceEntry {
+            number,
+            round,
+            purpose,
+            messages,
+        });
+        *self
+            .inner
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(entry);
+    }
+
+    /// The latest recorded request, if any.
+    pub fn latest(&self) -> Option<Arc<TraceEntry>> {
+        self.inner
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
+    }
+}
+
+impl Observer for TraceStore {
+    fn on_event(&self, _ctx: &ObserverContext, event: &SynonzEvent) {
+        if let SynonzEvent::Turn(TurnEvent::Model(ModelEvent::Requested {
+            purpose,
+            messages,
+            round,
+        })) = event
+        {
+            self.record(*round, format!("{purpose:?}"), messages.clone());
+        }
+    }
+}
+
 /// The chat state.
 pub struct ChatState {
     /// The rendered transcript.
     pub transcript: Vec<Entry>,
     /// The input line.
     pub input: TextInput,
-    /// The current model name (status bar + `/model`).
+    /// The current model name (chat box title + `/model`).
     pub model: String,
-    /// The current thinking option (status bar + `/effort`).
+    /// The current thinking option (chat box title + `/effort`).
     pub effort: Option<ReasoningEffort>,
     /// Whether the model's thinking output is displayed.
     pub show_thinking: bool,
+    /// The box that receives scrolling keys.
+    pub focus: Focus,
     /// Sent messages (for history recall).
     pub history: Vec<String>,
     /// The history position while recalling (`None` = editing).
@@ -149,6 +230,22 @@ pub struct ChatState {
     pub scroll: u16,
     /// Whether the view follows new output.
     pub follow: bool,
+    /// Whether the view is paused above the bottom while content arrived.
+    pub paused: bool,
+    /// The last rendered transcript max-scroll (for anchoring).
+    pub last_max_scroll: u16,
+    /// The transcript area (mouse hit-testing).
+    pub chat_area: Rect,
+    /// The trace area (mouse hit-testing; `None` when hidden).
+    pub trace_area: Option<Rect>,
+    /// The latest model-request trace.
+    pub trace: TraceStore,
+    /// The trace box's top line offset.
+    pub trace_scroll: u16,
+    /// The trace request number currently rendered.
+    pub trace_seen: usize,
+    /// The last rendered trace max-scroll.
+    pub last_trace_max: u16,
     /// The turn status.
     pub status: Status,
     /// The spinner frame.
@@ -170,11 +267,20 @@ impl ChatState {
             model,
             effort,
             show_thinking: true,
+            focus: Focus::Input,
             history: Vec::new(),
             history_pos: None,
             draft: String::new(),
             scroll: 0,
             follow: true,
+            paused: false,
+            last_max_scroll: 0,
+            chat_area: Rect::new(0, 0, 0, 0),
+            trace_area: None,
+            trace: TraceStore::default(),
+            trace_scroll: 0,
+            trace_seen: 0,
+            last_trace_max: 0,
             status: Status::Idle,
             spinner: 0,
             should_quit: false,
@@ -183,13 +289,14 @@ impl ChatState {
         }
     }
 
-    /// Records a sent user message (transcript + history).
+    /// Records a sent user message (transcript + history) and follows it.
     pub fn push_user(&mut self, text: &str) {
         self.transcript.push(Entry::User(text.to_string()));
         self.history.push(text.to_string());
         self.history_pos = None;
         self.draft.clear();
         self.follow = true;
+        self.paused = false;
     }
 
     /// Applies one execution event; returns `true` at the terminal event.
@@ -207,7 +314,7 @@ impl ChatState {
                         self.streaming = Some(self.transcript.len() - 1);
                     }
                 }
-                self.follow = true;
+                self.mark_new_content();
                 false
             }
             ExecutionEvent::Delta(ModelDelta::Reasoning { text }) => {
@@ -222,7 +329,7 @@ impl ChatState {
                         self.reasoning_streaming = Some(self.transcript.len() - 1);
                     }
                 }
-                self.follow = true;
+                self.mark_new_content();
                 false
             }
             ExecutionEvent::ToolRequested(call) => {
@@ -230,6 +337,7 @@ impl ChatState {
                     name: call.name.clone(),
                     arguments: summarize_arguments(&call.arguments),
                 });
+                self.mark_new_content();
                 false
             }
             ExecutionEvent::ToolCompleted { result, .. } => {
@@ -239,6 +347,7 @@ impl ChatState {
                     _ => (true, "done".to_string()),
                 };
                 self.transcript.push(Entry::ToolResult { ok, summary });
+                self.mark_new_content();
                 false
             }
             ExecutionEvent::Completed(output) => {
@@ -304,24 +413,96 @@ impl ChatState {
         }
     }
 
-    /// Applies a scroll/navigation key.
-    pub fn handle_scroll_key(&mut self, code: KeyCode) {
+    /// Advances the focus cycle: input → chat → trace → input.
+    pub fn cycle_focus(&mut self) {
+        self.focus = match self.focus {
+            Focus::Input => Focus::Chat,
+            Focus::Chat => Focus::Trace,
+            Focus::Trace => Focus::Input,
+        };
+    }
+
+    /// Marks that content arrived while the view was paused.
+    pub fn mark_new_content(&mut self) {
+        if !self.follow {
+            self.paused = true;
+        }
+    }
+
+    /// Scrolls the transcript by `delta` lines (negative = up).
+    ///
+    /// Scrolling up from the bottom anchors at the current position first;
+    /// scrolling back to the bottom resumes follow.
+    pub fn scroll_lines(&mut self, delta: i32) {
+        if delta < 0 {
+            let step = (-delta) as u16;
+            if self.follow {
+                self.follow = false;
+                self.scroll = self.last_max_scroll.saturating_sub(step);
+            } else {
+                self.scroll = self.scroll.saturating_sub(step);
+            }
+        } else {
+            self.scroll = self.scroll.saturating_add(delta as u16);
+            if self.scroll >= self.last_max_scroll {
+                self.scroll_end();
+            }
+        }
+    }
+
+    /// Jumps the transcript to the top and pauses follow.
+    pub fn scroll_home(&mut self) {
+        self.follow = false;
+        self.scroll = 0;
+    }
+
+    /// Jumps the transcript to the bottom and resumes follow.
+    pub fn scroll_end(&mut self) {
+        self.follow = true;
+        self.scroll = self.last_max_scroll;
+        self.paused = false;
+    }
+
+    /// Applies one transcript scroll key.
+    pub fn scroll_key(&mut self, code: KeyCode) {
         match code {
-            KeyCode::PageUp => {
-                self.follow = false;
-                self.scroll = self.scroll.saturating_sub(5);
-            }
-            KeyCode::PageDown => {
-                self.scroll = self.scroll.saturating_add(5);
-            }
-            KeyCode::Home => {
-                self.follow = false;
-                self.scroll = 0;
-            }
-            KeyCode::End => {
-                self.follow = true;
-            }
+            KeyCode::Up => self.scroll_lines(-1),
+            KeyCode::Down => self.scroll_lines(1),
+            KeyCode::PageUp => self.scroll_lines(-(SCROLL_PAGE as i32)),
+            KeyCode::PageDown => self.scroll_lines(SCROLL_PAGE as i32),
+            KeyCode::Home => self.scroll_home(),
+            KeyCode::End => self.scroll_end(),
             _ => {}
+        }
+    }
+
+    /// Scrolls the trace by `delta` lines (negative = up).
+    pub fn trace_scroll_lines(&mut self, delta: i32) {
+        if delta < 0 {
+            self.trace_scroll = self.trace_scroll.saturating_sub((-delta) as u16);
+        } else {
+            self.trace_scroll = self.trace_scroll.saturating_add(delta as u16);
+        }
+    }
+
+    /// Applies one trace scroll key.
+    pub fn trace_scroll_key(&mut self, code: KeyCode) {
+        match code {
+            KeyCode::Up => self.trace_scroll_lines(-1),
+            KeyCode::Down => self.trace_scroll_lines(1),
+            KeyCode::PageUp => self.trace_scroll_lines(-(SCROLL_PAGE as i32)),
+            KeyCode::PageDown => self.trace_scroll_lines(SCROLL_PAGE as i32),
+            KeyCode::Home => self.trace_scroll = 0,
+            KeyCode::End => self.trace_scroll = self.last_trace_max,
+            _ => {}
+        }
+    }
+
+    /// Resets the trace scroll to the top when a new request arrives.
+    pub fn sync_trace(&mut self, entry: &TraceEntry) {
+        if self.trace_seen != entry.number {
+            self.trace_seen = entry.number;
+            self.trace_scroll = 0;
         }
     }
 
@@ -434,7 +615,7 @@ fn truncate_chars(text: &str, limit: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use synonz::{AgentOutput, CallId, Message, TokenUsage, ToolCall};
+    use synonz::{AgentOutput, CallId, TokenUsage, ToolCall};
 
     fn completed(text: &str) -> ExecutionEvent {
         ExecutionEvent::Completed(AgentOutput::new(
@@ -562,5 +743,72 @@ mod tests {
         assert_eq!(chat.input.text(), "two");
         chat.history_next();
         assert_eq!(chat.input.text(), "draft");
+    }
+
+    #[test]
+    fn focus_cycles_input_chat_trace() {
+        let mut chat = ChatState::new("test-model".to_string(), None);
+        assert_eq!(chat.focus, Focus::Input);
+        chat.cycle_focus();
+        assert_eq!(chat.focus, Focus::Chat);
+        chat.cycle_focus();
+        assert_eq!(chat.focus, Focus::Trace);
+        chat.cycle_focus();
+        assert_eq!(chat.focus, Focus::Input);
+    }
+
+    #[test]
+    fn scrolling_anchors_and_resumes_follow() {
+        let mut chat = ChatState::new("test-model".to_string(), None);
+        chat.last_max_scroll = 100;
+        chat.scroll_lines(-5);
+        assert!(!chat.follow);
+        assert_eq!(chat.scroll, 95, "scrolling up anchors at the bottom first");
+        chat.scroll_lines(5);
+        assert!(chat.follow, "reaching the bottom resumes follow");
+        assert_eq!(chat.scroll, 100);
+        chat.scroll_home();
+        assert!(!chat.follow);
+        assert_eq!(chat.scroll, 0);
+        chat.scroll_end();
+        assert!(chat.follow);
+        assert_eq!(chat.scroll, 100);
+    }
+
+    #[test]
+    fn new_content_while_paused_sets_the_indicator() {
+        let mut chat = ChatState::new("test-model".to_string(), None);
+        chat.last_max_scroll = 50;
+        chat.scroll_lines(-1);
+        assert!(!chat.follow);
+        assert!(!chat.paused);
+        chat.mark_new_content();
+        assert!(chat.paused);
+        chat.scroll_end();
+        assert!(!chat.paused);
+    }
+
+    #[test]
+    fn trace_scroll_resets_on_a_new_request() {
+        let mut chat = ChatState::new("test-model".to_string(), None);
+        chat.last_trace_max = 30;
+        chat.trace_scroll_key(KeyCode::PageDown);
+        assert_eq!(chat.trace_scroll, 5);
+        chat.trace_scroll_key(KeyCode::End);
+        assert_eq!(chat.trace_scroll, 30);
+        chat.trace_scroll_key(KeyCode::Up);
+        assert_eq!(chat.trace_scroll, 29);
+
+        let entry = TraceEntry {
+            number: 1,
+            round: Some(1),
+            purpose: "Reasoning".to_string(),
+            messages: Vec::new(),
+        };
+        chat.sync_trace(&entry);
+        assert_eq!(chat.trace_scroll, 0, "a new request resets to the top");
+        chat.trace_scroll_key(KeyCode::Down);
+        chat.sync_trace(&entry);
+        assert_eq!(chat.trace_scroll, 1, "the same request keeps the scroll");
     }
 }

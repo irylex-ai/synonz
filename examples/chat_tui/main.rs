@@ -5,8 +5,11 @@
 //! The startup wizard asks for the endpoint and API key (pre-filled from
 //! `SYNONZ_OPENAI_API_KEY` / `SYNONZ_OPENAI_BASE_URL` / `SYNONZ_OPENAI_MODEL`
 //! when set), then for the model and thinking level. In chat: Enter sends,
-//! Esc cancels the running turn, `/model <name>` and `/effort <level>`
-//! apply at runtime (no rebuild), Ctrl+C quits.
+//! Esc cancels the running turn, Tab cycles the focus (input → chat →
+//! trace), the focused box scrolls with ↑/↓ and PgUp/PgDn, the mouse wheel
+//! scrolls the box under the pointer, `/model <name>` and `/effort <level>`
+//! apply at runtime (no rebuild), Ctrl+C quits. The right box shows the
+//! latest model request (the bus observer's trace).
 
 mod app;
 mod setup;
@@ -18,7 +21,10 @@ use std::panic;
 use std::time::Duration;
 
 use crossterm::cursor::Show;
-use crossterm::event::{Event, EventStream, KeyCode, KeyEvent, KeyModifiers};
+use crossterm::event::{
+    DisableMouseCapture, EnableMouseCapture, Event, EventStream, KeyCode, KeyEvent, KeyModifiers,
+    MouseEvent, MouseEventKind,
+};
 use crossterm::execute;
 use crossterm::terminal::{
     EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
@@ -26,10 +32,11 @@ use crossterm::terminal::{
 use futures::StreamExt;
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
+use ratatui::layout::Position;
 use synonz::{Agent, Conversation, Subject, SubjectType, SynonzRuntime};
 use synonz_openai::{Client, ReasoningEffort};
 
-use app::{ChatState, Entry, Status};
+use app::{ChatState, Entry, Focus, Status, TraceStore};
 use setup::{Outcome, Setup};
 
 /// The agent's system prompt (tools + sandbox explained to the model).
@@ -45,27 +52,6 @@ Keep answers concise.";
 
 /// The terminal type used throughout.
 type ChatTerminal = Terminal<CrosstermBackend<io::Stdout>>;
-
-/// Wraps the model to dump each outgoing canonical request when
-/// `SYNONZ_CHAT_TUI_TRACE` is set (protocol debugging aid).
-struct TracedModel {
-    inner: Client,
-}
-
-impl synonz::Model for TracedModel {
-    fn stream(
-        &self,
-        request: synonz::ModelRequest,
-    ) -> synonz::BoxFuture<'_, Result<synonz::ModelStream, synonz::ModelError>> {
-        if std::env::var_os("SYNONZ_CHAT_TUI_TRACE").is_some() {
-            match serde_json::to_string(&request.messages) {
-                Ok(json) => eprintln!("[chat_tui trace] messages: {json}"),
-                Err(error) => eprintln!("[chat_tui trace] unserializable: {error}"),
-            }
-        }
-        self.inner.stream(request)
-    }
-}
 
 #[tokio::main]
 async fn main() -> io::Result<()> {
@@ -107,7 +93,8 @@ async fn run(terminal: &mut ChatTerminal) -> io::Result<()> {
     };
 
     // ---- session ------------------------------------------------------
-    let runtime = SynonzRuntime::builder().build();
+    let trace = TraceStore::default();
+    let runtime = SynonzRuntime::builder().observer(trace.clone()).build();
     let client = Client::new(base_url, api_key, model.clone());
     if let Some(effort) = effort {
         let mut options = client.options();
@@ -116,9 +103,7 @@ async fn run(terminal: &mut ChatTerminal) -> io::Result<()> {
     }
     let agent = Agent::builder()
         .runtime(&runtime)
-        .model(TracedModel {
-            inner: client.clone(),
-        })
+        .model(client.clone())
         .system_prompt(SYSTEM_PROMPT)
         .tool(tools::ReadFile {
             path: String::new(),
@@ -133,6 +118,7 @@ async fn run(terminal: &mut ChatTerminal) -> io::Result<()> {
     let subject = Subject::of(SubjectType::User, "chat-tui");
     let mut conversation = Conversation::new(&runtime, &subject);
     let mut chat = ChatState::new(model, effort);
+    chat.trace = trace;
     chat.transcript.push(Entry::Note(format!(
         "connected · {} · thinking {} · tools: read_file, list_dir, file_info (sandboxed to the working directory)",
         chat.model,
@@ -140,36 +126,58 @@ async fn run(terminal: &mut ChatTerminal) -> io::Result<()> {
     )));
 
     while !chat.should_quit {
-        terminal.draw(|frame| ui::draw_chat(frame, &chat))?;
+        terminal.draw(|frame| ui::draw_chat(frame, &mut chat))?;
         match events.next().await {
             Some(Ok(Event::Key(key))) => {
                 if is_ctrl_c(&key) {
                     break;
                 }
-                if key.code == KeyCode::Enter && chat.status == Status::Idle {
-                    let line = chat.input.take();
-                    let line = line.trim().to_string();
-                    if line.is_empty() {
-                        continue;
+                // Tab completes a visible slash command; otherwise it
+                // cycles the focus (input → chat → trace).
+                if key.code == KeyCode::Tab
+                    && chat.focus == Focus::Input
+                    && !chat.command_matches().is_empty()
+                {
+                    chat.complete_command();
+                    continue;
+                }
+                if key.code == KeyCode::Tab {
+                    chat.cycle_focus();
+                    continue;
+                }
+                if key.code == KeyCode::Esc && chat.focus != Focus::Input {
+                    chat.focus = Focus::Input;
+                    continue;
+                }
+                if chat.focus == Focus::Input {
+                    if key.code == KeyCode::Enter && chat.status == Status::Idle {
+                        let line = chat.input.take();
+                        let line = line.trim().to_string();
+                        if line.is_empty() {
+                            continue;
+                        }
+                        if let Some(command) = line.strip_prefix('/') {
+                            handle_command(command, &client, &mut chat);
+                            continue;
+                        }
+                        chat.push_user(&line);
+                        run_turn(
+                            terminal,
+                            &agent,
+                            &mut conversation,
+                            &mut chat,
+                            &mut events,
+                            &line,
+                        )
+                        .await?;
+                    } else {
+                        apply_input_key(&mut chat, key);
                     }
-                    if let Some(command) = line.strip_prefix('/') {
-                        handle_command(command, &client, &mut chat);
-                        continue;
-                    }
-                    chat.push_user(&line);
-                    run_turn(
-                        terminal,
-                        &agent,
-                        &mut conversation,
-                        &mut chat,
-                        &mut events,
-                        &line,
-                    )
-                    .await?;
                 } else {
-                    apply_input_key(&mut chat, key);
+                    handle_scroll_key(&mut chat, &key);
                 }
             }
+            Some(Ok(Event::Mouse(mouse))) => handle_mouse(&mut chat, mouse),
             Some(Ok(Event::Resize(..))) => {}
             Some(Ok(_)) => {}
             Some(Err(_)) | None => break,
@@ -216,12 +224,19 @@ async fn run_turn(
                     if is_ctrl_c(&key) {
                         chat.should_quit = true;
                         execution.cancel();
+                    } else if key.code == KeyCode::Tab {
+                        chat.cycle_focus();
                     } else if key.code == KeyCode::Esc {
-                        execution.cancel();
+                        if chat.focus != Focus::Input {
+                            chat.focus = Focus::Input;
+                        } else {
+                            execution.cancel();
+                        }
                     } else {
-                        chat.handle_scroll_key(key.code);
+                        handle_scroll_key(chat, &key);
                     }
                 }
+                Some(Ok(Event::Mouse(mouse))) => handle_mouse(chat, mouse),
                 Some(Ok(_)) => {}
                 Some(Err(_)) | None => {
                     chat.should_quit = true;
@@ -341,11 +356,33 @@ fn apply_input_key(chat: &mut ChatState, key: KeyEvent) {
         KeyCode::End => chat.input.end(),
         KeyCode::Up => chat.history_prev(),
         KeyCode::Down => chat.history_next(),
-        KeyCode::Tab => {
-            chat.complete_command();
-        }
-        KeyCode::PageUp | KeyCode::PageDown => chat.handle_scroll_key(key.code),
         _ => {}
+    }
+}
+
+/// Routes a scrolling key to the focused box.
+fn handle_scroll_key(chat: &mut ChatState, key: &KeyEvent) {
+    match chat.focus {
+        Focus::Chat => chat.scroll_key(key.code),
+        Focus::Trace => chat.trace_scroll_key(key.code),
+        Focus::Input => {}
+    }
+}
+
+/// Routes a mouse wheel tick to the box under the pointer.
+fn handle_mouse(chat: &mut ChatState, mouse: MouseEvent) {
+    let delta = match mouse.kind {
+        MouseEventKind::ScrollUp => -3,
+        MouseEventKind::ScrollDown => 3,
+        _ => return,
+    };
+    let over_trace = chat
+        .trace_area
+        .is_some_and(|area| area.contains(Position::new(mouse.column, mouse.row)));
+    if over_trace {
+        chat.trace_scroll_lines(delta);
+    } else {
+        chat.scroll_lines(delta);
     }
 }
 
@@ -356,7 +393,7 @@ fn is_ctrl_c(key: &KeyEvent) -> bool {
 fn setup_terminal() -> io::Result<ChatTerminal> {
     enable_raw_mode()?;
     let mut stdout = io::stdout();
-    execute!(stdout, EnterAlternateScreen)?;
+    execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
     let mut terminal = Terminal::new(CrosstermBackend::new(stdout))?;
     terminal.clear()?;
     Ok(terminal)
@@ -364,7 +401,12 @@ fn setup_terminal() -> io::Result<ChatTerminal> {
 
 fn restore_terminal(terminal: &mut ChatTerminal) -> io::Result<()> {
     disable_raw_mode()?;
-    execute!(terminal.backend_mut(), LeaveAlternateScreen, Show)?;
+    execute!(
+        terminal.backend_mut(),
+        LeaveAlternateScreen,
+        DisableMouseCapture,
+        Show
+    )?;
     terminal.show_cursor()
 }
 
@@ -373,7 +415,12 @@ fn install_panic_hook() {
     let original = panic::take_hook();
     panic::set_hook(Box::new(move |info| {
         let _ = disable_raw_mode();
-        let _ = execute!(io::stdout(), LeaveAlternateScreen, Show);
+        let _ = execute!(
+            io::stdout(),
+            LeaveAlternateScreen,
+            DisableMouseCapture,
+            Show
+        );
         original(info);
     }));
 }
