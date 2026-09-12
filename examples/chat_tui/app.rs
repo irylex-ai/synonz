@@ -11,6 +11,7 @@ use synonz::{
     ToolContent, ToolResult, TurnEvent,
 };
 use synonz_openai::ReasoningEffort;
+use unicode_width::UnicodeWidthChar;
 
 /// Lines moved by one page-scroll key.
 const SCROLL_PAGE: u16 = 5;
@@ -149,6 +150,81 @@ pub enum Focus {
     Trace,
 }
 
+/// A text selection over one rendered box (screen coordinates).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Selection {
+    /// The box the selection belongs to (`Chat` or `Trace`).
+    pub target: Focus,
+    /// The anchor where the drag started (column, row).
+    pub start: (u16, u16),
+    /// The moving end (column, row).
+    pub end: (u16, u16),
+}
+
+impl Selection {
+    /// The corners ordered top-left → bottom-right.
+    pub fn normalized(&self) -> ((u16, u16), (u16, u16)) {
+        if (self.start.1, self.start.0) <= (self.end.1, self.end.0) {
+            (self.start, self.end)
+        } else {
+            (self.end, self.start)
+        }
+    }
+
+    /// Whether the selection covers no cell.
+    pub fn is_empty(&self) -> bool {
+        self.start == self.end
+    }
+}
+
+/// Extracts the selected text from a rendered line buffer.
+///
+/// `inner` is the box's content rect and `offset` the first rendered line;
+/// rows map to lines and columns to display cells.
+pub fn selection_text(view: &[String], inner: Rect, offset: u16, selection: &Selection) -> String {
+    let ((start_col, start_row), (end_col, end_row)) = selection.normalized();
+    let first = start_row.saturating_sub(inner.y) as usize + offset as usize;
+    let last = end_row.saturating_sub(inner.y) as usize + offset as usize;
+    let mut parts = Vec::new();
+    for index in first..=last {
+        let Some(line) = view.get(index) else {
+            continue;
+        };
+        let from = if index == first {
+            start_col.saturating_sub(inner.x) as usize
+        } else {
+            0
+        };
+        let to = if index == last {
+            end_col.saturating_sub(inner.x) as usize + 1
+        } else {
+            usize::MAX
+        };
+        parts.push(slice_columns(line, from, to));
+    }
+    parts.join("\n")
+}
+
+/// Slices a line by display columns `[start, end)`.
+fn slice_columns(line: &str, start: usize, end: usize) -> String {
+    let mut out = String::new();
+    let mut column = 0usize;
+    for ch in line.chars() {
+        let width = ch.width().unwrap_or(0);
+        let next = column + width;
+        if next <= start {
+            column = next;
+            continue;
+        }
+        if column >= end {
+            break;
+        }
+        out.push(ch);
+        column = next;
+    }
+    out
+}
+
 /// One recorded model request (the bus observer's trace payload).
 pub struct TraceEntry {
     /// Monotonic request number (1-based).
@@ -236,8 +312,24 @@ pub struct ChatState {
     pub last_max_scroll: u16,
     /// The transcript area (mouse hit-testing).
     pub chat_area: Rect,
+    /// The transcript content rect (selection mapping).
+    pub chat_inner: Rect,
+    /// The first transcript line currently rendered.
+    pub chat_offset: u16,
+    /// Plain rendered transcript lines (selection extraction).
+    pub chat_view: Vec<String>,
     /// The trace area (mouse hit-testing; `None` when hidden).
     pub trace_area: Option<Rect>,
+    /// The trace content rect (selection mapping).
+    pub trace_inner: Rect,
+    /// The first trace line currently rendered.
+    pub trace_offset: u16,
+    /// Plain rendered trace lines (selection extraction).
+    pub trace_view: Vec<String>,
+    /// The active text selection, if any.
+    pub selection: Option<Selection>,
+    /// Whether the terminal mouse capture is on (wheel + in-app selection).
+    pub mouse_captured: bool,
     /// The latest model-request trace.
     pub trace: TraceStore,
     /// The trace box's top line offset.
@@ -276,7 +368,15 @@ impl ChatState {
             paused: false,
             last_max_scroll: 0,
             chat_area: Rect::new(0, 0, 0, 0),
+            chat_inner: Rect::new(0, 0, 0, 0),
+            chat_offset: 0,
+            chat_view: Vec::new(),
             trace_area: None,
+            trace_inner: Rect::new(0, 0, 0, 0),
+            trace_offset: 0,
+            trace_view: Vec::new(),
+            selection: None,
+            mouse_captured: true,
             trace: TraceStore::default(),
             trace_scroll: 0,
             trace_seen: 0,
@@ -550,7 +650,7 @@ pub struct CommandSpec {
 }
 
 /// The commands offered by completion.
-pub const COMMANDS: [CommandSpec; 4] = [
+pub const COMMANDS: [CommandSpec; 5] = [
     CommandSpec {
         name: "/model",
         args: "<name>",
@@ -565,6 +665,11 @@ pub const COMMANDS: [CommandSpec; 4] = [
         name: "/think",
         args: "[on|off]",
         description: "show or hide the model's thinking output",
+    },
+    CommandSpec {
+        name: "/mouse",
+        args: "[on|off]",
+        description: "toggle mouse capture (off = native text selection)",
     },
     CommandSpec {
         name: "/quit",
@@ -589,12 +694,12 @@ pub fn effort_label(effort: Option<ReasoningEffort>) -> &'static str {
 }
 
 /// One compact line of tool-call arguments.
-fn summarize_arguments(arguments: &serde_json::Value) -> String {
+pub(crate) fn summarize_arguments(arguments: &serde_json::Value) -> String {
     truncate_chars(&arguments.to_string(), 160)
 }
 
 /// One compact line of tool result content.
-fn summarize_content(content: &ToolContent) -> String {
+pub(crate) fn summarize_content(content: &ToolContent) -> String {
     let text = match content {
         ToolContent::Text { text } => text.clone(),
         ToolContent::Json { value } => value.to_string(),
@@ -666,11 +771,14 @@ mod tests {
     #[test]
     fn command_completion_matches_prefixes() {
         let mut chat = ChatState::new("test-model".to_string(), None);
-        chat.input.set("/mo");
+        chat.input.set("/mod");
         let names: Vec<&str> = chat.command_matches().iter().map(|c| c.name).collect();
         assert_eq!(names, vec!["/model"]);
         assert!(chat.complete_command());
         assert_eq!(chat.input.text(), "/model ");
+
+        chat.input.set("/mo");
+        assert_eq!(chat.command_matches().len(), 2, "model and mouse");
 
         chat.input.set("/think");
         assert_eq!(chat.command_matches().len(), 1);
@@ -786,6 +894,27 @@ mod tests {
         assert!(chat.paused);
         chat.scroll_end();
         assert!(!chat.paused);
+    }
+
+    #[test]
+    fn selection_extracts_display_columns() {
+        let view = vec!["hello world".to_string(), "second line".to_string()];
+        let inner = Rect::new(2, 5, 20, 2);
+        let selection = Selection {
+            target: Focus::Chat,
+            start: (8, 5),
+            end: (12, 6),
+        };
+        assert_eq!(
+            selection_text(&view, inner, 0, &selection),
+            "world\nsecond line"
+        );
+    }
+
+    #[test]
+    fn slice_columns_respects_display_width() {
+        assert_eq!(slice_columns("你好世界", 2, 4), "好");
+        assert_eq!(slice_columns("abcdef", 3, 6), "def");
     }
 
     #[test]

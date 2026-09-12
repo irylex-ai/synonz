@@ -1,13 +1,19 @@
 //! Rendering: the setup wizard and the chat screen.
 
 use ratatui::Frame;
+use ratatui::buffer::Buffer;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span, Text};
-use ratatui::widgets::{Block, Borders, Clear, Paragraph};
+use ratatui::widgets::{Block, Borders, Clear, Paragraph, Widget};
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
-use crate::app::{ChatState, CommandSpec, Entry, Focus, Status, TextInput, effort_label};
+use synonz::{ContentBlock, Message, Role, ToolResult};
+
+use crate::app::{
+    ChatState, CommandSpec, Entry, Focus, Selection, Status, TextInput, effort_label,
+    summarize_arguments, summarize_content,
+};
 use crate::setup::{PopupKind, Setup, Step};
 
 const SPINNER: [&str; 4] = ["|", "/", "-", "\\"];
@@ -297,6 +303,39 @@ fn border_style(focused: bool) -> Style {
     }
 }
 
+/// Reverse-highlights the selected cells of one box.
+struct SelectionHighlight<'a> {
+    selection: &'a Selection,
+    inner: Rect,
+}
+
+impl Widget for SelectionHighlight<'_> {
+    fn render(self, _area: Rect, buf: &mut Buffer) {
+        let ((start_col, start_row), (end_col, end_row)) = self.selection.normalized();
+        let inner = self.inner;
+        let last_col = inner.x + inner.width.saturating_sub(1);
+        for row in start_row..=end_row {
+            if row < inner.y || row >= inner.y.saturating_add(inner.height) {
+                continue;
+            }
+            let (from, to) = if start_row == end_row {
+                (start_col.min(last_col), end_col.min(last_col))
+            } else if row == start_row {
+                (start_col.min(last_col), last_col)
+            } else if row == end_row {
+                (inner.x, end_col.min(last_col))
+            } else {
+                (inner.x, last_col)
+            };
+            for column in from..=to {
+                if let Some(cell) = buf.cell_mut((column, row)) {
+                    cell.modifier |= Modifier::REVERSED;
+                }
+            }
+        }
+    }
+}
+
 fn draw_transcript(frame: &mut Frame, chat: &mut ChatState, area: Rect) {
     let focused = chat.focus == Focus::Chat;
     let state = match chat.status {
@@ -315,6 +354,7 @@ fn draw_transcript(frame: &mut Frame, chat: &mut ChatState, area: Rect) {
         .border_style(border_style(focused));
     let inner = block.inner(area);
     frame.render_widget(block, area);
+    chat.chat_inner = inner;
     if inner.width == 0 || inner.height == 0 {
         chat.last_max_scroll = 0;
         return;
@@ -322,12 +362,17 @@ fn draw_transcript(frame: &mut Frame, chat: &mut ChatState, area: Rect) {
     let inner_width = inner.width.max(8) as usize;
     let inner_height = inner.height as usize;
     let mut lines: Vec<Line<'static>> = Vec::new();
+    let mut plains: Vec<String> = Vec::new();
     for entry in &chat.transcript {
         if matches!(entry, Entry::Reasoning(_)) && !chat.show_thinking {
             continue;
         }
-        lines.extend(entry_lines(entry, inner_width));
+        for (line, plain) in entry_lines(entry, inner_width) {
+            lines.push(line);
+            plains.push(plain);
+        }
     }
+    chat.chat_view = plains;
     let max_scroll = lines.len().saturating_sub(inner_height);
     chat.last_max_scroll = max_scroll.min(u16::MAX as usize) as u16;
     let offset = if chat.follow {
@@ -335,6 +380,7 @@ fn draw_transcript(frame: &mut Frame, chat: &mut ChatState, area: Rect) {
     } else {
         (chat.scroll as usize).min(max_scroll)
     };
+    chat.chat_offset = offset.min(u16::MAX as usize) as u16;
     frame.render_widget(
         Paragraph::new(Text::from(lines)).scroll((offset.min(u16::MAX as usize) as u16, 0)),
         inner,
@@ -357,13 +403,28 @@ fn draw_transcript(frame: &mut Frame, chat: &mut ChatState, area: Rect) {
             marker,
         );
     }
+    let selection = chat
+        .selection
+        .filter(|selection| selection.target == Focus::Chat);
+    if let Some(selection) = selection {
+        frame.render_widget(
+            SelectionHighlight {
+                selection: &selection,
+                inner,
+            },
+            inner,
+        );
+    }
 }
 
 fn draw_input(frame: &mut Frame, chat: &ChatState, area: Rect) {
     let focused = chat.focus == Focus::Input;
     let title = match chat.status {
-        Status::Idle => " message │ Enter send · Esc cancel · Tab focus ",
-        Status::Running => " message (running — Esc cancels) ",
+        Status::Idle => format!(
+            " message │ Enter send · Esc cancel · Tab focus · mouse {} ",
+            if chat.mouse_captured { "on" } else { "off" }
+        ),
+        Status::Running => " message (running — Esc cancels) ".to_string(),
     };
     let block = Block::default()
         .borders(Borders::ALL)
@@ -382,7 +443,8 @@ fn draw_input(frame: &mut Frame, chat: &ChatState, area: Rect) {
     }
 }
 
-/// Draws the latest model request (the bus observer's trace).
+/// Draws the latest model request (the bus observer's trace) as a readable
+/// transcript of the complete prompt: role-labelled, wrapped messages.
 fn draw_trace(frame: &mut Frame, chat: &mut ChatState, area: Rect) {
     let focused = chat.focus == Focus::Trace;
     let entry = chat.trace.latest();
@@ -404,12 +466,14 @@ fn draw_trace(frame: &mut Frame, chat: &mut ChatState, area: Rect) {
         .border_style(border_style(focused));
     let inner = block.inner(area);
     frame.render_widget(block, area);
+    chat.trace_inner = inner;
     if inner.width == 0 || inner.height == 0 {
         chat.last_trace_max = 0;
         return;
     }
     let Some(entry) = entry else {
         chat.last_trace_max = 0;
+        chat.trace_view.clear();
         frame.render_widget(
             Paragraph::new(Span::styled(
                 "(no model request yet — the trace appears on the first turn)",
@@ -420,24 +484,102 @@ fn draw_trace(frame: &mut Frame, chat: &mut ChatState, area: Rect) {
         return;
     };
     chat.sync_trace(&entry);
+    let mut lines: Vec<Line<'static>> = Vec::new();
+    let mut plains: Vec<String> = Vec::new();
     let header = format!(
-        "{} messages · tools: read_file, list_dir, file_info",
+        "#{} · round {} · {} · {} messages · tools: read_file, list_dir, file_info",
+        entry.number,
+        entry
+            .round
+            .map(|round| round.to_string())
+            .unwrap_or_else(|| "–".to_string()),
+        entry.purpose,
         entry.messages.len()
     );
-    let json = serde_json::to_string_pretty(&entry.messages)
-        .unwrap_or_else(|error| format!("<unserializable: {error}>"));
-    let mut lines: Vec<Line<'static>> = vec![
-        Line::from(Span::styled(header, hint_style())),
-        Line::default(),
-    ];
-    lines.extend(json.lines().map(|line| Line::raw(line.to_string())));
+    lines.push(Line::from(Span::styled(header.clone(), hint_style())));
+    plains.push(header);
+    lines.push(Line::default());
+    plains.push(String::new());
+    for message in &entry.messages {
+        for (line, plain) in trace_message_lines(message, inner.width as usize) {
+            lines.push(line);
+            plains.push(plain);
+        }
+        lines.push(Line::default());
+        plains.push(String::new());
+    }
+    chat.trace_view = plains;
     let max_scroll = lines.len().saturating_sub(inner.height as usize);
     chat.last_trace_max = max_scroll.min(u16::MAX as usize) as u16;
     let offset = (chat.trace_scroll as usize).min(max_scroll);
+    chat.trace_offset = offset.min(u16::MAX as usize) as u16;
     frame.render_widget(
         Paragraph::new(lines).scroll((offset.min(u16::MAX as usize) as u16, 0)),
         inner,
     );
+    let selection = chat
+        .selection
+        .filter(|selection| selection.target == Focus::Trace);
+    if let Some(selection) = selection {
+        frame.render_widget(
+            SelectionHighlight {
+                selection: &selection,
+                inner,
+            },
+            inner,
+        );
+    }
+}
+
+/// One trace message: (styled line, plain text) pairs, wrapped by width.
+fn trace_message_lines(message: &Message, width: usize) -> Vec<(Line<'static>, String)> {
+    let (label, style) = match message.role {
+        Role::System => ("system", reasoning_style()),
+        Role::User => ("user", user_style()),
+        Role::Assistant => ("assistant", assistant_style()),
+        Role::Tool => ("tool", tool_style()),
+        _ => ("?", hint_style()),
+    };
+    let indent = label.chars().count() + 2;
+    let body_width = width.saturating_sub(indent).max(8);
+    let mut parts = Vec::new();
+    for block in &message.blocks {
+        match block {
+            ContentBlock::Text { text } => parts.push(text.clone()),
+            ContentBlock::ToolCall(call) => parts.push(format!(
+                "⚙ {}({})",
+                call.name,
+                summarize_arguments(&call.arguments)
+            )),
+            ContentBlock::ToolResult { result, .. } => match result {
+                ToolResult::Ok { content } => {
+                    parts.push(format!("→ {}", summarize_content(content)));
+                }
+                ToolResult::Err { message } => parts.push(format!("✗ {message}")),
+                _ => parts.push("→ done".to_string()),
+            },
+            other => parts.push(format!("{other:?}")),
+        }
+    }
+    let body = parts.join("\n");
+    let mut lines = Vec::new();
+    for (index, part) in wrap(&body, body_width).into_iter().enumerate() {
+        let plain = if index == 0 {
+            format!("{label} {part}")
+        } else {
+            format!("{:indent$}{part}", "")
+        };
+        let line = if index == 0 {
+            Line::from(vec![
+                Span::styled(format!("{label} "), style.add_modifier(Modifier::BOLD)),
+                Span::raw(part),
+            ])
+        } else {
+            Line::from(Span::raw(format!("{:indent$}{part}", "")))
+        };
+        lines.push((line, plain));
+    }
+    lines
 }
 
 fn field_line(
@@ -589,7 +731,7 @@ fn mask_secret(secret: &str) -> String {
     format!("••••{tail}")
 }
 
-fn entry_lines(entry: &Entry, width: usize) -> Vec<Line<'static>> {
+fn entry_lines(entry: &Entry, width: usize) -> Vec<(Line<'static>, String)> {
     let (label, style, body) = match entry {
         Entry::User(text) => ("you", user_style(), text.clone()),
         Entry::Assistant(text) => ("assistant", assistant_style(), text.clone()),
@@ -608,14 +750,20 @@ fn entry_lines(entry: &Entry, width: usize) -> Vec<Line<'static>> {
     let body_width = width.saturating_sub(indent).max(8);
     let mut lines = Vec::new();
     for (index, part) in wrap(&body, body_width).into_iter().enumerate() {
-        if index == 0 {
-            lines.push(Line::from(vec![
+        let plain = if index == 0 {
+            format!("{label} {part}")
+        } else {
+            format!("{:indent$}{part}", "")
+        };
+        let line = if index == 0 {
+            Line::from(vec![
                 Span::styled(format!("{label} "), style.add_modifier(Modifier::BOLD)),
                 Span::raw(part),
-            ]));
+            ])
         } else {
-            lines.push(Line::from(Span::raw(format!("{:indent$}{part}", ""))));
-        }
+            Line::from(Span::raw(format!("{:indent$}{part}", "")))
+        };
+        lines.push((line, plain));
     }
     lines
 }

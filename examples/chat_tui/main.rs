@@ -23,20 +23,21 @@ use std::time::Duration;
 use crossterm::cursor::Show;
 use crossterm::event::{
     DisableMouseCapture, EnableMouseCapture, Event, EventStream, KeyCode, KeyEvent, KeyModifiers,
-    MouseEvent, MouseEventKind,
+    MouseButton, MouseEvent, MouseEventKind,
 };
 use crossterm::execute;
+use crossterm::style::Print;
 use crossterm::terminal::{
     EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
 };
 use futures::StreamExt;
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
-use ratatui::layout::Position;
+use ratatui::layout::{Position, Rect};
 use synonz::{Agent, Conversation, Subject, SubjectType, SynonzRuntime};
 use synonz_openai::{Client, ReasoningEffort};
 
-use app::{ChatState, Entry, Focus, Status, TraceStore};
+use app::{ChatState, Entry, Focus, Selection, Status, TraceStore, selection_text};
 use setup::{Outcome, Setup};
 
 /// The agent's system prompt (tools + sandbox explained to the model).
@@ -157,7 +158,9 @@ async fn run(terminal: &mut ChatTerminal) -> io::Result<()> {
                             continue;
                         }
                         if let Some(command) = line.strip_prefix('/') {
-                            handle_command(command, &client, &mut chat);
+                            if let Some(captured) = handle_command(command, &client, &mut chat) {
+                                let _ = set_mouse_capture(captured);
+                            }
                             continue;
                         }
                         chat.push_user(&line);
@@ -260,8 +263,10 @@ async fn run_turn(
     Ok(())
 }
 
-/// Handles a `/` command; commands never reach the model.
-fn handle_command(command: &str, client: &Client, chat: &mut ChatState) {
+/// Handles a `/` command; commands never reach the model. Returns a mouse
+/// capture change when `/mouse` asks for one (the caller drives the
+/// terminal).
+fn handle_command(command: &str, client: &Client, chat: &mut ChatState) -> Option<bool> {
     let mut parts = command.splitn(2, char::is_whitespace);
     let name = parts.next().unwrap_or_default();
     let argument = parts.next().map(str::trim).unwrap_or_default();
@@ -277,6 +282,7 @@ fn handle_command(command: &str, client: &Client, chat: &mut ChatState) {
                     "model → {argument} (applies to the next message)"
                 )));
             }
+            None
         }
         "effort" => {
             if argument.is_empty() {
@@ -299,33 +305,66 @@ fn handle_command(command: &str, client: &Client, chat: &mut ChatState) {
                     ))),
                 }
             }
+            None
         }
-        "quit" | "exit" => chat.should_quit = true,
-        "think" => match argument {
-            "" => {
-                let visible = chat.toggle_thinking();
-                chat.transcript.push(Entry::Note(format!(
-                    "thinking display {}",
-                    if visible { "on" } else { "off" }
-                )));
+        "quit" | "exit" => {
+            chat.should_quit = true;
+            None
+        }
+        "think" => {
+            match argument {
+                "" => {
+                    let visible = chat.toggle_thinking();
+                    chat.transcript.push(Entry::Note(format!(
+                        "thinking display {}",
+                        if visible { "on" } else { "off" }
+                    )));
+                }
+                "on" => {
+                    chat.show_thinking = true;
+                    chat.transcript
+                        .push(Entry::Note("thinking display on".to_string()));
+                }
+                "off" => {
+                    chat.show_thinking = false;
+                    chat.transcript
+                        .push(Entry::Note("thinking display off".to_string()));
+                }
+                other => chat.transcript.push(Entry::Error(format!(
+                    "unknown /think argument {other:?}: use on or off"
+                ))),
             }
-            "on" => {
-                chat.show_thinking = true;
-                chat.transcript
-                    .push(Entry::Note("thinking display on".to_string()));
-            }
-            "off" => {
-                chat.show_thinking = false;
-                chat.transcript
-                    .push(Entry::Note("thinking display off".to_string()));
-            }
-            other => chat.transcript.push(Entry::Error(format!(
-                "unknown /think argument {other:?}: use on or off"
-            ))),
-        },
-        _ => chat
-            .transcript
-            .push(Entry::Error(format!("unknown command: /{name}"))),
+            None
+        }
+        "mouse" => {
+            let target = match argument {
+                "" => !chat.mouse_captured,
+                "on" => true,
+                "off" => false,
+                other => {
+                    chat.transcript.push(Entry::Error(format!(
+                        "unknown /mouse argument {other:?}: use on or off"
+                    )));
+                    return None;
+                }
+            };
+            chat.mouse_captured = target;
+            chat.transcript.push(Entry::Note(format!(
+                "mouse capture {} — {}",
+                if target { "on" } else { "off" },
+                if target {
+                    "wheel + in-app selection (drag, copies on release)"
+                } else {
+                    "native terminal selection"
+                }
+            )));
+            Some(target)
+        }
+        _ => {
+            chat.transcript
+                .push(Entry::Error(format!("unknown command: /{name}")));
+            None
+        }
     }
 }
 
@@ -369,21 +408,153 @@ fn handle_scroll_key(chat: &mut ChatState, key: &KeyEvent) {
     }
 }
 
-/// Routes a mouse wheel tick to the box under the pointer.
+/// Routes mouse events: the wheel scrolls the box under the pointer;
+/// dragging selects text and releasing copies it (OSC 52).
 fn handle_mouse(chat: &mut ChatState, mouse: MouseEvent) {
-    let delta = match mouse.kind {
-        MouseEventKind::ScrollUp => -3,
-        MouseEventKind::ScrollDown => 3,
-        _ => return,
-    };
+    match mouse.kind {
+        MouseEventKind::ScrollUp => scroll_under_pointer(chat, mouse.column, mouse.row, -3),
+        MouseEventKind::ScrollDown => scroll_under_pointer(chat, mouse.column, mouse.row, 3),
+        MouseEventKind::Down(MouseButton::Left) => begin_selection(chat, mouse.column, mouse.row),
+        MouseEventKind::Drag(MouseButton::Left) => update_selection(chat, mouse.column, mouse.row),
+        MouseEventKind::Up(MouseButton::Left) => finish_selection(chat),
+        _ => {}
+    }
+}
+
+fn scroll_under_pointer(chat: &mut ChatState, column: u16, row: u16, delta: i32) {
     let over_trace = chat
         .trace_area
-        .is_some_and(|area| area.contains(Position::new(mouse.column, mouse.row)));
+        .is_some_and(|area| area.contains(Position::new(column, row)));
     if over_trace {
         chat.trace_scroll_lines(delta);
     } else {
         chat.scroll_lines(delta);
     }
+}
+
+/// Starts a selection in the box under the pointer (and focuses it).
+fn begin_selection(chat: &mut ChatState, column: u16, row: u16) {
+    let target = if chat
+        .trace_area
+        .is_some_and(|area| area.contains(Position::new(column, row)))
+    {
+        Focus::Trace
+    } else if chat.chat_area.contains(Position::new(column, row)) {
+        Focus::Chat
+    } else {
+        return;
+    };
+    let inner = match target {
+        Focus::Trace => chat.trace_inner,
+        Focus::Chat => chat.chat_inner,
+        Focus::Input => return,
+    };
+    let point = clamp_to(inner, column, row);
+    chat.selection = Some(Selection {
+        target,
+        start: point,
+        end: point,
+    });
+    chat.focus = target;
+}
+
+/// Extends the active selection to the pointer.
+fn update_selection(chat: &mut ChatState, column: u16, row: u16) {
+    let Some(selection) = chat.selection else {
+        return;
+    };
+    let inner = match selection.target {
+        Focus::Trace => chat.trace_inner,
+        Focus::Chat => chat.chat_inner,
+        Focus::Input => return,
+    };
+    chat.selection = Some(Selection {
+        end: clamp_to(inner, column, row),
+        ..selection
+    });
+}
+
+/// Copies the finished selection to the terminal clipboard (OSC 52).
+fn finish_selection(chat: &mut ChatState) {
+    let Some(selection) = chat.selection.take() else {
+        return;
+    };
+    if selection.is_empty() {
+        return;
+    }
+    let (view, inner, offset) = match selection.target {
+        Focus::Chat => (&chat.chat_view, chat.chat_inner, chat.chat_offset),
+        Focus::Trace => (&chat.trace_view, chat.trace_inner, chat.trace_offset),
+        Focus::Input => return,
+    };
+    let text = selection_text(view, inner, offset, &selection);
+    if text.trim().is_empty() {
+        return;
+    }
+    let chars = text.chars().count();
+    match copy_to_clipboard(&text) {
+        Ok(()) => chat
+            .transcript
+            .push(Entry::Note(format!("copied {chars} chars (OSC 52)"))),
+        Err(error) => chat
+            .transcript
+            .push(Entry::Error(format!("clipboard copy failed: {error}"))),
+    }
+}
+
+/// Clamps a screen position to the box's content rect.
+fn clamp_to(inner: Rect, column: u16, row: u16) -> (u16, u16) {
+    let last_col = inner.x + inner.width.saturating_sub(1);
+    let last_row = inner.y + inner.height.saturating_sub(1);
+    (
+        column.clamp(inner.x, last_col),
+        row.clamp(inner.y, last_row),
+    )
+}
+
+/// Writes text to the terminal clipboard with OSC 52 (tmux-aware).
+fn copy_to_clipboard(text: &str) -> io::Result<()> {
+    let osc = format!("\x1b]52;c;{}\x07", base64(text.as_bytes()));
+    let sequence = if std::env::var_os("TMUX").is_some() {
+        format!("\x1bPtmux;\x1b{osc}\x1b\\")
+    } else {
+        osc
+    };
+    execute!(io::stdout(), Print(sequence))
+}
+
+/// Toggles the terminal mouse capture (wheel + in-app selection).
+fn set_mouse_capture(enabled: bool) -> io::Result<()> {
+    if enabled {
+        execute!(io::stdout(), EnableMouseCapture)
+    } else {
+        execute!(io::stdout(), DisableMouseCapture)
+    }
+}
+
+/// Standard base64 with padding (the OSC 52 payload encoding).
+fn base64(bytes: &[u8]) -> String {
+    const TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
+    for chunk in bytes.chunks(3) {
+        let b0 = chunk[0] as u32;
+        let b1 = *chunk.get(1).unwrap_or(&0) as u32;
+        let b2 = *chunk.get(2).unwrap_or(&0) as u32;
+        let triple = (b0 << 16) | (b1 << 8) | b2;
+        out.push(TABLE[((triple >> 18) & 0x3f) as usize] as char);
+        out.push(TABLE[((triple >> 12) & 0x3f) as usize] as char);
+        out.push(if chunk.len() > 1 {
+            TABLE[((triple >> 6) & 0x3f) as usize] as char
+        } else {
+            '='
+        });
+        out.push(if chunk.len() > 2 {
+            TABLE[(triple & 0x3f) as usize] as char
+        } else {
+            '='
+        });
+    }
+    out
 }
 
 fn is_ctrl_c(key: &KeyEvent) -> bool {
@@ -429,6 +600,16 @@ fn install_panic_hook() {
 mod tests {
     use super::*;
     use synonz::MockModel;
+
+    #[test]
+    fn base64_encodes_osc52_payloads() {
+        assert_eq!(base64(b""), "");
+        assert_eq!(base64(b"f"), "Zg==");
+        assert_eq!(base64(b"fo"), "Zm8=");
+        assert_eq!(base64(b"foo"), "Zm9v");
+        assert_eq!(base64(b"hello"), "aGVsbG8=");
+        assert_eq!(base64("你好".as_bytes()), "5L2g5aW9");
+    }
 
     /// A scripted model drives one real turn into the transcript — the
     /// assembly path, with no terminal involved.
