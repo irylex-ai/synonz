@@ -1,7 +1,7 @@
 # Synonz Chat TUI 示例实现计划
 
-- 状态: APPROVED（2026-09-12，irylex 评审通过："大体没有什么问题"；
-  待实现完毕、实际运行后按反馈迭代）
+- 状态: VERIFIED（2026-09-12，M1-M4 完成；189/189 全绿、clippy/doc
+  零警告、fmt 干净；实际运行反馈待 irylex）
 - 日期: 2026-09-12
 - 依据: ADR-0005（工具契约）、ADR-0006 / ADR-0015（model 契约与
   参数归位）、ADR-0017（事件总线）、0.4.0 实施计划 M27（适配器运行
@@ -196,3 +196,31 @@ examples/chat_tui/
 - 文档：README（根 + 五份 crate 副本，保持同步）示例表新增 `chat_tui`
   行（标注"交互式 TUI；首次启动向导配置 endpoint"）；
 - 发布面：示例不随 crate 发布，无 CHANGELOG 条目。
+
+## 10. 里程碑完成记录（2026-09-12）
+
+- **M1 骨架与向导**：终端 RAII（Drop 恢复 + panic hook）+ `EventStream`
+  事件循环 + 向导（env 预填、URL / Key / Model 校验、key 尾 4 位掩码、
+  档位选择）；`setup.rs` 校验单测 2 项；
+- **M2 流式聊天**：`app.rs`（`TextInput` 字符安全编辑、transcript、
+  历史召回、`apply_event` 终态收口）；双层循环借用编排（外层空闲 /
+  向导，内层运行 × `execution.next()`）；`MockModel` 装配测试
+  （真实会话一轮 → transcript 与终态断言）；
+- **M3 工具**：`tools.rs` 三只读原语（`read_file` 64 KiB 截断 /
+  `list_dir` 200 项上限 / `file_info` JSON）；cwd 沙箱 canonicalize
+  越界拒绝；单测 5 项（越界、截断、非 UTF-8、排序与上限、元数据）；
+  工具调用与结果入 transcript；
+- **M4 运行期调参与收尾**：`/model` / `/effort`（读改写 `set_options`，
+  零重建，下一条消息生效）；取消（Esc）、退出（Ctrl+C）、resize、
+  错误路径（模型失败 / 流断开）；README（根 + 5 份 crate 副本）示例表
+  同步；
+- **与计划的偏差（B 类，实施记录）**：
+  1. 向导档位首项用 **`Default`（不发送参数）** 而非计划中的 `Off`
+     ——`Off` 是显式 `"none"`、`Default` 是省略，语义不同；档位表为
+     `Default/Off/Minimal/Low/Medium/High/ExtraHigh/Max`；
+  2. 额外提供 `/quit`、`/exit` 便利命令；
+  3. `ChatState` 持 `model` / `effort`（状态栏与命令共享），运行期
+     切换在状态栏实时反映；
+- **验证**：示例单测 16 项 + 装配测试 1 项；全量回归 **189/189** 全绿、
+  clippy 零警告、`cargo doc --workspace` 零警告、fmt 干净；TUI 实跑由
+  irylex 本机带 key 验证（无 TTY 环境不可自动化）。
