@@ -50,8 +50,9 @@ with the table below.
   an execution environment — call `build()` inside an async context or
   inject a handle via `RuntimeBuilder::executor`; otherwise `build()`
   panics (a configuration error).
-- `TaskRegistry` moved from `synonz::context` to `synonz::runtime`
-  (the root re-export `synonz::TaskRegistry` is unchanged).
+- **`TaskRegistry` renamed to `ConversationTaskSpawner`**: the type now
+  lives in `synonz::runtime` (root-exported), and the payload field is
+  `TurnContext::task_spawner` (was `tasks`).
 - `ConversationEndReason::Shutdown` and `MemoryFlowStage::Drain` added
   (additive variants).
 
@@ -63,7 +64,8 @@ with the table below.
 | full `ConversationState` in listings | `ConversationSummary` (turns stay on `load` / `Conversation::of`) |
 | `runtime.sweep_stale().await` | automatic Monitor; `runtime.shutdown().await` for end-of-life teardown |
 | `runtime` built anywhere | `build()` inside an async context (or `.executor(handle)`) when `conversation_idle_timeout` is set |
-| maintenance table (internal) | session table (internal): `new` / `with_id` / `of` register, any end removes |
+| maintenance table (internal) | conversation table (internal): `new` / `with_id` / `of` register, any end removes |
+| `synonz::TaskRegistry` / `TurnContext::tasks` | `synonz::ConversationTaskSpawner` / `TurnContext::task_spawner` |
 
 ### Notes
 

@@ -190,33 +190,36 @@ pub(crate) struct ConversationEntry {
 pub(crate) type ConversationTable =
     Arc<std::sync::Mutex<std::collections::HashMap<String, ConversationEntry>>>;
 
-/// The maintenance-task registry handle: how an engine spawns background
-/// work the runtime schedules (and drains at conversation end).
+/// The scoped conversation background-task spawner: how an engine submits
+/// background work the runtime schedules (and drains at conversation end).
 ///
-/// The type is public (the engine payload carries it); construction stays
-/// with the runtime. Clones are scoped to the same conversation; spawned
-/// tasks attach to that conversation's entry in the runtime's table.
+/// One value covers exactly one conversation: every spawned task attaches
+/// to that conversation's entry in the runtime's table. The type is public
+/// (the engine payload carries it); construction is framework-internal —
+/// the payload assembly builds it from the runtime.
 ///
-/// The handle is a transient value (created per turn payload and dropped
-/// with it) and owns no tasks; the spawned handles live in the
-/// conversation's table entry until the conversation-end drain.
+/// The value is transient (created per turn payload and dropped with it)
+/// and owns no tasks; the spawned handles live in the conversation's table
+/// entry until the conversation-end drain. Clones share the conversation
+/// scope.
 #[derive(Clone)]
-pub struct TaskRegistry {
+pub struct ConversationTaskSpawner {
     table: ConversationTable,
     conversation_id: String,
 }
 
-impl TaskRegistry {
-    /// The sole construction site is [`SynonzRuntime::task_registry`].
-    fn new(table: ConversationTable, conversation_id: impl Into<String>) -> Self {
+impl ConversationTaskSpawner {
+    /// Builds the spawner for one conversation (framework-internal: the
+    /// payload assembly is the sole construction site).
+    pub(crate) fn new(runtime: &SynonzRuntime, conversation_id: &str) -> Self {
         Self {
-            table,
-            conversation_id: conversation_id.into(),
+            table: Arc::clone(&runtime.inner.conversations),
+            conversation_id: conversation_id.to_string(),
         }
     }
 
-    /// Spawns a background maintenance task and registers it under this
-    /// handle's conversation (the conversation-end teardown drains them).
+    /// Spawns a background task and registers it under this spawner's
+    /// conversation (the conversation-end teardown drains them).
     ///
     /// A conversation the runtime does not own has no table entry; the
     /// task then runs untracked.
@@ -317,11 +320,6 @@ impl SynonzRuntime {
     /// The event bus (the resident dual-lane dispatch facility).
     pub(crate) fn event_bus(&self) -> &EventBus {
         &self.inner.event_bus
-    }
-
-    /// A maintenance-task registry handle scoped to one conversation.
-    pub(crate) fn task_registry(&self, conversation_id: &str) -> TaskRegistry {
-        TaskRegistry::new(Arc::clone(&self.inner.conversations), conversation_id)
     }
 
     /// Registers an owned conversation in the conversation table: creates
@@ -658,8 +656,7 @@ mod tests {
         let subject = Subject::of(SubjectType::User, "u-drain");
         let conversation = Conversation::with_id(&runtime, &subject, "drain-bounded");
 
-        runtime
-            .task_registry(conversation.id())
+        ConversationTaskSpawner::new(&runtime, conversation.id())
             .spawn(std::future::pending::<()>());
 
         let started = std::time::Instant::now();
@@ -686,8 +683,7 @@ mod tests {
         let subject = Subject::of(SubjectType::User, "u-panic");
         let conversation = Conversation::with_id(&runtime, &subject, "drain-panic");
 
-        runtime
-            .task_registry(conversation.id())
+        ConversationTaskSpawner::new(&runtime, conversation.id())
             .spawn(async { panic!("maintenance boom") });
         // Let the task panic before teardown awaits it.
         tokio::time::sleep(Duration::from_millis(20)).await;

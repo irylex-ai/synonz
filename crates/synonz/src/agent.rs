@@ -78,7 +78,7 @@ use crate::event::{
 use crate::io::{AgentInput, AgentOutput};
 use crate::message::{CallId, ContentBlock, Message, ToolCall, ToolResult};
 use crate::model::{Model, ModelRequest, ModelStreamItem};
-use crate::runtime::SynonzRuntime;
+use crate::runtime::{ConversationTaskSpawner, SynonzRuntime};
 use crate::tool::{Tool, ToolContext, ToolSpec};
 
 /// Default round budget: how many reasoning rounds a run may use before it
@@ -872,7 +872,7 @@ impl AgentLoopTask {
                 // Moments 2 + 3: maintain the state on turn completion.
                 // The synchronous segment (topic + archive) runs before
                 // the terminal; the heavy curation runs in the background
-                // (registered with the runtime's maintenance table).
+                // (tracked in the runtime's conversation table).
                 let memory = self.runtime.memory();
                 let turn_context = TurnContext {
                     conversation: &self.conversation,
@@ -881,7 +881,10 @@ impl AgentLoopTask {
                     memory: &memory,
                     model: Arc::clone(&self.model),
                     events: sink.clone(),
-                    tasks: self.runtime.task_registry(self.conversation.id()),
+                    task_spawner: ConversationTaskSpawner::new(
+                        &self.runtime,
+                        self.conversation.id(),
+                    ),
                 };
                 let flow_errors = self.context.on_turn_completed(&turn_context).await;
                 for error in flow_errors {

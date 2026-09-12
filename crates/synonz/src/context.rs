@@ -35,7 +35,7 @@ use crate::event::{CallPurpose, MemoryFlowStage, ModelEvent, TurnEvent};
 use crate::memory::{L1Entry, Memory, SummaryBlock, Topic};
 use crate::message::Message;
 use crate::model::Model;
-use crate::runtime::TaskRegistry;
+use crate::runtime::ConversationTaskSpawner;
 use crate::subject::Subject;
 
 // ── Failure type ──
@@ -67,8 +67,9 @@ impl MemoryFlowError {
 ///
 /// `messages` are owned (background tasks carry them forward); `memory`
 /// and `model` are the runtime's (borrowed for the synchronous segment,
-/// cloned into background jobs); `events` and `tasks` are the framework
-/// outlets (the event sink and the maintenance-task registry).
+/// cloned into background jobs); `events` and `task_spawner` are the
+/// framework outlets (the event sink and this conversation's background
+/// spawner).
 #[non_exhaustive]
 pub struct TurnContext<'a> {
     /// The conversation the turn completed in.
@@ -84,9 +85,9 @@ pub struct TurnContext<'a> {
     pub model: Arc<dyn Model>,
     /// The event outlet (bus facts; clones keep the run attribution).
     pub events: EventSink,
-    /// The maintenance-task registry (background jobs register here; the
-    /// runtime drains them at conversation end).
-    pub tasks: TaskRegistry,
+    /// This conversation's background-task spawner (submitted jobs attach
+    /// to the conversation; the runtime drains them at conversation end).
+    pub task_spawner: ConversationTaskSpawner,
 }
 
 /// The assembly payload: what the assembler consumes — the minimal
@@ -238,7 +239,7 @@ pub trait Context: Send + Sync + 'static {
     /// Called after a **completed** turn, before the terminal event —
     /// the synchronous segment should return promptly; heavy maintenance
     /// (compaction, distillation) belongs in the background (spawn
-    /// through [`TurnContext::tasks`]; the runtime drains them at
+    /// through [`TurnContext::task_spawner`]; the runtime drains them at
     /// conversation end).
     ///
     /// Failed and cancelled turns never reach this method — the truth
@@ -425,7 +426,7 @@ impl Context for DefaultContext {
                 topic: decision.topic.clone(),
                 l2_cap: self.l2_cap,
             };
-            ctx.tasks.spawn(async move {
+            ctx.task_spawner.spawn(async move {
                 if shift_flush {
                     jobs.compact(true, l1_window).await;
                 }

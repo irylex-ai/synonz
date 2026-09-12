@@ -69,7 +69,7 @@ pub use message::{
     validate_conversation,
 };
 pub use model::{Model, ModelParams, ModelRequest, ModelStream, ModelStreamItem, complete};
-pub use runtime::{RuntimeBuilder, SynonzRuntime, TaskRegistry};
+pub use runtime::{ConversationTaskSpawner, RuntimeBuilder, SynonzRuntime};
 pub use scheduler::{OverlapPolicy, Schedule, Scheduler, TaskHandle, TaskInfo};
 pub use subject::{Subject, SubjectType};
 pub use tokio_util::sync::CancellationToken;
