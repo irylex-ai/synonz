@@ -66,6 +66,11 @@ with the table below.
   providers that repeat empty `id` / `name` fragments, treats an empty
   argument string as `{}`, and fails clearly when a tool call arrives
   without a name.
+- `synonz-openai` tool-result requests: tool messages are spliced into
+  the `messages` array instead of nested as arrays (every tool
+  round-trip was rejected by providers); tool-call turns keep the
+  canonical `content: null`, and providers that omit call ids get a
+  local fallback id.
 
 ### Breaking Changes
 

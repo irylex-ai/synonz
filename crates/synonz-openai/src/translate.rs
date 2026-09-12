@@ -59,8 +59,18 @@ pub(crate) fn request_body(
 }
 
 /// Translates canonical messages to the wire message array.
+///
+/// A tool message may expand to several wire messages (one per tool
+/// result block); those are spliced into the array, never nested.
 pub(crate) fn to_wire_messages(messages: &[Message]) -> Result<Vec<Value>, ModelError> {
-    messages.iter().map(to_wire_message).collect()
+    let mut wire = Vec::new();
+    for message in messages {
+        match to_wire_message(message)? {
+            Value::Array(inner) => wire.extend(inner),
+            value => wire.push(value),
+        }
+    }
+    Ok(wire)
 }
 
 fn to_wire_message(message: &Message) -> Result<Value, ModelError> {
@@ -107,6 +117,13 @@ fn to_wire_message(message: &Message) -> Result<Value, ModelError> {
             let mut wire = json!({ "role": "assistant" });
             if !content.is_empty() {
                 wire["content"] = json!(content);
+            } else if !tool_calls.is_empty() {
+                // The canonical OpenAI shape keeps `content: null` on
+                // tool-call turns; some compatible providers reject an
+                // omitted field.
+                wire["content"] = Value::Null;
+            } else {
+                wire["content"] = json!("");
             }
             if !tool_calls.is_empty() {
                 wire["tool_calls"] = Value::Array(tool_calls);
@@ -286,6 +303,13 @@ impl ResponseAccumulator {
                     message: "provider streamed a tool call without a name".to_string(),
                 });
             }
+            // Some compatible providers omit call ids; mint a local one so
+            // the assistant message and its tool result stay correlated.
+            let id = if id.is_empty() {
+                format!("call_{index}")
+            } else {
+                id.clone()
+            };
             let arguments: Value = if arguments.trim().is_empty() {
                 Value::Object(serde_json::Map::new())
             } else {
@@ -294,7 +318,7 @@ impl ResponseAccumulator {
                 })?
             };
             blocks.push(ContentBlock::ToolCall(synonz::message::ToolCall::new(
-                id.clone(),
+                id,
                 name.clone(),
                 arguments,
             )));
@@ -414,6 +438,67 @@ mod tests {
             json!({}),
             "empty arguments mean no arguments"
         );
+    }
+
+    #[test]
+    fn tool_round_trip_wire_shape_matches_openai() {
+        let assistant = Message::new(
+            Role::Assistant,
+            vec![ContentBlock::ToolCall(synonz::message::ToolCall::new(
+                "call_1",
+                "list_dir",
+                json!({"path": "."}),
+            ))],
+        );
+        let tool = Message::tool_result(
+            "call_1",
+            ToolResult::Ok {
+                content: synonz::ToolContent::Text {
+                    text: "dir src".into(),
+                },
+            },
+        );
+        let wire = to_wire_messages(&[assistant, tool]).unwrap();
+        assert_eq!(wire[0]["role"], "assistant");
+        assert_eq!(
+            wire[0]["content"],
+            Value::Null,
+            "tool-call turns keep content: null"
+        );
+        assert_eq!(wire[0]["tool_calls"][0]["id"], "call_1");
+        assert_eq!(wire[0]["tool_calls"][0]["type"], "function");
+        assert_eq!(wire[0]["tool_calls"][0]["function"]["name"], "list_dir");
+        assert_eq!(
+            wire[0]["tool_calls"][0]["function"]["arguments"],
+            json!("{\"path\":\".\"}")
+        );
+        assert_eq!(wire[1]["role"], "tool");
+        assert_eq!(wire[1]["tool_call_id"], "call_1");
+        assert_eq!(wire[1]["content"], "dir src");
+    }
+
+    #[test]
+    fn missing_tool_call_ids_get_a_local_fallback() {
+        let mut accumulator = ResponseAccumulator::default();
+        let chunks = [
+            json!({"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"name":"list_dir","arguments":"{}"}}]},"finish_reason":null}]}),
+            json!({"choices":[{"delta":{},"finish_reason":"tool_calls"}],"usage":{"prompt_tokens":1,"completion_tokens":1}}),
+        ];
+        let mut finish = None;
+        for chunk in &chunks {
+            for item in accumulator.apply_chunk(chunk).unwrap() {
+                if let item @ ModelStreamItem::Finish { .. } = item {
+                    finish = Some(item);
+                }
+            }
+        }
+        let Some(ModelStreamItem::Finish { message, .. }) = finish else {
+            panic!("expected a finish item");
+        };
+        let [ContentBlock::ToolCall(call)] = &message.blocks[..] else {
+            panic!("expected one tool call, got {:?}", message.blocks);
+        };
+        assert_eq!(call.call_id, synonz::CallId::new("call_0"));
     }
 
     #[test]
