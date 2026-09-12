@@ -862,6 +862,11 @@ impl AgentLoopTask {
             }));
 
             if calls.is_empty() {
+                // The final assistant message is part of the turn's record:
+                // the turn history and the engine payload (which archives
+                // L1) must replay it — a missing answer makes the model
+                // re-answer the previous question on the next turn.
+                messages.push(message.clone());
                 let output = AgentOutput::new(message, total_usage);
                 // Truth archive: the completed turn.
                 record!(Turn::completed(

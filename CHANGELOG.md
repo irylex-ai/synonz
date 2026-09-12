@@ -61,6 +61,10 @@ with the table below.
 
 ### Fixed
 
+- **Agent**: the final assistant message of a completed turn is archived
+  into the turn record and the L1 memory window (it was dropped for
+  text-only turns), so the next request's assembled context contains the
+  previous answer instead of the bare question.
 - `synonz-openai` streamed tool calls: the streaming path now parses
   `tool_calls` at all (it previously yielded text only), tolerates
   providers that repeat empty `id` / `name` fragments, treats an empty

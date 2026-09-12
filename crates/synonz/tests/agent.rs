@@ -15,9 +15,10 @@ use serde_json::json;
 use tokio_util::sync::CancellationToken;
 
 use synonz::{
-    Agent, AgentError, CallId, CancelReason, ContentBlock, Conversation, ExecutionEvent, MockModel,
-    Model, ModelError, ModelRequest, ModelStream, ModelStreamItem, Role, Subject, SubjectType,
-    SynonzRuntime, Tool, ToolCall, ToolContent, ToolError, ToolResult,
+    Agent, AgentError, BoxFuture, CallId, CancelReason, ContentBlock, Context,
+    ContextAssemblerInput, ContextAssemblerOutput, Conversation, ExecutionEvent, MemoryFlowError,
+    MockModel, Model, ModelError, ModelRequest, ModelStream, ModelStreamItem, Role, Subject,
+    SubjectType, SynonzRuntime, Tool, ToolCall, ToolContent, ToolError, ToolResult, TurnContext,
 };
 
 // ────────────────────────── helpers ──────────────────────────
@@ -215,6 +216,94 @@ async fn run_returns_final_output() {
     let output = agent.run(conv.turn_input("weather?")).await.unwrap();
     assert_eq!(output.text(), Some("sunny, 28C."));
     assert_eq!(output.usage.input_tokens, 1);
+}
+
+/// A deterministic engine: verbatim L1 replay plus the L1 archive, with no
+/// background maintenance (a test needs no summarizer model calls).
+struct TranscriptContext;
+
+impl Context for TranscriptContext {
+    fn assemble<'a>(
+        &'a self,
+        input: ContextAssemblerInput<'a>,
+    ) -> BoxFuture<'a, ContextAssemblerOutput> {
+        Box::pin(async move {
+            let mut output = ContextAssemblerOutput::default();
+            for entry in input
+                .memory
+                .l1_window(input.subject, input.conversation_id)
+                .unwrap_or_default()
+            {
+                output.messages.extend(entry.messages);
+            }
+            output
+        })
+    }
+
+    fn on_turn_completed<'a>(
+        &'a self,
+        ctx: &'a TurnContext<'a>,
+    ) -> BoxFuture<'a, Vec<MemoryFlowError>> {
+        Box::pin(async move {
+            let topic = String::new();
+            ctx.memory
+                .l1_append(
+                    ctx.conversation.subject(),
+                    ctx.conversation.id(),
+                    &topic,
+                    ctx.messages.clone(),
+                )
+                .unwrap_or_else(|error| panic!("l1 append: {error}"));
+            Vec::new()
+        })
+    }
+}
+
+/// Regression: the completed turn archives its final assistant message, so
+/// the next request's context replays the previous answer. A dropped answer
+/// makes the model answer the earlier question again.
+#[tokio::test]
+async fn completed_turns_archive_the_final_answer() {
+    let (runtime, subject) = fixture();
+    let mut conv = Conversation::new(&runtime, &subject);
+    let model = MockModel::new(vec![
+        vec![finish_text("periodic answer")],
+        vec![finish_text("new year answer")],
+    ]);
+    let agent = Agent::builder()
+        .runtime(&runtime)
+        .model(model.clone())
+        .context(TranscriptContext)
+        .build()
+        .unwrap();
+
+    let first = agent.run(conv.turn_input("periodic table?")).await.unwrap();
+    assert_eq!(first.text(), Some("periodic answer"));
+
+    // The archived turn carries the user message AND the assistant answer.
+    let turns = conv.turns();
+    assert!(turns[0].messages.iter().any(|message| {
+        message.role == Role::Assistant
+            && message.blocks.iter().any(
+                |block| matches!(block, ContentBlock::Text { text } if text == "periodic answer"),
+            )
+    }));
+
+    let second = agent.run(conv.turn_input("new year?")).await.unwrap();
+    assert_eq!(second.text(), Some("new year answer"));
+
+    // The second request replays the first answer into the model context.
+    let requests = model.requests();
+    assert_eq!(requests.len(), 2);
+    assert!(
+        requests[1].messages.iter().any(|message| {
+            message.role == Role::Assistant
+                && message.blocks.iter().any(
+                    |block| matches!(block, ContentBlock::Text { text } if text == "periodic answer"),
+                )
+        }),
+        "the previous answer must be part of the next request"
+    );
 }
 
 #[tokio::test]
