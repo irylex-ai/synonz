@@ -16,7 +16,6 @@ use futures::StreamExt;
 use serde::{Deserialize, Serialize};
 
 use synonz::BoxFuture;
-use synonz::ModelDelta;
 use synonz::ModelError;
 use synonz::ModelStream;
 use synonz::ModelStreamItem;
@@ -167,6 +166,48 @@ impl Client {
             .model_name = model_name.into();
     }
 
+    /// Lists the model ids the endpoint exposes (`GET /models`).
+    ///
+    /// Ids are sorted and deduplicated. Endpoints that do not implement the
+    /// standard listing route surface the provider's error.
+    pub async fn list_models(&self) -> Result<Vec<String>, ModelError> {
+        let response = self
+            .http
+            .get(self.endpoint("models"))
+            .bearer_auth(&self.api_key)
+            .send()
+            .await
+            .map_err(|error| ModelError::Transport {
+                message: error.to_string(),
+            })?;
+        let status = response.status().as_u16();
+        if !response.status().is_success() {
+            let body = response.text().await.unwrap_or_default();
+            return Err(translate::status_error(status, body));
+        }
+        let body: serde_json::Value = response.json().await.map_err(|error| ModelError::Api {
+            message: format!("invalid model list: {error}"),
+        })?;
+        let mut models: Vec<String> = body
+            .get("data")
+            .and_then(serde_json::Value::as_array)
+            .map(|entries| {
+                entries
+                    .iter()
+                    .filter_map(|entry| {
+                        entry
+                            .get("id")
+                            .and_then(serde_json::Value::as_str)
+                            .map(str::to_string)
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        models.sort();
+        models.dedup();
+        Ok(models)
+    }
+
     /// Creates a client from the environment.
     ///
     /// Reads `OPENAI_API_KEY` (required), `OPENAI_BASE_URL` (optional) and
@@ -226,20 +267,21 @@ impl synonz::Model for Client {
 struct SseState {
     parser: sse::SseParser,
     accumulator: translate::ResponseAccumulator,
-    pending: std::collections::VecDeque<String>,
-    pending_finish: bool,
+    payloads: std::collections::VecDeque<String>,
+    items: std::collections::VecDeque<ModelStreamItem>,
 }
 
 /// Transforms an HTTP response body (SSE framed) into model stream items.
 ///
 /// Yields at most one item per poll; deltas are emitted before the terminal
-/// finish item.
+/// finish item. All chunk parsing goes through
+/// [`translate::ResponseAccumulator::apply_chunk`].
 fn transform_sse(response: reqwest::Response) -> ModelStream {
     let state = SseState {
         parser: sse::SseParser::new(),
         accumulator: translate::ResponseAccumulator::default(),
-        pending: std::collections::VecDeque::new(),
-        pending_finish: false,
+        payloads: std::collections::VecDeque::new(),
+        items: std::collections::VecDeque::new(),
     };
     futures::stream::unfold(
         (response, state, false),
@@ -248,13 +290,19 @@ fn transform_sse(response: reqwest::Response) -> ModelStream {
                 if done {
                     return None;
                 }
+                if let Some(item) = state.items.pop_front() {
+                    let terminal = matches!(
+                        item,
+                        ModelStreamItem::Finish { .. } | ModelStreamItem::Failed(_)
+                    );
+                    return Some((item, (response, state, terminal)));
+                }
 
-                // Process one buffered payload, or fetch more bytes.
-                let Some(payload) = state.pending.pop_front() else {
+                // Fetch more payloads when the buffer runs dry.
+                let Some(payload) = state.payloads.pop_front() else {
                     match response.chunk().await {
                         Ok(Some(chunk)) => {
-                            let payloads = state.parser.feed(&chunk);
-                            state.pending.extend(payloads);
+                            state.payloads.extend(state.parser.feed(&chunk));
                             continue;
                         }
                         Ok(None) => {
@@ -283,44 +331,11 @@ fn transform_sse(response: reqwest::Response) -> ModelStream {
                 let Ok(chunk) = serde_json::from_str::<serde_json::Value>(&payload) else {
                     continue; // non-JSON keepalive payload
                 };
-
-                // Text fragments of this chunk become one delta item.
-                let mut text = String::new();
-                if let Some(choices) = chunk.get("choices").and_then(serde_json::Value::as_array) {
-                    for choice in choices {
-                        if let Some(fragment) = choice
-                            .pointer("/delta/content")
-                            .and_then(serde_json::Value::as_str)
-                        {
-                            text.push_str(fragment);
-                        }
-                        if choice
-                            .get("finish_reason")
-                            .and_then(serde_json::Value::as_str)
-                            .is_some_and(|reason| !reason.is_empty())
-                        {
-                            state.pending_finish = true;
-                        }
+                match state.accumulator.apply_chunk(&chunk) {
+                    Ok(items) => state.items.extend(items),
+                    Err(error) => {
+                        return Some((ModelStreamItem::Failed(error), (response, state, true)));
                     }
-                }
-                if let Some(usage) = chunk.get("usage").filter(|usage| !usage.is_null()) {
-                    state.accumulator.absorb_usage(usage);
-                }
-
-                if !text.is_empty() {
-                    // Accumulate text for the final message, and yield the
-                    // delta; the finish (if flagged) goes on the next poll.
-                    state.accumulator.push_text(&text);
-                    return Some((
-                        ModelStreamItem::Delta(ModelDelta::Text { text }),
-                        (response, state, false),
-                    ));
-                }
-                if state.pending_finish {
-                    return state
-                        .accumulator
-                        .finish_item()
-                        .map(|item| (item, (response, state, true)));
                 }
             }
         },

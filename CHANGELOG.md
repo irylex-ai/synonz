@@ -50,6 +50,8 @@ with the table below.
   provider exposes it (OpenAI-compatible `reasoning_content` /
   `reasoning` / `reasoning_text`; Anthropic `thinking_delta`). Reasoning
   is narration only — it never enters the canonical assistant message.
+- **Model listing** (`synonz-openai`): `Client::list_models()` calls the
+  standard `GET /models` route (sorted, deduplicated ids).
 
 ### Changed
 

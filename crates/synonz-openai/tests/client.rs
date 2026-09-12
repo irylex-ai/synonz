@@ -117,6 +117,79 @@ async fn runtime_options_and_model_apply_to_the_next_request() {
     let _stream = client.stream(smoke_request()).await.unwrap();
 }
 
+#[tokio::test]
+async fn reasoning_deltas_stream_and_stay_out_of_the_message() {
+    const BODY: &str = concat!(
+        "data: {\"choices\":[{\"delta\":{\"reasoning_content\":\"hmm \"}}]}\n\n",
+        "data: {\"choices\":[{\"delta\":{\"reasoning_content\":\"ok\"}}]}\n\n",
+        "data: {\"choices\":[{\"delta\":{\"content\":\"pong\"}}]}\n\n",
+        "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}],",
+        "\"usage\":{\"prompt_tokens\":1,\"completion_tokens\":2}}\n\n",
+        "data: [DONE]\n\n",
+    );
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/chat/completions"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "text/event-stream")
+                .set_body_string(BODY),
+        )
+        .mount(&server)
+        .await;
+
+    let client = Client::new(server.uri(), "test-key", "reasoner");
+    let mut stream = client.stream(smoke_request()).await.unwrap();
+    let mut reasoning = String::new();
+    let mut text = String::new();
+    let mut finish = None;
+    while let Some(item) = stream.next().await {
+        match item {
+            ModelStreamItem::Delta(synonz::ModelDelta::Reasoning { text: fragment }) => {
+                reasoning.push_str(&fragment);
+            }
+            ModelStreamItem::Delta(synonz::ModelDelta::Text { text: fragment }) => {
+                text.push_str(&fragment);
+            }
+            item @ ModelStreamItem::Finish { .. } => {
+                finish = Some(item);
+                break;
+            }
+            other => panic!("unexpected stream item: {other:?}"),
+        }
+    }
+    assert_eq!(reasoning, "hmm ok");
+    assert_eq!(text, "pong");
+    let Some(ModelStreamItem::Finish { message, .. }) = finish else {
+        panic!("expected a finish item");
+    };
+    assert_eq!(
+        message.blocks,
+        vec![synonz::ContentBlock::Text {
+            text: "pong".into()
+        }],
+        "reasoning must not join the canonical message"
+    );
+}
+
+#[tokio::test]
+async fn list_models_sorts_and_deduplicates() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/models"))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_string(
+                r#"{"data":[{"id":"b-model"},{"id":"a-model"},{"id":"a-model"}]}"#,
+            ),
+        )
+        .mount(&server)
+        .await;
+
+    let client = Client::new(server.uri(), "test-key", "gpt-4o-mini");
+    let models = client.list_models().await.expect("list models");
+    assert_eq!(models, vec!["a-model".to_string(), "b-model".to_string()]);
+}
+
 /// Opt-in smoke test against the real API. Skipped (not failed) when
 /// `SYNONZ_OPENAI_API_KEY` is not set.
 #[tokio::test]

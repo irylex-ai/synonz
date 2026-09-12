@@ -171,10 +171,9 @@ pub(crate) struct ResponseAccumulator {
 
 impl ResponseAccumulator {
     /// Applies one SSE data payload (a JSON chunk), returning the items it
-    /// produces: one [`ModelStreamItem::Delta`] per response text fragment,
-    /// and a terminal [`ModelStreamItem::Finish`] when the chunk carried a
-    /// finish signal.
-    #[allow(dead_code)]
+    /// produces: one [`ModelStreamItem::Delta`] per streamed fragment
+    /// (response text or reasoning), and a terminal
+    /// [`ModelStreamItem::Finish`] when the chunk carried a finish signal.
     pub(crate) fn apply_chunk(
         &mut self,
         chunk: &Value,
@@ -257,28 +256,6 @@ impl ResponseAccumulator {
         let usage = self.usage_or_zero();
         let message = std::mem::take(self).into_message().ok()?;
         Some(ModelStreamItem::Finish { message, usage })
-    }
-
-    /// Appends text to the accumulated response text.
-    pub(crate) fn push_text(&mut self, text: &str) {
-        self.text.push_str(text);
-    }
-
-    /// Merges a usage object (if any) into the accumulator.
-    pub(crate) fn absorb_usage(&mut self, usage: &Value) {
-        if usage.is_null() {
-            return;
-        }
-        self.usage = Some(synonz::TokenUsage::new(
-            usage
-                .get("prompt_tokens")
-                .and_then(Value::as_u64)
-                .unwrap_or(0),
-            usage
-                .get("completion_tokens")
-                .and_then(Value::as_u64)
-                .unwrap_or(0),
-        ));
     }
 
     /// Whether any response content (text or tool calls) accumulated.
