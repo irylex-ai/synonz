@@ -244,6 +244,14 @@ impl ResponseAccumulator {
                         }
                         Ok(Some(ModelStreamItem::Delta(ModelDelta::Text { text })))
                     }
+                    Some("thinking_delta") => {
+                        let text = delta
+                            .get("thinking")
+                            .and_then(Value::as_str)
+                            .unwrap_or_default()
+                            .to_string();
+                        Ok(Some(ModelStreamItem::Delta(ModelDelta::Reasoning { text })))
+                    }
                     Some("input_json_delta") => {
                         let partial = delta
                             .get("partial_json")
@@ -431,7 +439,7 @@ mod tests {
     }
 
     #[test]
-    fn thinking_blocks_are_ignored() {
+    fn thinking_deltas_become_reasoning_deltas() {
         let mut accumulator = ResponseAccumulator::default();
         let events: Vec<Value> = vec![
             json!({"type":"message_start","message":{"usage":{"input_tokens":7}}}),
@@ -444,17 +452,22 @@ mod tests {
             json!({"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":1}}),
             json!({"type":"message_stop"}),
         ];
+        let mut reasoning = String::new();
         let mut deltas = Vec::new();
         let mut finish = None;
         for event in &events {
             if let Some(item) = accumulator.apply_event(event).unwrap() {
                 match item {
+                    ModelStreamItem::Delta(ModelDelta::Reasoning { text }) => {
+                        reasoning.push_str(&text);
+                    }
                     ModelStreamItem::Delta(ModelDelta::Text { text }) => deltas.push(text),
                     item @ ModelStreamItem::Finish { .. } => finish = Some(item),
                     other => panic!("unexpected stream item: {other:?}"),
                 }
             }
         }
+        assert_eq!(reasoning, "hmm ");
         assert_eq!(deltas, vec!["pong".to_string()]);
         assert!(finish.is_some(), "the stream must still terminate");
     }

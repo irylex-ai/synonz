@@ -206,6 +206,17 @@ impl ResponseAccumulator {
                     text: text.to_string(),
                 }));
             }
+            // Providers expose streamed reasoning under different keys;
+            // it is narration only and never joins the assistant message.
+            if let Some(fragment) = ["reasoning_content", "reasoning", "reasoning_text"]
+                .iter()
+                .find_map(|key| delta.get(*key).and_then(Value::as_str))
+                && !fragment.is_empty()
+            {
+                items.push(ModelStreamItem::Delta(ModelDelta::Reasoning {
+                    text: fragment.to_string(),
+                }));
+            }
             if let Some(fragments) = delta.get("tool_calls").and_then(Value::as_array) {
                 for fragment in fragments {
                     let index = fragment.get("index").and_then(Value::as_u64).unwrap_or(0);
@@ -381,6 +392,47 @@ mod tests {
         let value = serde_json::to_value(&options).unwrap();
         assert_eq!(value["reasoning_effort"], "low");
         assert!(value.get("params").is_none(), "params are flattened");
+    }
+
+    #[test]
+    fn reasoning_fragments_stream_but_stay_out_of_the_message() {
+        let mut accumulator = ResponseAccumulator::default();
+        let chunks = [
+            json!({"choices":[{"delta":{"reasoning_content":"let me "},"finish_reason":null}]}),
+            json!({"choices":[{"delta":{"reasoning":"think"},"finish_reason":null}]}),
+            json!({"choices":[{"delta":{"content":"pong"},"finish_reason":null}]}),
+            json!({"choices":[{"delta":{},"finish_reason":"stop"}],
+                   "usage":{"prompt_tokens":1,"completion_tokens":2}}),
+        ];
+        let mut reasoning = String::new();
+        let mut text = String::new();
+        let mut finish = None;
+        for chunk in &chunks {
+            for item in accumulator.apply_chunk(chunk).unwrap() {
+                match item {
+                    ModelStreamItem::Delta(ModelDelta::Reasoning { text: fragment }) => {
+                        reasoning.push_str(&fragment);
+                    }
+                    ModelStreamItem::Delta(ModelDelta::Text { text: fragment }) => {
+                        text.push_str(&fragment);
+                    }
+                    item @ ModelStreamItem::Finish { .. } => finish = Some(item),
+                    other => panic!("unexpected stream item: {other:?}"),
+                }
+            }
+        }
+        assert_eq!(reasoning, "let me think");
+        assert_eq!(text, "pong");
+        let Some(ModelStreamItem::Finish { message, .. }) = finish else {
+            panic!("expected a finish item");
+        };
+        assert_eq!(
+            message.blocks,
+            vec![ContentBlock::Text {
+                text: "pong".into()
+            }],
+            "reasoning must not join the canonical message"
+        );
     }
 
     #[test]

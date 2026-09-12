@@ -146,7 +146,9 @@ impl TokenUsage {
 
 /// An incremental piece of a streamed model response.
 ///
-/// v1 streams text only; tool calls arrive complete in the finish message.
+/// Response text and reasoning may interleave; tool calls arrive complete
+/// in the finish message. Reasoning fragments are narration only — they
+/// are not part of the canonical assistant message.
 #[non_exhaustive]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
@@ -154,6 +156,12 @@ pub enum ModelDelta {
     /// A fragment of response text.
     Text {
         /// The text fragment.
+        text: String,
+    },
+    /// A fragment of the model's reasoning output, when the provider
+    /// streams it (never part of the canonical assistant message).
+    Reasoning {
+        /// The reasoning fragment.
         text: String,
     },
 }

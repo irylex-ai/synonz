@@ -45,6 +45,11 @@ with the table below.
   exposes its provider-specific `ModelOptions` (serde; usable in
   application config records): `reasoning_effort` (OpenAI) and `effort`
   + `thinking` (Anthropic).
+- **Reasoning deltas** (`synonz` / `synonz-openai` / `synonz-anthropic`):
+  `ModelDelta::Reasoning` carries the model's streamed thinking when the
+  provider exposes it (OpenAI-compatible `reasoning_content` /
+  `reasoning` / `reasoning_text`; Anthropic `thinking_delta`). Reasoning
+  is narration only — it never enters the canonical assistant message.
 
 ### Changed
 
