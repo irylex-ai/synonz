@@ -220,11 +220,17 @@ impl ResponseAccumulator {
                 for fragment in fragments {
                     let index = fragment.get("index").and_then(Value::as_u64).unwrap_or(0);
                     let entry = self.calls.entry(index).or_default();
-                    if let Some(id) = fragment.get("id").and_then(Value::as_str) {
+                    // Providers repeat `id`/`name` as empty strings in later
+                    // fragments; only the first non-empty value counts.
+                    if let Some(id) = fragment.get("id").and_then(Value::as_str)
+                        && entry.0.is_empty()
+                    {
                         entry.0 = id.to_string();
                     }
                     if let Some(function) = fragment.get("function") {
-                        if let Some(name) = function.get("name").and_then(Value::as_str) {
+                        if let Some(name) = function.get("name").and_then(Value::as_str)
+                            && entry.1.is_empty()
+                        {
                             entry.1 = name.to_string();
                         }
                         if let Some(arguments) = function.get("arguments").and_then(Value::as_str) {
@@ -241,7 +247,7 @@ impl ResponseAccumulator {
                 finished = true;
             }
         }
-        if finished && let Some(item) = self.finish_item() {
+        if finished && let Some(item) = self.finish_item()? {
             items.push(item);
         }
         Ok(items)
@@ -249,13 +255,13 @@ impl ResponseAccumulator {
 
     /// Builds the terminal item from the accumulated deltas, or `None` when
     /// nothing accumulated.
-    pub(crate) fn finish_item(&mut self) -> Option<ModelStreamItem> {
+    pub(crate) fn finish_item(&mut self) -> Result<Option<ModelStreamItem>, ModelError> {
         if !self.has_content() {
-            return None;
+            return Ok(None);
         }
         let usage = self.usage_or_zero();
-        let message = std::mem::take(self).into_message().ok()?;
-        Some(ModelStreamItem::Finish { message, usage })
+        let message = std::mem::take(self).into_message()?;
+        Ok(Some(ModelStreamItem::Finish { message, usage }))
     }
 
     /// Whether any response content (text or tool calls) accumulated.
@@ -275,10 +281,18 @@ impl ResponseAccumulator {
         indices.sort_unstable();
         for index in indices {
             let (id, name, arguments) = &self.calls[&index];
-            let arguments: Value =
+            if name.is_empty() {
+                return Err(ModelError::Api {
+                    message: "provider streamed a tool call without a name".to_string(),
+                });
+            }
+            let arguments: Value = if arguments.trim().is_empty() {
+                Value::Object(serde_json::Map::new())
+            } else {
                 serde_json::from_str(arguments).map_err(|error| ModelError::InvalidRequest {
                     message: format!("malformed tool call arguments: {error}"),
-                })?;
+                })?
+            };
             blocks.push(ContentBlock::ToolCall(synonz::message::ToolCall::new(
                 id.clone(),
                 name.clone(),
@@ -369,6 +383,37 @@ mod tests {
         let value = serde_json::to_value(&options).unwrap();
         assert_eq!(value["reasoning_effort"], "low");
         assert!(value.get("params").is_none(), "params are flattened");
+    }
+
+    #[test]
+    fn tool_call_name_survives_empty_fragments() {
+        let mut accumulator = ResponseAccumulator::default();
+        let chunks = [
+            json!({"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_1","type":"function","function":{"name":"list_dir","arguments":""}}]},"finish_reason":null}]}),
+            json!({"choices":[{"delta":{"tool_calls":[{"index":0,"id":"","function":{"name":"","arguments":""}}]},"finish_reason":null}]}),
+            json!({"choices":[{"delta":{},"finish_reason":"tool_calls"}],"usage":{"prompt_tokens":1,"completion_tokens":1}}),
+        ];
+        let mut finish = None;
+        for chunk in &chunks {
+            for item in accumulator.apply_chunk(chunk).unwrap() {
+                if let item @ ModelStreamItem::Finish { .. } = item {
+                    finish = Some(item);
+                }
+            }
+        }
+        let Some(ModelStreamItem::Finish { message, .. }) = finish else {
+            panic!("expected a finish item");
+        };
+        let [ContentBlock::ToolCall(call)] = &message.blocks[..] else {
+            panic!("expected one tool call, got {:?}", message.blocks);
+        };
+        assert_eq!(call.call_id, synonz::CallId::new("call_1"));
+        assert_eq!(call.name, "list_dir", "empty name fragments must not win");
+        assert_eq!(
+            call.arguments,
+            json!({}),
+            "empty arguments mean no arguments"
+        );
     }
 
     #[test]

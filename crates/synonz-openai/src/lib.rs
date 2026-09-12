@@ -306,10 +306,12 @@ fn transform_sse(response: reqwest::Response) -> ModelStream {
                             continue;
                         }
                         Ok(None) => {
-                            return state
-                                .accumulator
-                                .finish_item()
-                                .map(|item| (item, (response, state, true)));
+                            let item = match state.accumulator.finish_item() {
+                                Ok(Some(item)) => item,
+                                Ok(None) => return None,
+                                Err(error) => ModelStreamItem::Failed(error),
+                            };
+                            return Some((item, (response, state, true)));
                         }
                         Err(error) => {
                             return Some((
@@ -323,10 +325,12 @@ fn transform_sse(response: reqwest::Response) -> ModelStream {
                 };
 
                 if payload == "[DONE]" {
-                    return state
-                        .accumulator
-                        .finish_item()
-                        .map(|item| (item, (response, state, true)));
+                    let item = match state.accumulator.finish_item() {
+                        Ok(Some(item)) => item,
+                        Ok(None) => return None,
+                        Err(error) => ModelStreamItem::Failed(error),
+                    };
+                    return Some((item, (response, state, true)));
                 }
                 let Ok(chunk) = serde_json::from_str::<serde_json::Value>(&payload) else {
                     continue; // non-JSON keepalive payload

@@ -59,6 +59,14 @@ with the table below.
   (previously clones carried independent copies); connection and
   credentials stay construction-bound.
 
+### Fixed
+
+- `synonz-openai` streamed tool calls: the streaming path now parses
+  `tool_calls` at all (it previously yielded text only), tolerates
+  providers that repeat empty `id` / `name` fragments, treats an empty
+  argument string as `{}`, and fails clearly when a tool call arrives
+  without a name.
+
 ### Breaking Changes
 
 - **`ConversationStore::list()` removed**: replaced by
