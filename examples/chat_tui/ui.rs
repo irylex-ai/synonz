@@ -4,10 +4,10 @@ use ratatui::Frame;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span, Text};
-use ratatui::widgets::{Block, Borders, Paragraph};
+use ratatui::widgets::{Block, Borders, Clear, Paragraph};
 
 use crate::app::{ChatState, CommandSpec, Entry, Status, TextInput, effort_label};
-use crate::setup::{Setup, Step};
+use crate::setup::{PopupKind, Setup, Step};
 
 const SPINNER: [&str; 4] = ["|", "/", "-", "\\"];
 
@@ -87,14 +87,30 @@ pub fn draw_setup(frame: &mut Frame, setup: &Setup) {
         }
         Step::Model => {
             rows.push(field_line(
-                "Model   ",
+                "Model    ",
                 &setup.model,
                 setup.field == 0,
                 width,
                 false,
             ));
+            if setup.models_loading {
+                rows.push((
+                    Line::from(Span::styled("  loading models…", hint_style())),
+                    None,
+                ));
+            } else if let Some(error) = &setup.models_error {
+                rows.push((
+                    Line::from(Span::styled(
+                        format!("  models unavailable: {error}"),
+                        note_style(),
+                    )),
+                    None,
+                ));
+            }
             rows.push((Line::default(), None));
-            rows.push(effort_line(setup, width));
+            rows.push(reasoning_row(setup));
+            rows.push(effort_row(setup));
+            rows.push(start_row(setup));
         }
         Step::Chat => {}
     }
@@ -107,9 +123,7 @@ pub fn draw_setup(frame: &mut Frame, setup: &Setup) {
     }
     let hint = match setup.step {
         Step::Api => "Tab: next field · Enter: continue · Esc: quit",
-        Step::Model => {
-            "Tab: model/thinking · ←/→ or space: pick · Enter: start chatting · Esc: back"
-        }
+        Step::Model => "Tab: field · Enter: pick model / toggle / pick level / start · Esc: back",
         Step::Chat => "",
     };
     rows.push((
@@ -127,6 +141,83 @@ pub fn draw_setup(frame: &mut Frame, setup: &Setup) {
             frame.set_cursor_position((inner.x + column, y));
         }
     }
+
+    if setup.popup.is_some() {
+        draw_popup(frame, setup);
+    }
+}
+
+/// Draws the open selection popup (models or effort levels).
+fn draw_popup(frame: &mut Frame, setup: &Setup) {
+    let Some(popup) = &setup.popup else {
+        return;
+    };
+    let items = setup.popup_items();
+    let area = centered_rect(frame.area(), 64, 60);
+    frame.render_widget(Clear, area);
+    let title = match popup.kind {
+        PopupKind::Models => " select model ",
+        PopupKind::Levels => " thinking level ",
+    };
+    let block = Block::default().borders(Borders::ALL).title(title);
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    let mut lines: Vec<Line<'static>> = Vec::new();
+    if popup.kind == PopupKind::Models {
+        let query = if popup.query.is_empty() {
+            "(type to filter)".to_string()
+        } else {
+            popup.query.clone()
+        };
+        lines.push(Line::from(vec![
+            Span::styled(" filter: ", hint_style()),
+            Span::styled(query, focused_style()),
+        ]));
+    }
+    let list_height = inner.height.saturating_sub(lines.len() as u16 + 2).max(1) as usize;
+    let offset = popup.selected.saturating_sub(list_height.saturating_sub(1));
+    if items.is_empty() {
+        lines.push(Line::from(Span::styled(" (no matches)", hint_style())));
+    }
+    for (index, item) in items.iter().enumerate().skip(offset).take(list_height) {
+        let selected = index == popup.selected;
+        let marker = if selected { "▶ " } else { "  " };
+        lines.push(Line::from(Span::styled(
+            format!("{marker}{item}"),
+            if selected {
+                focused_style()
+            } else {
+                Style::default()
+            },
+        )));
+    }
+    lines.push(Line::default());
+    lines.push(Line::from(Span::styled(
+        " ↑↓ move · Enter select · Esc cancel",
+        hint_style(),
+    )));
+    frame.render_widget(Paragraph::new(lines), inner);
+}
+
+/// A rectangle centered in `area` (percent of width/height).
+fn centered_rect(area: Rect, percent_x: u16, percent_y: u16) -> Rect {
+    let vertical = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Percentage((100 - percent_y) / 2),
+            Constraint::Percentage(percent_y),
+            Constraint::Percentage((100 - percent_y) / 2),
+        ])
+        .split(area);
+    Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([
+            Constraint::Percentage((100 - percent_x) / 2),
+            Constraint::Percentage(percent_x),
+            Constraint::Percentage((100 - percent_x) / 2),
+        ])
+        .split(vertical[1])[1]
 }
 
 /// Draws the chat screen.
@@ -284,33 +375,79 @@ fn field_line(
     (line, caret)
 }
 
-fn effort_line(setup: &Setup, width: usize) -> (Line<'static>, Option<u16>) {
+/// The reasoning on/off row (Enter or ←/→ toggles).
+fn reasoning_row(setup: &Setup) -> (Line<'static>, Option<u16>) {
     let focused = setup.field == 1;
-    let prefix = "  Thinking  ";
-    let selection = format!("‹ {} ›", setup.effort_label());
-    let hint = "   (←/→ or space)";
-    let mut spans = vec![Span::styled(
-        prefix.to_string(),
-        if focused {
-            focused_style()
-        } else {
-            label_style()
-        },
-    )];
-    spans.push(Span::styled(
-        selection.clone(),
-        if focused {
-            focused_style()
-        } else {
-            Style::default()
-        },
-    ));
-    let used = prefix.chars().count() + selection.chars().count() + hint.chars().count();
-    if used < width {
-        spans.push(Span::styled(hint.to_string(), hint_style()));
+    let value = if setup.reasoning_enabled { "On" } else { "Off" };
+    let value_style = if !setup.reasoning_enabled {
+        note_style()
+    } else if focused {
+        focused_style()
+    } else {
+        Style::default()
+    };
+    let line = Line::from(vec![
+        Span::styled(
+            "  Reasoning ",
+            if focused {
+                focused_style()
+            } else {
+                label_style()
+            },
+        ),
+        Span::styled(format!("[{value}]"), value_style),
+        Span::styled("    (Enter: toggle; Off sends \"none\")", hint_style()),
+    ]);
+    (line, None)
+}
+
+/// The effort level row (Enter opens the ladder popup).
+fn effort_row(setup: &Setup) -> (Line<'static>, Option<u16>) {
+    let focused = setup.field == 2;
+    if !setup.reasoning_enabled {
+        let line = Line::from(vec![
+            Span::styled("  Effort    ", label_style()),
+            Span::styled("(disabled — enable reasoning to choose)", hint_style()),
+        ]);
+        return (line, None);
     }
-    let caret = focused.then_some((prefix.chars().count() + selection.chars().count()) as u16);
-    (Line::from(spans), caret)
+    let selection = format!("‹ {} ›", setup.reasoning_label());
+    let line = Line::from(vec![
+        Span::styled(
+            "  Effort    ",
+            if focused {
+                focused_style()
+            } else {
+                label_style()
+            },
+        ),
+        Span::styled(
+            selection,
+            if focused {
+                focused_style()
+            } else {
+                Style::default()
+            },
+        ),
+        Span::styled("    (Enter: pick from the list · ←/→: cycle)", hint_style()),
+    ]);
+    (line, None)
+}
+
+/// The explicit start row (Enter launches the chat).
+fn start_row(setup: &Setup) -> (Line<'static>, Option<u16>) {
+    let focused = setup.field == 3;
+    let style = if focused {
+        focused_style().add_modifier(Modifier::BOLD)
+    } else {
+        label_style()
+    };
+    let line = Line::from(vec![
+        Span::raw("  ".to_string()),
+        Span::styled("▶ Start chatting", style),
+        Span::styled("    (Enter)", hint_style()),
+    ]);
+    (line, None)
 }
 
 /// The visible window of a single-line input and the caret's column in it.

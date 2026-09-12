@@ -61,6 +61,10 @@ async fn run(terminal: &mut ChatTerminal) -> io::Result<()> {
             Some(Ok(Event::Key(key))) => match wizard.handle_key(key) {
                 Outcome::Redraw => {}
                 Outcome::Quit => return Ok(()),
+                Outcome::LoadModels => {
+                    terminal.draw(|frame| ui::draw_setup(frame, &wizard))?;
+                    load_models(&mut wizard).await;
+                }
                 Outcome::Launch => {
                     break (
                         wizard.base_url.text().trim().to_string(),
@@ -145,6 +149,20 @@ async fn run(terminal: &mut ChatTerminal) -> io::Result<()> {
 
     runtime.shutdown().await;
     Ok(())
+}
+
+/// Fetches the endpoint's model list for the wizard (best effort; the
+/// wizard keeps accepting a hand-typed model on failure).
+async fn load_models(wizard: &mut Setup) {
+    let client = Client::new(
+        wizard.base_url.text().trim(),
+        wizard.api_key.text(),
+        "unused",
+    );
+    match client.list_models().await {
+        Ok(models) => wizard.set_models(models),
+        Err(error) => wizard.set_models_error(error.to_string()),
+    }
 }
 
 /// Runs one turn to its terminal event, live-updating the transcript.

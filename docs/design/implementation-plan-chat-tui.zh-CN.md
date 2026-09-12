@@ -246,3 +246,27 @@ irylex 首轮实跑反馈四项与处置：
 （OpenAI reasoning 透传且不入 canonical 消息；Anthropic
 `thinking_delta` → reasoning delta）；全量回归 **193/193** 全绿、
 clippy 零警告、`cargo doc --workspace` 零警告、fmt 干净。
+
+## 12. 第二轮运行反馈（2026-09-12）
+
+irylex 第二轮实跑反馈与处置：
+
+1. **模型列表弹窗**：新增 `synonz-openai::Client::list_models()`
+   （标准 `GET /models`；排序 + 去重）；向导第二步在模型字段按 Enter
+   拉取并弹出列表（输入过滤、↑↓ 选择、Enter 确认）；拉取失败内联
+   提示，仍可手输模型；
+2. **档位弹窗**：思考档位改为弹窗列表（Default / Minimal / Low /
+   Medium / High / ExtraHigh / Max），←/→ 仍可快速循环；
+3. **reasoning 开关**：新增独立 `Reasoning: On/Off` 行——Off 发送显式
+   `"none"`，On 时选档位（Default = 省略参数）；新增 `Start` 行，
+   Enter 开始聊天（与弹窗交互解耦）；
+4. **reasoning 视觉区分**：思考内容品红斜体 + `thinking` 标签，正常
+   回复绿色 + `assistant` 标签（默认显示，`/think` 可隐藏）。
+
+**同时修复首轮遗留实现缺口**：`transform_sse`（真实流路径）此前未接入
+`translate::ResponseAccumulator::apply_chunk`，首轮 reasoning 透传只改
+了镜像函数（实际不生效）——现统一为单一解析路径（`apply_chunk`），并
+补真实流路径集成测试（`SSE → reasoning/text/finish`）。
+
+验证：示例测试 **23/23**；全量回归 **198/198** 全绿、clippy 零警告、
+`cargo doc --workspace` 零警告、fmt 干净。
