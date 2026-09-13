@@ -13,12 +13,15 @@ pub mod translate;
 use std::sync::{Arc, RwLock};
 
 use futures::StreamExt;
+use reqwest::header::HeaderMap;
 use serde::{Deserialize, Serialize};
 
 use synonz::BoxFuture;
 use synonz::ModelError;
 use synonz::ModelStream;
 use synonz::ModelStreamItem;
+
+pub use reqwest::header::{HeaderName, HeaderValue, USER_AGENT};
 
 /// The default public API base URL.
 pub const DEFAULT_BASE_URL: &str = "https://api.openai.com/v1";
@@ -101,6 +104,7 @@ pub struct Client {
     http: reqwest::Client,
     base_url: String,
     api_key: String,
+    headers: HeaderMap,
     state: Arc<RwLock<ClientState>>,
 }
 
@@ -124,11 +128,25 @@ impl Client {
             http: reqwest::Client::new(),
             base_url: base_url.into(),
             api_key: api_key.into(),
+            headers: HeaderMap::new(),
             state: Arc::new(RwLock::new(ClientState {
                 model_name: model_name.into(),
                 options: ModelOptions::default(),
             })),
         }
+    }
+
+    /// Adds a default header sent with every request (connection-level
+    /// configuration — build a new client to change it).
+    ///
+    /// Typical uses: a dedicated `User-Agent` identifying the application
+    /// (gateways ask for this instead of a generic SDK/HTTP-library name),
+    /// or a per-session routing header (for example OpenCode Go's
+    /// `x-opencode-session`). [`USER_AGENT`] is re-exported for
+    /// convenience.
+    pub fn header(mut self, name: HeaderName, value: HeaderValue) -> Self {
+        self.headers.insert(name, value);
+        self
     }
 
     /// Binds the initial inference parameters (temperature, token budget).
@@ -175,6 +193,7 @@ impl Client {
             .http
             .get(self.endpoint("models"))
             .bearer_auth(&self.api_key)
+            .headers(self.headers.clone())
             .send()
             .await
             .map_err(|error| ModelError::Transport {
@@ -245,6 +264,7 @@ impl synonz::Model for Client {
                 .http
                 .post(self.endpoint("chat/completions"))
                 .bearer_auth(&self.api_key)
+                .headers(self.headers.clone())
                 .json(&body)
                 .send()
                 .await

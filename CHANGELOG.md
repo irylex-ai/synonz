@@ -52,6 +52,11 @@ with the table below.
   is narration only — it never enters the canonical assistant message.
 - **Model listing** (`synonz-openai`): `Client::list_models()` calls the
   standard `GET /models` route (sorted, deduplicated ids).
+- **Custom request headers** (`synonz-openai`): `Client::header(name,
+  value)` adds default headers to every request — a dedicated
+  `User-Agent` and/or a session header such as OpenCode Go's
+  `x-opencode-session`; `USER_AGENT`, `HeaderName`, and `HeaderValue`
+  are re-exported by the adapter.
 
 ### Changed
 

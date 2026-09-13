@@ -440,3 +440,24 @@ LLM 的提示词到底是什么"。
 
 验证：示例测试 **36/36**；全量回归 **215/215** 全绿、clippy 零警告、
 `cargo doc --workspace` 零警告、fmt 干净。
+
+## 20. 第十轮：请求头支持（2026-09-12）
+
+irylex 询问：是否支持自定义请求头（OpenCode Go 要求客户端发送专属
+User-Agent 与每会话稳定的 `x-opencode-session`）。
+
+处置：
+
+1. **适配器能力（`synonz-openai`，加性）**：新增
+   `Client::header(name, value)` 构造期默认请求头，作用于
+   `chat/completions` 与 `GET /models`；重导出 `HeaderName` /
+   `HeaderValue` / `USER_AGENT`（使用者无需直接依赖 reqwest）；此前
+   reqwest 默认不发送 User-Agent，网关会视为通用库流量；
+2. **示例**：chat_tui 发送 `User-Agent: synonz-chat-tui/0.4.0` 与
+   `x-opencode-session: synonz-chat-tui-<pid>-<millis>`（一次运行即一个
+   会话，ID 稳定）；向导的模型列表请求同样带 UA；
+3. **测试**：wiremock 断言两枚请求头随请求发出
+   （chat/completions）。
+
+验证：示例测试 **36/36**；全量回归 **216/216** 全绿、clippy 零警告、
+`cargo doc --workspace` 零警告、fmt 干净。

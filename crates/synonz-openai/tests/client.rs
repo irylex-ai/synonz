@@ -7,7 +7,7 @@
 //! credentials.
 
 use futures::StreamExt;
-use wiremock::matchers::{body_partial_json, method, path};
+use wiremock::matchers::{body_partial_json, header, method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
 use synonz::message::Message;
@@ -170,6 +170,33 @@ async fn reasoning_deltas_stream_and_stay_out_of_the_message() {
         }],
         "reasoning must not join the canonical message"
     );
+}
+
+#[tokio::test]
+async fn default_headers_are_sent_with_every_request() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/chat/completions"))
+        .and(header("user-agent", "synonz-test/1.0"))
+        .and(header("x-opencode-session", "session-1"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "text/event-stream")
+                .set_body_string(SSE_BODY),
+        )
+        .mount(&server)
+        .await;
+
+    let client = Client::new(server.uri(), "test-key", "gpt-4o-mini")
+        .header(
+            synonz_openai::USER_AGENT,
+            synonz_openai::HeaderValue::from_static("synonz-test/1.0"),
+        )
+        .header(
+            synonz_openai::HeaderName::from_static("x-opencode-session"),
+            synonz_openai::HeaderValue::from_static("session-1"),
+        );
+    let _stream = client.stream(smoke_request()).await.unwrap();
 }
 
 #[tokio::test]

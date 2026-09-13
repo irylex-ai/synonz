@@ -35,7 +35,7 @@ use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
 use ratatui::layout::{Position, Rect};
 use synonz::{Agent, Conversation, Subject, SubjectType, SynonzRuntime};
-use synonz_openai::{Client, ReasoningEffort};
+use synonz_openai::{Client, HeaderName, HeaderValue, ReasoningEffort, USER_AGENT};
 
 use app::{ChatState, Entry, Focus, Selection, Status, TraceStore, selection_text};
 use setup::{Outcome, Setup};
@@ -96,7 +96,17 @@ async fn run(terminal: &mut ChatTerminal) -> io::Result<()> {
     // ---- session ------------------------------------------------------
     let trace = TraceStore::default();
     let runtime = SynonzRuntime::builder().observer(trace.clone()).build();
-    let client = Client::new(base_url, api_key, model.clone());
+    let client = Client::new(base_url, api_key, model.clone())
+        // Gateways (e.g. OpenCode Go) ask for a dedicated client identity
+        // and a stable per-session id for routing and prompt caching.
+        .header(
+            USER_AGENT,
+            HeaderValue::from_static("synonz-chat-tui/0.4.0"),
+        )
+        .header(
+            HeaderName::from_static("x-opencode-session"),
+            HeaderValue::from_str(&session_id()).expect("session id is valid"),
+        );
     if let Some(effort) = effort {
         let mut options = client.options();
         options.reasoning_effort = Some(effort);
@@ -191,6 +201,15 @@ async fn run(terminal: &mut ChatTerminal) -> io::Result<()> {
     Ok(())
 }
 
+/// A stable per-run session id (the conversation's routing identity).
+fn session_id() -> String {
+    let millis = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_millis())
+        .unwrap_or(0);
+    format!("synonz-chat-tui-{}-{millis}", std::process::id())
+}
+
 /// Fetches the endpoint's model list for the wizard (best effort; the
 /// wizard keeps accepting a hand-typed model on failure).
 async fn load_models(wizard: &mut Setup) {
@@ -198,6 +217,10 @@ async fn load_models(wizard: &mut Setup) {
         wizard.base_url.text().trim(),
         wizard.api_key.text(),
         "unused",
+    )
+    .header(
+        USER_AGENT,
+        HeaderValue::from_static("synonz-chat-tui/0.4.0"),
     );
     match client.list_models().await {
         Ok(models) => wizard.set_models(models),
