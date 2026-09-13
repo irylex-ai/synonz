@@ -60,11 +60,11 @@ Run them with `cargo run -p synonz-examples --bin <name>`:
 ## Documentation
 
 - Architecture decisions: `docs/adr/` (ADR-0001 and onward)
-- Architecture overview: `docs/architecture/v5.zh-CN.md` (the 0.4.0
-  target-state view; the v4 / v3 / s2 / v1 documents are retained as era
-  snapshots)
-- Implementation plan: `docs/design/implementation-plan-0.4.0.zh-CN.md`
-  (the 0.3.0 / 0.2.0 plans are retained for their stage records)
+- Architecture overview: `docs/architecture/v6.zh-CN.md` (the 0.5.0
+  target-state view; the v5 / v4 / v3 / s2 / v1 documents are retained as
+  era snapshots)
+- Implementation plan: `docs/design/implementation-plan-0.5.0.zh-CN.md`
+  (the 0.4.0 / 0.3.0 / 0.2.0 plans are retained for their stage records)
 - Changelog: `CHANGELOG.md` (migration tables inside for the breaking
   waves)
 
