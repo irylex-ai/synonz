@@ -214,7 +214,7 @@ async fn run_turn(
     events: &mut EventStream,
     input: &str,
 ) -> io::Result<()> {
-    chat.status = Status::Running;
+    chat.begin_turn();
     let mut execution = agent.run(conversation.turn_input(input));
     let mut ticker = tokio::time::interval(Duration::from_millis(120));
     ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -226,6 +226,7 @@ async fn run_turn(
                 Some(Ok(Event::Key(key))) => {
                     if is_ctrl_c(&key) {
                         chat.should_quit = true;
+                        chat.request_cancel();
                         execution.cancel();
                     } else if key.code == KeyCode::Tab {
                         chat.cycle_focus();
@@ -233,6 +234,7 @@ async fn run_turn(
                         if chat.focus != Focus::Input {
                             chat.focus = Focus::Input;
                         } else {
+                            chat.request_cancel();
                             execution.cancel();
                         }
                     } else {
@@ -243,6 +245,7 @@ async fn run_turn(
                 Some(Ok(_)) => {}
                 Some(Err(_)) | None => {
                     chat.should_quit = true;
+                    chat.request_cancel();
                     execution.cancel();
                 }
             },
@@ -259,7 +262,7 @@ async fn run_turn(
             }
         }
     }
-    chat.status = Status::Idle;
+    chat.end_turn();
     Ok(())
 }
 

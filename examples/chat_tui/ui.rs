@@ -256,6 +256,7 @@ pub fn draw_chat(frame: &mut Frame, chat: &mut ChatState) {
             Constraint::Min(3),
             Constraint::Length(suggestions_height),
             Constraint::Length(3),
+            Constraint::Length(1),
         ])
         .split(left);
     chat.chat_area = rows[0];
@@ -264,8 +265,84 @@ pub fn draw_chat(frame: &mut Frame, chat: &mut ChatState) {
         draw_suggestions(frame, &matches, rows[1]);
     }
     draw_input(frame, chat, rows[2]);
+    draw_status_line(frame, chat, rows[3]);
     if let Some(area) = trace_area {
         draw_trace(frame, chat, area);
+    }
+}
+
+/// The status line: state animation, timing, throughput, and context size.
+fn draw_status_line(frame: &mut Frame, chat: &ChatState, area: Rect) {
+    if area.width == 0 {
+        return;
+    }
+    let context = match chat.trace.latest() {
+        Some(entry) => format!("ctx ~{} tok", format_count(entry.context_tokens)),
+        None => "ctx –".to_string(),
+    };
+    let spinner = SPINNER[chat.spinner % SPINNER.len()];
+    let state = match chat.status {
+        Status::Running if chat.is_cancelling() => format!("cancelling… {spinner}"),
+        Status::Running => format!("running {spinner}"),
+        Status::Idle => "idle".to_string(),
+    };
+    let mut parts = vec![state];
+    if let Some(elapsed) = chat.elapsed() {
+        parts.push(format_duration(elapsed));
+    }
+    if let Some(think) = chat.think_time() {
+        parts.push(format!("think {}", format_duration(think)));
+    }
+    let rate = match chat.status {
+        Status::Running => chat.live_rate(),
+        Status::Idle => chat.last_rate(),
+    };
+    if let Some(rate) = rate {
+        let prefix = if chat.status == Status::Running {
+            "~"
+        } else {
+            ""
+        };
+        parts.push(format!("{prefix}{rate:.0} tok/s"));
+    }
+    if chat.status == Status::Running {
+        parts.push(format!("out ~{} tok", format_count(chat.output_tokens())));
+    }
+    parts.push(context);
+    let state_style = if chat.status == Status::Running {
+        tool_style()
+    } else {
+        note_style()
+    };
+    let mut spans = vec![Span::styled(format!(" {} ", parts[0]), state_style)];
+    if parts.len() > 1 {
+        spans.push(Span::styled(
+            format!("· {}", parts[1..].join(" · ")),
+            note_style(),
+        ));
+    }
+    frame.render_widget(Paragraph::new(Line::from(spans)), area);
+}
+
+/// A compact duration: `12.3s` or `1m02s`.
+fn format_duration(duration: std::time::Duration) -> String {
+    let seconds = duration.as_secs_f64();
+    if seconds < 60.0 {
+        format!("{seconds:.1}s")
+    } else {
+        let minutes = (seconds / 60.0) as u64;
+        format!("{minutes}m{:02.0}s", seconds - minutes as f64 * 60.0)
+    }
+}
+
+/// A compact count: `123`, `1.23k`, or `12.3k`.
+fn format_count(value: usize) -> String {
+    if value >= 10_000 {
+        format!("{:.1}k", value as f64 / 1000.0)
+    } else if value >= 1_000 {
+        format!("{:.2}k", value as f64 / 1000.0)
+    } else {
+        value.to_string()
     }
 }
 
@@ -338,15 +415,10 @@ impl Widget for SelectionHighlight<'_> {
 
 fn draw_transcript(frame: &mut Frame, chat: &mut ChatState, area: Rect) {
     let focused = chat.focus == Focus::Chat;
-    let state = match chat.status {
-        Status::Idle => "idle".to_string(),
-        Status::Running => format!("running {}", SPINNER[chat.spinner % SPINNER.len()]),
-    };
     let title = format!(
-        " chat │ {} · thinking {} · {} ",
+        " chat │ {} · thinking {} ",
         chat.model,
-        effort_label(chat.effort),
-        state
+        effort_label(chat.effort)
     );
     let block = Block::default()
         .borders(Borders::ALL)
@@ -486,15 +558,18 @@ fn draw_trace(frame: &mut Frame, chat: &mut ChatState, area: Rect) {
     chat.sync_trace(&entry);
     let mut lines: Vec<Line<'static>> = Vec::new();
     let mut plains: Vec<String> = Vec::new();
+    let (system, user, assistant, tool) = entry.role_counts;
     let header = format!(
-        "#{} · round {} · {} · {} messages · tools: read_file, list_dir, file_info",
+        "#{} · round {} · {} · {} messages (system {system} · user {user} · assistant {assistant} · tool {tool}) · ctx ~{} tok / {} chars",
         entry.number,
         entry
             .round
             .map(|round| round.to_string())
             .unwrap_or_else(|| "–".to_string()),
         entry.purpose,
-        entry.messages.len()
+        entry.messages.len(),
+        format_count(entry.context_tokens),
+        format_count(entry.context_chars),
     );
     lines.push(Line::from(Span::styled(header.clone(), hint_style())));
     plains.push(header);

@@ -396,3 +396,25 @@ irylex 反馈三项：① 第二轮回答把第一轮问题也答了（上下文
 
 延期项：L1 体积上限；拖选自动滚动；VTE（GNOME Terminal）不支持 OSC 52
 时用 `/mouse off` + 原生/Shift 拖选。
+
+## 18. 第八轮运行反馈（2026-09-12）
+
+irylex 反馈：状态栏消失（要运行动效 + 每秒 token + 思考耗时 + 上下文
+大小，后续要测两阶段取消）；trace 与 chat 看起来一样。
+
+处置：
+
+1. **状态栏回归**（左列底部一行；trace 仍全高）：`状态 + 转轮` · 本轮
+   耗时 · `think`（本轮开始 → 首个回答/工具输出） · `tok/s`（运行中为
+   流式估算 `~N`，完成后用 provider 真实 usage） · `out`（本轮估算输出
+   token） · `ctx ~N tok`（observer 最近一次请求的估算：ASCII/4 + 宽字符
+   /1.4）；按下取消后显示 `cancelling…`（供两阶段取消观测）；
+2. **trace 与 chat 的区别澄清**：trace 是**实际发出的完整提示词**——
+   含 chat 不显示的 system 内容（agent system prompt、L2 摘要、L3
+   召回），按模型轮次逐次刷新（工具回路每次请求都在更新），且是原始
+   消息序列；chat 是渲染叙事。trace 头部增加统计行：`#N · round ·
+   purpose · N messages (system/user/assistant/tool 计数) · ctx ~N tok /
+   N chars`；模型/档位从状态栏移回 chat 标题。
+
+验证：示例测试 **34/34**；全量回归 **213/213** 全绿、clippy 零警告、
+`cargo doc --workspace` 零警告、fmt 干净。

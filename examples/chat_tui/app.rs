@@ -3,12 +3,13 @@
 
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use crossterm::event::KeyCode;
 use ratatui::layout::Rect;
 use synonz::{
     ExecutionEvent, Message, ModelDelta, ModelEvent, Observer, ObserverContext, SynonzEvent,
-    ToolContent, ToolResult, TurnEvent,
+    TokenUsage, ToolContent, ToolResult, TurnEvent,
 };
 use synonz_openai::ReasoningEffort;
 use unicode_width::UnicodeWidthChar;
@@ -235,6 +236,12 @@ pub struct TraceEntry {
     pub purpose: String,
     /// The full canonical message list sent to the model.
     pub messages: Vec<Message>,
+    /// The context size in characters (all message content).
+    pub context_chars: usize,
+    /// The context size as an estimated token count.
+    pub context_tokens: usize,
+    /// Role counts: (system, user, assistant, tool).
+    pub role_counts: (usize, usize, usize, usize),
 }
 
 /// The latest model request, shared between the bus observer and the UI.
@@ -248,11 +255,31 @@ impl TraceStore {
     /// Records one model request as the latest trace entry.
     pub fn record(&self, round: Option<usize>, purpose: String, messages: Vec<Message>) {
         let number = self.counter.fetch_add(1, Ordering::Relaxed) + 1;
+        let mut context_chars = 0;
+        let mut ascii = 0;
+        let mut wide = 0;
+        let mut role_counts = (0, 0, 0, 0);
+        for message in &messages {
+            let (chars, msg_ascii, msg_wide) = message_metrics(message);
+            context_chars += chars;
+            ascii += msg_ascii;
+            wide += msg_wide;
+            match message.role {
+                synonz::Role::System => role_counts.0 += 1,
+                synonz::Role::User => role_counts.1 += 1,
+                synonz::Role::Assistant => role_counts.2 += 1,
+                synonz::Role::Tool => role_counts.3 += 1,
+                _ => {}
+            }
+        }
         let entry = Arc::new(TraceEntry {
             number,
             round,
             purpose,
             messages,
+            context_chars,
+            context_tokens: estimate_tokens(ascii, wide),
+            role_counts,
         });
         *self
             .inner
@@ -267,6 +294,49 @@ impl TraceStore {
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .clone()
     }
+}
+
+/// Content characters of one message, split into ASCII and wide classes.
+fn message_metrics(message: &Message) -> (usize, usize, usize) {
+    let mut chars = 0;
+    let mut ascii = 0;
+    let mut wide = 0;
+    let mut count = |text: &str| {
+        for ch in text.chars() {
+            chars += 1;
+            if ch.is_ascii() {
+                ascii += 1;
+            } else {
+                wide += 1;
+            }
+        }
+    };
+    for block in &message.blocks {
+        match block {
+            synonz::ContentBlock::Text { text } => count(text),
+            synonz::ContentBlock::ToolCall(call) => {
+                count(&call.name);
+                count(&call.arguments.to_string());
+            }
+            synonz::ContentBlock::ToolResult { result, .. } => match result {
+                ToolResult::Ok { content } => match content {
+                    ToolContent::Text { text } => count(text),
+                    ToolContent::Json { value } => count(&value.to_string()),
+                    _ => {}
+                },
+                ToolResult::Err { message } => count(message),
+                _ => {}
+            },
+            _ => {}
+        }
+    }
+    (chars, ascii, wide)
+}
+
+/// A rough token estimate: ~4 ASCII characters or ~1.4 wide characters per
+/// token (the usual mixed-language rule of thumb).
+pub fn estimate_tokens(ascii: usize, wide: usize) -> usize {
+    (ascii as f64 / 4.0 + wide as f64 / 1.4).round() as usize
 }
 
 impl Observer for TraceStore {
@@ -344,6 +414,21 @@ pub struct ChatState {
     pub spinner: usize,
     /// Set when the user asked to quit.
     pub should_quit: bool,
+    /// Whether cancellation was requested and the terminal is pending.
+    cancelling: bool,
+    /// When the current turn started.
+    turn_started: Option<Instant>,
+    /// When the first answer-side output (text or tool call) arrived.
+    answer_at: Option<Instant>,
+    /// Streamed output characters, split into ASCII and wide classes.
+    ascii_chars: usize,
+    wide_chars: usize,
+    /// The last turn's elapsed time.
+    last_elapsed: Option<Duration>,
+    /// The last turn's thinking time (start → first answer-side output).
+    last_think: Option<Duration>,
+    /// The last turn's real usage, when the provider reported it.
+    last_usage: Option<TokenUsage>,
     /// The transcript index of the assistant entry being streamed.
     streaming: Option<usize>,
     /// The transcript index of the reasoning entry being streamed.
@@ -384,8 +469,111 @@ impl ChatState {
             status: Status::Idle,
             spinner: 0,
             should_quit: false,
+            cancelling: false,
+            turn_started: None,
+            answer_at: None,
+            ascii_chars: 0,
+            wide_chars: 0,
+            last_elapsed: None,
+            last_think: None,
+            last_usage: None,
             streaming: None,
             reasoning_streaming: None,
+        }
+    }
+
+    /// Starts a turn: resets the live metrics and enters the running state.
+    pub fn begin_turn(&mut self) {
+        self.turn_started = Some(Instant::now());
+        self.answer_at = None;
+        self.ascii_chars = 0;
+        self.wide_chars = 0;
+        self.cancelling = false;
+        self.status = Status::Running;
+    }
+
+    /// Finishes the turn: freezes the final metrics and returns to idle.
+    pub fn end_turn(&mut self) {
+        if let Some(started) = self.turn_started.take() {
+            self.last_elapsed = Some(started.elapsed());
+            if let Some(answer) = self.answer_at {
+                self.last_think = Some(answer.saturating_duration_since(started));
+            }
+        }
+        self.cancelling = false;
+        self.status = Status::Idle;
+    }
+
+    /// Marks that cancellation was requested (the terminal may follow).
+    pub fn request_cancel(&mut self) {
+        if self.status == Status::Running {
+            self.cancelling = true;
+        }
+    }
+
+    /// Whether a cancellation request is pending its terminal.
+    pub fn is_cancelling(&self) -> bool {
+        self.cancelling
+    }
+
+    /// The current turn's elapsed time (or the last turn's, when idle).
+    pub fn elapsed(&self) -> Option<Duration> {
+        self.turn_started
+            .map(|started| started.elapsed())
+            .or(self.last_elapsed)
+    }
+
+    /// The thinking time: turn start → first answer-side output.
+    pub fn think_time(&self) -> Option<Duration> {
+        match (self.turn_started, self.answer_at) {
+            (Some(started), Some(answer)) => Some(answer.saturating_duration_since(started)),
+            _ => self.last_think,
+        }
+    }
+
+    /// The estimated output tokens streamed so far this turn.
+    pub fn output_tokens(&self) -> usize {
+        estimate_tokens(self.ascii_chars, self.wide_chars)
+    }
+
+    /// The live output rate (estimated tokens/second) while running.
+    pub fn live_rate(&self) -> Option<f64> {
+        let elapsed = self.turn_started?.elapsed().as_secs_f64();
+        if elapsed < 0.2 {
+            return None;
+        }
+        Some(self.output_tokens() as f64 / elapsed)
+    }
+
+    /// The last turn's output rate: real usage when reported, else the
+    /// streamed estimate.
+    pub fn last_rate(&self) -> Option<f64> {
+        let elapsed = self.last_elapsed?.as_secs_f64();
+        if elapsed < 0.05 {
+            return None;
+        }
+        let tokens = self
+            .last_usage
+            .map(|usage| usage.output_tokens as usize)
+            .unwrap_or_else(|| self.output_tokens());
+        Some(tokens as f64 / elapsed)
+    }
+
+    /// Records streamed output characters for the live metrics.
+    fn note_stream(&mut self, text: &str) {
+        for ch in text.chars() {
+            if ch.is_ascii() {
+                self.ascii_chars += 1;
+            } else {
+                self.wide_chars += 1;
+            }
+        }
+    }
+
+    /// Marks the first answer-side output (thinking ends here).
+    fn mark_answer_started(&mut self) {
+        if self.answer_at.is_none() {
+            self.answer_at = Some(Instant::now());
         }
     }
 
@@ -414,6 +602,8 @@ impl ChatState {
                         self.streaming = Some(self.transcript.len() - 1);
                     }
                 }
+                self.note_stream(text);
+                self.mark_answer_started();
                 self.mark_new_content();
                 false
             }
@@ -429,6 +619,7 @@ impl ChatState {
                         self.reasoning_streaming = Some(self.transcript.len() - 1);
                     }
                 }
+                self.note_stream(text);
                 self.mark_new_content();
                 false
             }
@@ -437,6 +628,7 @@ impl ChatState {
                     name: call.name.clone(),
                     arguments: summarize_arguments(&call.arguments),
                 });
+                self.mark_answer_started();
                 self.mark_new_content();
                 false
             }
@@ -452,6 +644,7 @@ impl ChatState {
             }
             ExecutionEvent::Completed(output) => {
                 self.reasoning_streaming = None;
+                self.last_usage = Some(output.usage);
                 let text = output.text().unwrap_or_default().to_string();
                 match self.streaming.take() {
                     Some(index) => {
@@ -918,6 +1111,56 @@ mod tests {
     }
 
     #[test]
+    fn turn_metrics_freeze_on_completion() {
+        let mut chat = ChatState::new("test-model".to_string(), None);
+        chat.begin_turn();
+        assert_eq!(chat.status, Status::Running);
+        chat.request_cancel();
+        assert!(chat.is_cancelling());
+        assert!(!chat.apply_event(&ExecutionEvent::Delta(ModelDelta::Text {
+            text: "hello".into()
+        })));
+        assert!(chat.think_time().is_some(), "first text marks the answer");
+        assert_eq!(chat.output_tokens(), estimate_tokens(5, 0));
+        assert!(chat.apply_event(&completed("hello")));
+        chat.end_turn();
+        assert_eq!(chat.status, Status::Idle);
+        assert!(!chat.is_cancelling());
+        assert!(chat.elapsed().is_some());
+        assert!(chat.think_time().is_some());
+    }
+
+    #[test]
+    fn token_estimate_is_mixed_language_aware() {
+        assert_eq!(estimate_tokens(40, 0), 10);
+        assert_eq!(estimate_tokens(0, 14), 10);
+    }
+
+    #[test]
+    fn trace_records_context_size_and_roles() {
+        let store = TraceStore::default();
+        store.record(
+            None,
+            "Reasoning".to_string(),
+            vec![
+                Message::system("sys"),
+                Message::user("hi"),
+                Message::assistant_text("hello"),
+                Message::tool_result(
+                    "c1",
+                    ToolResult::Ok {
+                        content: ToolContent::Text { text: "res".into() },
+                    },
+                ),
+            ],
+        );
+        let entry = store.latest().expect("entry");
+        assert_eq!(entry.role_counts, (1, 1, 1, 1));
+        assert!(entry.context_chars >= 3 + 2 + 5 + 3);
+        assert!(entry.context_tokens > 0);
+    }
+
+    #[test]
     fn trace_scroll_resets_on_a_new_request() {
         let mut chat = ChatState::new("test-model".to_string(), None);
         chat.last_trace_max = 30;
@@ -933,6 +1176,9 @@ mod tests {
             round: Some(1),
             purpose: "Reasoning".to_string(),
             messages: Vec::new(),
+            context_chars: 0,
+            context_tokens: 0,
+            role_counts: (0, 0, 0, 0),
         };
         chat.sync_trace(&entry);
         assert_eq!(chat.trace_scroll, 0, "a new request resets to the top");
