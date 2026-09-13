@@ -1,6 +1,6 @@
 # ADR-0019: 上下文引擎扩展面——具体引擎、两相位策略与模型叙述归属
 
-- 状态: DRAFT（待 irylex 评审后转 APPROVED）
+- 状态: APPROVED（2026-09-13，irylex 人工评审通过）
 - 日期: 2026-09-13
 - 决策者: irylex（人类逐点确认；本 ADR 每个决策均经弹窗逐项确认，
   遵循 `.opencode/rules/architecture.md` §5–§9 的渐进决策流程）
