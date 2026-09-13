@@ -3,6 +3,10 @@
 - 状态: 提议（DRAFT，待 irylex 评审后转 APPROVED）
 - 日期: 2026-09-13
 - 决策者: irylex（人类逐点确认——结论均经弹窗逐项确认）
+- 评审修订（2026-09-13，irylex 评审意见）：**槽契约移除
+  `EventSink`**——把"发不发事件"的决定交给槽实现是错的；改为
+  **框架保证可观测**（流程事实由引擎发；引擎提供的模型调用由框架
+  自动叙述）。相关槽签名、备选记录与验证要求同步更新。
 - 性质: 上下文扩展面的契约补齐——读侧输入改写（模型视图 vs 真相）、
   `InputRewriter` 策略槽、`MemoryReader` 只读门面（取代策略槽的全
   facade 访问）、槽最小能力纪律、L2→L3 蒸馏槽；破坏性变化随 0.5.0
@@ -71,8 +75,7 @@ pub trait InputRewriter: Send + Sync + 'static {
         &'a self,
         input: &'a str,             // 用户原文
         background: &'a [Message],  // 装配产物（召回后的事实背景）
-        model: &'a dyn Model,       // 引擎上下文模型
-        events: &'a EventSink,
+        model: &'a dyn Model,       // 引擎上下文模型（框架自动叙述其调用）
     ) -> BoxFuture<'a, Result<Option<String>, String>>;
 }
 ```
@@ -81,8 +84,8 @@ pub trait InputRewriter: Send + Sync + 'static {
   → 填 `rewritten_input`；**有槽时槽胜出**，无槽时装配器自填值透传。
 - 自定义整引擎（`trait Context`）可直接填输出字段——改写通道在 trait
   输出上，不强制走默认引擎的槽。
-- 改写不预设必须使用 LLM（规则、画像、策略开关均可参与）；`model`/
-  `events` 供 LLM 型实现使用与观测，规则型可忽略。
+- 改写不预设必须使用 LLM（规则、画像、策略开关均可参与）；`model` 供
+  LLM 型实现使用（其调用由框架自动叙述），规则型可忽略。
 
 ### 3. `MemoryReader`：只读、按主体作用域绑定的记忆门面
 
@@ -133,7 +136,6 @@ pub trait MemoryDistiller: Send + Sync + 'static {
         topic: &'a str,
         reader: MemoryReader<'a>,
         model: &'a dyn Model,
-        events: &'a EventSink,
     ) -> BoxFuture<'a, Result<Vec<String>, String>>;
 }
 ```
@@ -141,9 +143,19 @@ pub trait MemoryDistiller: Send + Sync + 'static {
 - `DefaultContext::with_distiller(...)`；默认实现 = 现有机械提升；
   失败语义顺带改良：**先变换、成功后再 pop**（失败保留 L2 +
   `FlowFailed { stage: Distill }`，不丢数据）。
-- `MemorySummarizer` 签名保持不变（`entries, model, events`）——它
-  只做 L1→L2 内容变换；**L1→L2 的完整策略（何时压、压多少、原子序）
-  是引擎职责**（`l1_window`/`l2_cap`），换策略 = 换引擎。
+- **可观测性归属（评审修订）**：槽契约**不含 `EventSink`**——"发不发
+  事件"不是槽实现的决定。保证来自框架两侧：**流程事实由引擎发**
+  （`Compacted`/`Distilled`/`FlowFailed` 等，与槽无关）；**引擎提供的
+  模型调用由框架自动叙述**——引擎传给槽的 `model` 是内部
+  `NarratedModel` 包装（自动发 `ModelEvent::Requested`/`Responded`，
+  `CallPurpose::ContextManagement`、`round: None`），槽无需也不该
+  自己发事件。自持模型客户端的实现（Route A 外部系统）其调用的
+  可观测性由实现自担——边界写明，不假称框架保证。
+- `MemorySummarizer` 同步收敛：`summarize(entries, model)`——**移除
+  `events` 参数**（破坏项）；内置实现的手工 Requested/Responded 发射
+  删除，改由框架包装统一叙述（消除双重发射）。它只做 L1→L2 内容
+  变换；**L1→L2 的完整策略（何时压、压多少、原子序）是引擎职责**
+  （`l1_window`/`l2_cap`），换策略 = 换引擎。
 
 ### 5. 模型角色（本波附带收敛）
 
@@ -204,12 +216,19 @@ pub trait MemoryDistiller: Send + Sync + 'static {
 8. **多主题会话状态（T1 注册表 / T3 轨迹）**——本轮否决：主题结论为
    T2（活跃主题=框架标签；多主题集合与切换轨迹归引擎态、自持久化），
    无真实触发条件；记录于扩展指南，不单独立 ADR。
+9. **把 `EventSink` 传给槽、由槽实现决定是否发事件**——否决（irylex
+   评审意见）：把可观测性的决定权交给用户实现，框架无法保证"重要
+   执行行为可观测"；改为**引擎发流程事实 + 框架包装叙述模型调用**，
+   槽契约不含 `EventSink`。
 
 ## Consequences（后果）
 
 **破坏项（0.5.0 单波）**：
 
 - `ContextAssemblerInput.memory: &Memory` → `reader: MemoryReader<'a>`；
+- `MemorySummarizer::summarize` 移除 `events` 参数（`(entries, model)`）；
+- 槽契约不再出现 `EventSink`（`InputRewriter`/`MemoryDistiller` 直接
+  不定义；模型调用由框架叙述）；
 - `with_summary_prompt` 移除；`with_summary_model` 改名 `with_model`；
 - `SummaryBlock` → `L2Entry`、`KnowledgeFragment` → `L3Entry`、
   `FragmentIdentity` → `L3Identity`。
@@ -236,4 +255,7 @@ pub trait MemoryDistiller: Send + Sync + 'static {
 **验证要求**：全量回归 + 新测试——改写进入模型视图而真相（`Turn`/
 L1）保留原文；默认（无改写）行为与 0.4.0 一致；`MemoryReader` 只读
 面可用且装配器不可写；蒸馏默认/自定义路径与失败不丢 L2；命名迁移
-后编译面完整。
+后编译面完整；**槽可观测性由框架保证**——自定义槽只调用传入的
+`model`、自身不发任何事件，观察者仍能收到 `ModelEvent::Requested`/
+`Responded`（框架叙述），且流程事实（`Compacted`/`Distilled`）不依赖
+槽实现。
