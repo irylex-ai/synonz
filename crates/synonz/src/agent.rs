@@ -68,7 +68,7 @@ use tokio::sync::mpsc;
 use crate::CancellationToken;
 use crate::bus::EventSink;
 use crate::cancel::{CancelCore, CancelHandle, CancelOutcome};
-use crate::context::{Context, ContextAssemblerInput, TurnContext};
+use crate::context::{Context, ContextAssemblerInput};
 use crate::conversation::{Conversation, Turn, TurnInput};
 use crate::error::{AgentError, ModelError};
 use crate::event::{
@@ -112,7 +112,7 @@ pub struct AgentBuilder {
     tools: Vec<Arc<dyn Tool>>,
     system_prompt: Option<String>,
     max_rounds: Option<u32>,
-    context: Option<Arc<dyn Context>>,
+    context: Option<Arc<Context>>,
 }
 
 impl AgentBuilder {
@@ -131,13 +131,12 @@ impl AgentBuilder {
         self
     }
 
-    /// Sets the state engine (default:
-    /// [`DefaultContext`](crate::DefaultContext) fully
+    /// Sets the state engine (default: [`Context`] fully
     /// defaulted). The engine is the agent's context — its materialization
-    /// (assembly) and maintenance (archive/compaction/distillation)
-    /// strategy; each agent carries its own (multi-agent strategy
-    /// differences are expressed here).
-    pub fn context(mut self, context: impl Context + 'static) -> Self {
+    /// (input preprocessing + assembly) and maintenance
+    /// (archive/compaction/distillation) strategy; each agent carries its
+    /// own (multi-agent strategy differences are expressed here).
+    pub fn context(mut self, context: Context) -> Self {
         self.context = Some(Arc::new(context));
         self
     }
@@ -228,7 +227,7 @@ impl AgentBuilder {
             default_timeout: None,
             context: self
                 .context
-                .unwrap_or_else(|| Arc::new(crate::context::DefaultContext::new())),
+                .unwrap_or_else(|| Arc::new(crate::context::Context::new())),
         })
     }
 }
@@ -245,7 +244,7 @@ pub struct Agent {
     system_prompt: Option<String>,
     max_rounds: u32,
     default_timeout: Option<Duration>,
-    context: Arc<dyn Context>,
+    context: Arc<Context>,
 }
 
 impl Agent {
@@ -656,7 +655,7 @@ struct AgentLoopTask {
     system_prompt: Option<String>,
     max_rounds: u32,
     conversation: Conversation,
-    context: Arc<dyn Context>,
+    context: Arc<Context>,
     sink: EventSink,
 }
 
@@ -879,19 +878,18 @@ impl AgentLoopTask {
                 // the terminal; the heavy curation runs in the background
                 // (tracked in the runtime's conversation table).
                 let memory = self.runtime.memory();
-                let turn_context = TurnContext {
-                    conversation: &self.conversation,
-                    input: &input.text,
-                    messages: messages[base_len..].to_vec(),
-                    memory: &memory,
-                    model: Arc::clone(&self.model),
-                    events: sink.clone(),
-                    task_spawner: ConversationTaskSpawner::new(
-                        &self.runtime,
-                        self.conversation.id(),
-                    ),
-                };
-                let flow_errors = self.context.on_turn_completed(&turn_context).await;
+                let flow_errors = self
+                    .context
+                    .on_turn_completed(
+                        &self.conversation,
+                        &input.text,
+                        messages[base_len..].to_vec(),
+                        &memory,
+                        Arc::clone(&self.model),
+                        sink.clone(),
+                        ConversationTaskSpawner::new(&self.runtime, self.conversation.id()),
+                    )
+                    .await;
                 for error in flow_errors {
                     sink.emit_memory(crate::MemoryEvent::FlowFailed {
                         stage: error.stage,

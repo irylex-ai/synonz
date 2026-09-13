@@ -15,10 +15,9 @@ use serde_json::json;
 use tokio_util::sync::CancellationToken;
 
 use synonz::{
-    Agent, AgentError, BoxFuture, CallId, CancelReason, ContentBlock, Context,
-    ContextAssemblerInput, ContextAssemblerOutput, Conversation, ExecutionEvent, MemoryFlowError,
-    MockModel, Model, ModelError, ModelRequest, ModelStream, ModelStreamItem, Role, Subject,
-    SubjectType, SynonzRuntime, Tool, ToolCall, ToolContent, ToolError, ToolResult, TurnContext,
+    Agent, AgentError, CallId, CancelReason, ContentBlock, Conversation, ExecutionEvent, MockModel,
+    Model, ModelError, ModelRequest, ModelStream, ModelStreamItem, Role, Subject, SubjectType,
+    SynonzRuntime, Tool, ToolCall, ToolContent, ToolError, ToolResult,
 };
 
 // ────────────────────────── helpers ──────────────────────────
@@ -218,47 +217,6 @@ async fn run_returns_final_output() {
     assert_eq!(output.usage.input_tokens, 1);
 }
 
-/// A deterministic engine: verbatim L1 replay plus the L1 archive, with no
-/// background maintenance (a test needs no summarizer model calls).
-struct TranscriptContext;
-
-impl Context for TranscriptContext {
-    fn assemble<'a>(
-        &'a self,
-        input: ContextAssemblerInput<'a>,
-    ) -> BoxFuture<'a, ContextAssemblerOutput> {
-        Box::pin(async move {
-            let mut output = ContextAssemblerOutput::default();
-            for entry in input
-                .memory
-                .l1_window(input.subject, input.conversation_id)
-                .unwrap_or_default()
-            {
-                output.messages.extend(entry.messages);
-            }
-            output
-        })
-    }
-
-    fn on_turn_completed<'a>(
-        &'a self,
-        ctx: &'a TurnContext<'a>,
-    ) -> BoxFuture<'a, Vec<MemoryFlowError>> {
-        Box::pin(async move {
-            let topic = String::new();
-            ctx.memory
-                .l1_append(
-                    ctx.conversation.subject(),
-                    ctx.conversation.id(),
-                    &topic,
-                    ctx.messages.clone(),
-                )
-                .unwrap_or_else(|error| panic!("l1 append: {error}"));
-            Vec::new()
-        })
-    }
-}
-
 /// Regression: the completed turn archives its final assistant message, so
 /// the next request's context replays the previous answer. A dropped answer
 /// makes the model answer the earlier question again.
@@ -273,7 +231,6 @@ async fn completed_turns_archive_the_final_answer() {
     let agent = Agent::builder()
         .runtime(&runtime)
         .model(model.clone())
-        .context(TranscriptContext)
         .build()
         .unwrap();
 

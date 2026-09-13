@@ -1,6 +1,7 @@
 # Synonz 0.5.0 实现计划
 
-- 状态: DRAFT（待 irylex 评审后转 APPROVED）
+- 状态: IMPLEMENTING（2026-09-13，irylex 评审通过并开工；里程碑
+  完成记录见 §6）
 - 日期: 2026-09-13
 - 依据: ADR-0019（APPROVED——上下文引擎扩展面）、架构设计文档
   v6（APPROVED）
@@ -186,5 +187,29 @@ M31 蒸馏槽的物料面）；M31 收敛写侧与模型归属；M32 收尾扫�
 
 ## 6. 里程碑完成记录
 
-（待实施——每波完成后按 M21-M27 的体例写入：子项落地要点、B 类
-决议、A 类请示结果、测试计数与验证证据。）
+### M28 引擎形态转型（契约退役）✅（2026-09-13）
+
+- **具体 `Context`**：公开 `trait Context` 删除；`DefaultContext` 改名
+  具体类型 `Context`（`new()` / `Default` / 构造链不变）；`Agent` 与
+  `AgentLoopTask` 持 `Arc<Context>`（无类型擦除）；`AgentBuilder::context`
+  按值接收 `Context`；缺省 `Context::new()`；
+- **内部入口**：`assemble` / `on_turn_completed` 收为 `pub(crate)` 固有
+  方法；`on_turn_completed` 改显式 7 参（`conversation` / `input` /
+  `messages` / `memory` / `agent_model` / `events` / `task_spawner`）；
+  公开 `TurnContext` 移除（内置维护直接用参数 + 既有
+  `BackgroundMaintenanceTask`）；
+- **导出面**：`lib.rs` 重导出更新——`Context` 取代 `DefaultContext`，
+  移除 trait `Context` 与 `TurnContext`；
+- **测试迁移**：`tests/agent.rs` 的 `TranscriptContext`（自实现契约）
+  退役，回归测试改走默认引擎（确定性来源：轮数低于 L1 溢出阈值）；
+  `tests/memory.rs` 三个直接驱动引擎的装配测试改为 **Agent 端到端
+  观测**（模型请求内容 + 总线 `FlowFailed` 事实，新增 `StageRecorder`
+  观察者）——验证切入点从"引擎方法"转为"外部可观察行为"；
+- **B 类决议**：`on_turn_completed` 保留最小充分集 7 参（clippy 阈值
+  处）——局部 `#[allow(clippy::too_many_arguments)]` + 理由注记；不开
+  公开入口；
+- **验证**：全量回归 **216/216** 全绿、clippy 零警告、`cargo doc
+  --workspace --no-deps` 零警告、fmt 干净；全仓无 `impl Context for` /
+  `Arc<dyn Context>` / 公开 `TurnContext` 残留。
+
+（后续里程碑按 M21-M27 体例继续写入。）

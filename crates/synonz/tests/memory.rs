@@ -16,8 +16,8 @@ use std::time::Duration;
 
 use synonz::{
     Agent, Context, ContextAssembler, ContextAssemblerInput, ContextAssemblerOutput, Conversation,
-    ConversationTopicDetector, DefaultContext, MockModel, ModelStreamItem, Subject, SubjectType,
-    SynonzEvent, SynonzRuntime,
+    ConversationTopicDetector, MockModel, ModelStreamItem, Subject, SubjectType, SynonzEvent,
+    SynonzRuntime,
 };
 
 fn env() -> (SynonzRuntime, Subject) {
@@ -101,7 +101,7 @@ async fn post_turn_flow_writes_l1_and_demotes_on_turn_count() {
     let mut conv = Conversation::with_id(&runtime, &subject, "conv-1");
     let agent = Agent::builder()
         .runtime(&runtime)
-        .context(DefaultContext::new().l1_window(1).l2_cap(4))
+        .context(Context::new().l1_window(1).l2_cap(4))
         .model(model)
         .build()
         .unwrap();
@@ -138,7 +138,7 @@ async fn l2_overflow_distills_into_l3() {
     let mut conv = Conversation::with_id(&runtime, &subject, "conv-2");
     let agent = Agent::builder()
         .runtime(&runtime)
-        .context(DefaultContext::new().l1_window(1).l2_cap(1))
+        .context(Context::new().l1_window(1).l2_cap(1))
         .model(model)
         .build()
         .unwrap();
@@ -166,7 +166,7 @@ async fn conversation_end_drains_and_promotes_l2_into_l3() {
     let mut conv = Conversation::with_id(&runtime, &subject, "conv-3");
     let agent = Agent::builder()
         .runtime(&runtime)
-        .context(DefaultContext::new().l1_window(1).l2_cap(4))
+        .context(Context::new().l1_window(1).l2_cap(4))
         .model(model)
         .build()
         .unwrap();
@@ -223,30 +223,31 @@ async fn layered_assembly_reads_memory_layers() {
         )
         .unwrap();
 
-    // The engine materializes the state directly.
-    let engine = DefaultContext::new();
-    let assembled = engine
-        .assemble(ContextAssemblerInput::new(
-            &memory,
-            &subject,
-            "conv-4",
-            "weather",
-            "what does the user prefer?",
-        ))
-        .await;
-    assert!(assembled.failures.is_empty(), "clean reads, no degradation");
+    // Drive a run: the assembled background reaches the model request.
+    let model = text_model(&["ok"]);
+    let mut conv = Conversation::with_id(&runtime, &subject, "conv-4");
+    let agent = Agent::builder()
+        .runtime(&runtime)
+        .model(model.clone())
+        .build()
+        .unwrap();
+    let _ = agent
+        .run(conv.turn_input("what does the user prefer?"))
+        .await
+        .unwrap();
 
+    let request = &model.requests()[0];
     // L3 recall first (independent System message).
-    assert!(assembled.messages[0].blocks.iter().any(|b| {
+    assert!(request.messages[0].blocks.iter().any(|b| {
         matches!(b, synonz::ContentBlock::Text { text } if text.contains("Memory recall")
             && text.contains("prefers celsius"))
     }));
     // L2 summaries present.
-    assert!(assembled.messages.iter().any(|m| m.blocks.iter().any(
+    assert!(request.messages.iter().any(|m| m.blocks.iter().any(
         |b| matches!(b, synonz::ContentBlock::Text { text } if text.contains("travel plans"))
     )));
     // L1 turns present (verbatim).
-    assert!(assembled.messages.iter().any(|m| m.blocks.iter().any(
+    assert!(request.messages.iter().any(|m| m.blocks.iter().any(
         |b| matches!(b, synonz::ContentBlock::Text { text } if text.contains("what about beijing?"))
     )));
 }
@@ -292,22 +293,28 @@ async fn custom_assembler_slot_drives_assembly() {
         )
         .unwrap();
 
-    let engine = DefaultContext::new().with_assembler(PrependStrategy);
-    let memory = runtime.memory();
-    let assembled = engine
-        .assemble(ContextAssemblerInput::new(
-            &memory,
-            &subject,
-            "conv-5",
-            "chat",
-            "follow up",
-        ))
-        .await;
-    assert!(assembled.failures.is_empty());
-    assert_eq!(assembled.messages.len(), 2, "marker + seeded L1, verbatim");
-    assert!(assembled.messages[0].blocks.iter().any(
+    let model = text_model(&["ok"]);
+    let mut conv = Conversation::with_id(&runtime, &subject, "conv-5");
+    let agent = Agent::builder()
+        .runtime(&runtime)
+        .model(model.clone())
+        .context(Context::new().with_assembler(PrependStrategy))
+        .build()
+        .unwrap();
+    let _ = agent.run(conv.turn_input("follow up")).await.unwrap();
+
+    // The request starts with the custom marker, then the seeded L1
+    // (verbatim), then the current input.
+    let request = &model.requests()[0];
+    assert!(request.messages[0].blocks.iter().any(
         |b| matches!(b, synonz::ContentBlock::Text { text } if text == "custom strategy was here")
     ));
+    assert!(
+        request.messages[1]
+            .blocks
+            .iter()
+            .any(|b| matches!(b, synonz::ContentBlock::Text { text } if text == "hi"))
+    );
 }
 
 /// Memory stores whose reads fail — the degradation must be visible in
@@ -393,35 +400,50 @@ impl synonz::MemoryL3Store for BrokenL3 {
     }
 }
 
+/// Records the stages of `FlowFailed` memory facts (bus-facing).
+#[derive(Default, Clone)]
+struct StageRecorder {
+    stages: Arc<Mutex<Vec<synonz::MemoryFlowStage>>>,
+}
+
+impl synonz::Observer for StageRecorder {
+    fn on_event(&self, _ctx: &synonz::ObserverContext, event: &SynonzEvent) {
+        if let SynonzEvent::Memory(synonz::MemoryEvent::FlowFailed { stage, .. }) = event {
+            self.stages.lock().unwrap().push(stage.clone());
+        }
+    }
+}
+
 #[tokio::test]
 async fn assembly_memory_failures_are_visible_not_silent() {
     // Override all three layers with failing stores: the degradation
-    // must be visible in the assembly output, never silent.
+    // must be visible as facts, never silent.
+    let recorder = StageRecorder::default();
     let runtime = SynonzRuntime::builder()
         .memory_l1_store(BrokenL1)
         .memory_l2_store(BrokenL2)
         .memory_l3_store(BrokenL3)
+        .observer(recorder.clone())
         .build();
     let subject = Subject::of(SubjectType::User, "u");
-    let memory = runtime.memory();
-
-    let engine = DefaultContext::new();
-    let assembled = engine
-        .assemble(ContextAssemblerInput::new(
-            &memory, &subject, "conv-6", "", "anything",
-        ))
-        .await;
+    let mut conv = Conversation::with_id(&runtime, &subject, "conv-6");
+    let agent = Agent::builder()
+        .runtime(&runtime)
+        .model(text_model(&["answer"]))
+        .build()
+        .unwrap();
+    let output = agent.run(conv.turn_input("anything")).await.unwrap();
+    assert_eq!(output.text(), Some("answer"));
 
     // Every layer failed and every failure is reported — no silent
     // "no memory" degradation.
-    let stages: Vec<&synonz::MemoryFlowStage> = assembled
-        .failures
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    let stages = recorder.stages.lock().unwrap();
+    let assemble_reads = stages
         .iter()
-        .map(|failure| &failure.stage)
-        .collect();
-    assert!(stages.contains(&&synonz::MemoryFlowStage::AssembleRead));
-    assert_eq!(stages.len(), 3, "l1, l2, l3 all report");
-    assert!(assembled.messages.is_empty());
+        .filter(|stage| **stage == synonz::MemoryFlowStage::AssembleRead)
+        .count();
+    assert_eq!(assemble_reads, 3, "l1, l2, l3 all report: {stages:?}");
 }
 
 #[tokio::test]
@@ -481,7 +503,7 @@ async fn flow_facts_are_visible_on_the_bus() {
     let mut conv = Conversation::with_id(&runtime, &subject, "conv-8");
     let agent = Agent::builder()
         .runtime(&runtime)
-        .context(DefaultContext::new().l1_window(1).l2_cap(4))
+        .context(Context::new().l1_window(1).l2_cap(4))
         .model(model)
         .build()
         .unwrap();
@@ -527,7 +549,7 @@ async fn summarization_failure_is_a_visible_background_fact() {
     let agent = Agent::builder()
         .runtime(&runtime)
         .context(
-            DefaultContext::new()
+            Context::new()
                 .l1_window(1)
                 .with_summarizer(BrokenSummarizer),
         )
@@ -572,7 +594,7 @@ async fn topic_shift_compacts_and_emits_the_fact() {
     let agent = Agent::builder()
         .runtime(&runtime)
         .context(
-            DefaultContext::new()
+            Context::new()
                 .l1_window(8)
                 .with_topic_detector(AlwaysShifts),
         )

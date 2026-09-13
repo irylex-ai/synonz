@@ -1,22 +1,25 @@
-//! The Context state engine: the agent's context — its state.
+//! The Context engine: the agent's context — its state.
 //!
 //! The context of an agent is *its state*: the layered memory (the
-//! persistent沉淀 part), the environment perception (the run's model and
-//! tool results), and — in future material slots — runtime-derived
-//! elements. The state engine owns the two moments of that state's
-//! lifecycle:
+//! persistent settling part), the environment perception (the run's model
+//! and tool results), and — in future material slots — runtime-derived
+//! elements. The engine owns the two moments of that state's lifecycle:
 //!
-//! - **materialization** ([`Context::assemble`]): the state → the working
-//!   payload (the background messages a run starts from);
-//! - **maintenance** ([`Context::on_turn_completed`]): new perception
-//!   settles into the state (L1 archive, topic advance) and the state is
-//!   curated over time (L1→L2 compaction, L2→L3 distillation).
+//! - **materialization** (the engine's `assemble` entry, framework-internal):
+//!   the state → the working payload (the background messages a run starts
+//!   from), preceded by the read-side input preprocessing when a rewriter
+//!   strategy is configured;
+//! - **maintenance** (the engine's `on_turn_completed` entry,
+//!   framework-internal): new perception settles into the state (L1
+//!   archive, topic advance) and the state is curated over time (L1→L2
+//!   compaction, L2→L3 distillation).
 //!
-//! The contract is **doubly neutral**: neither the layer philosophy
-//! (L1/L2/L3, floors, promotion paths) nor the timing engineering
-//! (backgrounding, ordering, latency) leaks into it. It anchors only the
-//! two lifecycle facts. Replace the whole philosophy with a custom
-//! `impl Context`; tune one axis through the three strategy slots.
+//! The engine is a **concrete type** (ADR-0019 retired the open engine
+//! trait): the read phase is fully replaceable through its strategy slot
+//! ([`ContextAssembler`], reading through a read-only memory view), while
+//! the write phase is framework-owned — its customization points are the
+//! narrow sub-hooks ([`ConversationTopicDetector`], [`MemorySummarizer`],
+//! and the planned `MemoryDistiller`).
 //!
 //! The engine is **pure behavior**: it holds strategy slots and floor
 //! parameters, no instance state — background maintenance tasks register
@@ -61,34 +64,7 @@ impl MemoryFlowError {
     }
 }
 
-// ── The maintenance payloads ──
-
-/// The turn-completed payload: everything the engine's maintenance needs.
-///
-/// `messages` are owned (background tasks carry them forward); `memory`
-/// and `model` are the runtime's (borrowed for the synchronous segment,
-/// cloned into background jobs); `events` and `task_spawner` are the
-/// framework outlets (the event sink and this conversation's background
-/// spawner).
-#[non_exhaustive]
-pub struct TurnContext<'a> {
-    /// The conversation the turn completed in.
-    pub conversation: &'a Conversation,
-    /// The turn's user input text.
-    pub input: &'a str,
-    /// The turn's canonical messages (the L1 entry's content).
-    pub messages: Vec<Message>,
-    /// The layered memory (from the runtime — the single authority).
-    pub memory: &'a Memory,
-    /// The run's model (the maintenance's summarization calls it; clone
-    /// it into background jobs).
-    pub model: Arc<dyn Model>,
-    /// The event outlet (bus facts; clones keep the run attribution).
-    pub events: EventSink,
-    /// This conversation's background-task spawner (submitted jobs attach
-    /// to the conversation; the runtime drains them at conversation end).
-    pub task_spawner: ConversationTaskSpawner,
-}
+// ── The assembly payload ──
 
 /// The assembly payload: what the assembler consumes — the minimal
 /// sufficient set. Deliberately narrow: a strategy reads the **memory**
@@ -216,58 +192,24 @@ pub struct TopicDecision {
     pub shifted: bool,
 }
 
-// ── The engine contract ──
+// ── The engine ──
 
-/// The agent's state engine: materialization + maintenance of the
-/// context state.
+/// The state engine (concrete type — ADR-0019 retired the open engine
+/// trait): layered maintenance with strategy slots and floor parameters.
 ///
-/// Registered per agent (each application carries its own engine);
-/// pure behavior — no instance state. The two methods anchor the two
-/// lifecycle facts; everything else (when flows fire, how failures
-/// surface, what runs in the background) is implementation freedom.
-pub trait Context: Send + Sync + 'static {
-    /// Materializes the state: the full context (memory + perception
-    /// materials) → the working payload's background. Called once per
-    /// run, before the reasoning loop.
-    fn assemble<'a>(
-        &'a self,
-        input: ContextAssemblerInput<'a>,
-    ) -> BoxFuture<'a, ContextAssemblerOutput>;
-
-    /// Maintains the state on turn completion: archive the turn's
-    /// perception into memory, advance the topic, and curate the layers.
-    /// Called after a **completed** turn, before the terminal event —
-    /// the synchronous segment should return promptly; heavy maintenance
-    /// (compaction, distillation) belongs in the background (spawn
-    /// through [`TurnContext::task_spawner`]; the runtime drains them at
-    /// conversation end).
-    ///
-    /// Failed and cancelled turns never reach this method — the truth
-    /// archive takes them, the memory layers stay unpolluted.
-    ///
-    /// Synchronous-segment failures are returned (the framework surfaces
-    /// them as `FlowFailed { moment: AfterTurn }` facts); background
-    /// failures surface themselves through the event sink (`FlowFailed {
-    /// moment: Background }`).
-    fn on_turn_completed<'a>(
-        &'a self,
-        ctx: &'a TurnContext<'a>,
-    ) -> BoxFuture<'a, Vec<MemoryFlowError>>;
-}
-
-// ── The default engine ──
-
-/// The default state engine: layered maintenance with three strategy
-/// slots and floor parameters.
-///
-/// Maintenance orchestration (the default philosophy): on turn
-/// completion — advance the topic (a shift compacts the pre-shift turns
-/// and emits `TopicShifted`), archive the turn into L1 (emits
-/// `TurnArchived`), then background-spawn the compaction (L1 overflow →
-/// L2 summary, emits `Compacted`) and distillation (L2 overflow → L3,
-/// emits `Distilled`). Compaction order is summarize → append → pop, so
-/// a concurrent assembly never observes a memory hole.
-pub struct DefaultContext {
+/// The engine owns the two state-lifecycle moments as framework-internal
+/// entries: materialization (`assemble`) and maintenance
+/// (`on_turn_completed`). The read phase is fully replaceable through
+/// [`Context::with_assembler`] (reading through a read-only memory view);
+/// the write phase is framework-owned — advance the topic (a shift
+/// compacts the pre-shift turns and emits `TopicShifted`), archive the
+/// turn into L1 (emits `TurnArchived`), then background-spawn the
+/// compaction (L1 overflow → L2 summary, emits `Compacted`) and
+/// distillation (L2 overflow → L3, emits `Distilled`). Compaction order
+/// is summarize → append → pop, so a concurrent assembly never observes a
+/// memory hole; distillation transforms first and pops after, so a failed
+/// transform never loses L2.
+pub struct Context {
     assembler: Arc<dyn ContextAssembler>,
     summarizer: Arc<dyn MemorySummarizer>,
     topic_detector: Arc<dyn ConversationTopicDetector>,
@@ -281,7 +223,7 @@ pub(crate) const DEFAULT_L3_BUDGET: usize = 3;
 /// The built-in summarization prompt (verbatim).
 const DEFAULT_SUMMARY_PROMPT: &str = "Summarize the following conversation turns into one short paragraph, preserving key facts, decisions, and preferences:";
 
-impl DefaultContext {
+impl Context {
     /// Creates the engine with everything defaulted (floors 20/8,
     /// first-segment topic detection, prompt summarization, layered
     /// assembly).
@@ -349,93 +291,111 @@ impl DefaultContext {
     }
 }
 
-impl Default for DefaultContext {
+impl Default for Context {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl Context for DefaultContext {
-    fn assemble<'a>(
+impl Context {
+    /// Materializes the state (framework-internal): the full context
+    /// (memory + perception materials) → the working payload's background.
+    /// Called once per run, before the reasoning loop.
+    pub(crate) fn assemble<'a>(
         &'a self,
         input: ContextAssemblerInput<'a>,
     ) -> BoxFuture<'a, ContextAssemblerOutput> {
         self.assembler.assemble(input)
     }
 
-    fn on_turn_completed<'a>(
-        &'a self,
-        ctx: &'a TurnContext<'a>,
-    ) -> BoxFuture<'a, Vec<MemoryFlowError>> {
-        Box::pin(async move {
-            let mut errors = Vec::new();
-            let subject = ctx.conversation.subject();
-            let conversation_id = ctx.conversation.id();
+    /// Maintains the state on turn completion (framework-internal): archive
+    /// the turn's perception into memory, advance the topic, and curate the
+    /// layers. Called after a **completed** turn, before the terminal event;
+    /// heavy maintenance (compaction, distillation) runs in the background
+    /// (spawned through `task_spawner`; the runtime drains it at
+    /// conversation end).
+    ///
+    /// Failed and cancelled turns never reach this method — the truth
+    /// archive takes them, the memory layers stay unpolluted.
+    ///
+    /// Synchronous-segment failures are returned (the framework surfaces
+    /// them as `FlowFailed { moment: AfterTurn }` facts); background
+    /// failures surface through the event sink.
+    // The parameter list is the minimal sufficient set (turn facts +
+    // runtime outlets + the agent model); it is a framework-internal entry
+    // point, not a public ergonomics surface.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) async fn on_turn_completed(
+        &self,
+        conversation: &Conversation,
+        input: &str,
+        messages: Vec<Message>,
+        memory: &Memory,
+        agent_model: Arc<dyn Model>,
+        events: EventSink,
+        task_spawner: ConversationTaskSpawner,
+    ) -> Vec<MemoryFlowError> {
+        let mut errors = Vec::new();
+        let subject = conversation.subject();
+        let conversation_id = conversation.id();
 
-            // 1. Topic state machine (synchronous segment: cheap and
-            //    next-turn-visible).
-            let decision = self
-                .topic_detector
-                .detect(ctx.input, ctx.conversation.topic().as_deref());
-            let previous = ctx.conversation.topic().unwrap_or_default();
-            ctx.conversation.set_topic(&decision.topic);
-            if decision.shifted {
-                ctx.events
-                    .emit_conversation(crate::ConversationEvent::TopicShifted {
-                        conversation_id: conversation_id.to_string(),
-                        from: previous,
-                        to: decision.topic.clone(),
-                    });
-            }
-
-            // 2. L1 archive (synchronous segment).
-            if let Err(error) = ctx.memory.l1_append(
-                subject,
-                conversation_id,
-                &decision.topic,
-                ctx.messages.clone(),
-            ) {
-                errors.push(MemoryFlowError::new(
-                    MemoryFlowStage::Archive,
-                    format!("l1 append: {error}"),
-                ));
-            } else {
-                ctx.events.emit_memory(MemoryEvent::TurnArchived {
-                    conversation_id: conversation_id.to_string(),
-                    subject_id: subject.to_string(),
-                    topic: decision.topic.clone(),
-                });
-            }
-
-            // 3. Background segment: compaction (topic-shift flush + L1
-            //    floor) and distillation (L2 floor) — one background
-            //    maintenance task per turn, the flows in sequence (the
-            //    distillation reads the L2 the compaction just wrote).
-            //    Spawned through the runtime's task registry — the system
-            //    schedules what the engine produces; the conversation-end
-            //    teardown drains them.
-            let shift_flush = decision.shifted;
-            let l1_window = self.l1_window;
-            let jobs = BackgroundMaintenanceTask {
-                summarizer: Arc::clone(&self.summarizer),
-                memory: ctx.memory.clone(),
-                sink: ctx.events.clone(),
-                model: Arc::clone(&ctx.model),
-                subject: subject.clone(),
+        // 1. Topic state machine (synchronous segment: cheap and
+        //    next-turn-visible).
+        let decision = self
+            .topic_detector
+            .detect(input, conversation.topic().as_deref());
+        let previous = conversation.topic().unwrap_or_default();
+        conversation.set_topic(&decision.topic);
+        if decision.shifted {
+            events.emit_conversation(crate::ConversationEvent::TopicShifted {
                 conversation_id: conversation_id.to_string(),
-                topic: decision.topic.clone(),
-                l2_cap: self.l2_cap,
-            };
-            ctx.task_spawner.spawn(async move {
-                if shift_flush {
-                    jobs.compact(true, l1_window).await;
-                }
-                jobs.compact(false, l1_window).await;
-                jobs.distill().await;
+                from: previous,
+                to: decision.topic.clone(),
             });
+        }
 
-            errors
-        })
+        // 2. L1 archive (synchronous segment).
+        if let Err(error) = memory.l1_append(subject, conversation_id, &decision.topic, messages) {
+            errors.push(MemoryFlowError::new(
+                MemoryFlowStage::Archive,
+                format!("l1 append: {error}"),
+            ));
+        } else {
+            events.emit_memory(MemoryEvent::TurnArchived {
+                conversation_id: conversation_id.to_string(),
+                subject_id: subject.to_string(),
+                topic: decision.topic.clone(),
+            });
+        }
+
+        // 3. Background segment: compaction (topic-shift flush + L1
+        //    floor) and distillation (L2 floor) — one background
+        //    maintenance task per turn, the flows in sequence (the
+        //    distillation reads the L2 the compaction just wrote).
+        //    Spawned through the runtime's task registry — the system
+        //    schedules what the engine produces; the conversation-end
+        //    teardown drains them.
+        let shift_flush = decision.shifted;
+        let l1_window = self.l1_window;
+        let jobs = BackgroundMaintenanceTask {
+            summarizer: Arc::clone(&self.summarizer),
+            memory: memory.clone(),
+            sink: events.clone(),
+            model: agent_model,
+            subject: subject.clone(),
+            conversation_id: conversation_id.to_string(),
+            topic: decision.topic.clone(),
+            l2_cap: self.l2_cap,
+        };
+        task_spawner.spawn(async move {
+            if shift_flush {
+                jobs.compact(true, l1_window).await;
+            }
+            jobs.compact(false, l1_window).await;
+            jobs.distill().await;
+        });
+
+        errors
     }
 }
 
