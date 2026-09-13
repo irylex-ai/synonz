@@ -45,6 +45,13 @@
   ADR-0018 终结：公开 `Scheduler` 组件 + 内部系统调度器、Monitor
   空闲清扫（含崩溃孤儿对账）、显式 `shutdown()`、统一会话表、
   ConversationStore 查询面升级；总线词汇表与观察位契约不变
+- 评审修订四（ADR-0019 批准后补录，2026-09-13）：⑬**引擎契约与配置面
+  更新**——评审修订二⑥所述 `trait Context` 退役（ADR-0019：具体
+  `Context` + 读/写两相位扩展面）；本文正文 §"配置面（浅定制）"的
+  `with_summary_prompt`/`with_summary_model` 已失效——分别移除与改名为
+  `with_model`（缺省 = agent 模型），装配输入 `memory: &Memory` 改为
+  只读 `reader: MemoryReader`；总线词汇表、观察位契约、装配不读真相域
+  等立法不变（`MemoryFlowStage` 增 `Rewrite` 变体为 0.5.0 附加项）
 - 性质: 反应扩展性地基——新增总线设施与 Curator 契约，重整事件
   词汇表（含既有类型改名与迁移），破坏性变化随 0.3.0 单波发布
 - 关联: 承接并修订 ADR-0015（记忆流触发形态）、ADR-0016（旁路

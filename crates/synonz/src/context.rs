@@ -14,8 +14,8 @@
 //!   archive, topic advance) and the state is curated over time (L1→L2
 //!   compaction, L2→L3 distillation).
 //!
-//! The engine is a **concrete type** (ADR-0019 retired the open engine
-//! trait): the read phase is fully replaceable through its strategy slot
+//! The engine is a **concrete type** (the open engine trait was retired):
+//! the read phase is fully replaceable through its strategy slot
 //! ([`ContextAssembler`], reading through a read-only memory view), while
 //! the write phase is framework-owned — its customization points are the
 //! narrow sub-hooks ([`ConversationTopicDetector`], [`MemorySummarizer`],
@@ -244,8 +244,8 @@ pub struct TopicDecision {
 
 // ── The engine ──
 
-/// The state engine (concrete type — ADR-0019 retired the open engine
-/// trait): layered maintenance with strategy slots and floor parameters.
+/// The state engine (concrete type — the open engine trait was retired):
+/// layered maintenance with strategy slots and floor parameters.
 ///
 /// The engine owns the two state-lifecycle moments as framework-internal
 /// entries: materialization (`assemble`) and maintenance

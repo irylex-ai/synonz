@@ -4,6 +4,105 @@ All notable changes to Synonz are documented in this file. The format
 follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 versions follow [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+The context-engine extension release (planned as 0.5.0; release decision
+pending): the engine becomes a concrete type with a read/write phase
+asymmetry, a read-only memory view, input rewriting, a distillation
+slot, and engine-model narration. **Breaking** — migrate with the table
+below.
+
+### Highlights
+
+- **Concrete engine**: `DefaultContext` is now `Context`, a concrete
+  type (the open `trait Context` is gone). The agent holds
+  `Arc<Context>`; `assemble` / `on_turn_completed` are framework-internal
+  entries, and engine behavior is a configuration of narrow strategies.
+- **Read/write asymmetry**: the read phase is fully replaceable
+  (`ContextAssembler` + `TurnInputRewriter`), reading through a
+  read-only `MemoryReader`; the write phase is framework-owned, with
+  `ConversationTopicDetector` / `MemorySummarizer` / `MemoryDistiller`
+  as its customization points.
+- **Input rewriting**: `TurnInputRewriter` runs before assembly
+  (coreference resolution and similar preprocessing); the model view
+  flows into `ContextAssemblerInput::rewritten_input`, while the truth
+  domain (canonical messages / turns / L1) keeps the original text.
+- **Engine model**: `Context::with_model` sets the model the engine's
+  maintenance calls resolve to (default: the agent's model). Auxiliary
+  calls are narrated by the framework (`Requested` / `Responded`, never
+  `StreamDelta`).
+- **Distillation slot**: `MemoryDistiller` (default: mechanical
+  promotion); the engine transforms first and pops after — a failed
+  transform keeps L2.
+
+### Added
+
+- **Input rewriting** (`synonz`): `TurnInputRewriter`,
+  `ContextAssemblerInput::rewritten_input`, `Context::with_rewriter`,
+  and the `MemoryFlowStage::Rewrite` flow-failure stage.
+- **Read-only memory view** (`synonz`): `MemoryReader` (subject-scoped;
+  no write or curation methods) and `Memory::reader`.
+- **Distillation strategy** (`synonz`): `MemoryDistiller` and
+  `Context::with_distiller` (mechanical default).
+- **Engine model** (`synonz`): `Context::with_model`.
+- **Memory entry API** (`synonz`): `L1Entry::new` and
+  `L1Entry::created_at`; `L2Entry::created_at`.
+- **Topic accessors** (`synonz`): `Conversation::topic` /
+  `Conversation::set_topic` are now public.
+
+### Changed
+
+- Memory entry types are named by layer: `SummaryBlock` → `L2Entry`,
+  `KnowledgeFragment` → `L3Entry`, `FragmentIdentity` → `L3Identity`.
+- `MemorySummarizer::summarize` no longer receives the event sink — the
+  framework narrates model calls.
+- `with_summary_model` → `with_model`.
+
+### Breaking Changes
+
+- **`trait Context` removed**: custom engines migrate to the concrete
+  `Context` configuration (read strategy/rewriter; write sub-hooks).
+  `DefaultContext` is now `Context`; the agent holds `Arc<Context>`.
+- **`TurnContext` removed**: the public maintenance payload is gone;
+  `on_turn_completed` is framework-internal with an explicit parameter
+  set.
+- **`ContextAssemblerInput.memory` → `reader`** (`&Memory` →
+  `MemoryReader`); `ContextAssemblerInput::new` signature updated.
+- **`MemorySummarizer::summarize(entries, model, events)` →
+  `summarize(entries, model)`**.
+- **`with_summary_prompt` removed** (prompt is strategy content);
+  **`with_summary_model` renamed to `with_model`**.
+- **Memory entry renames** (see Changed).
+- `MemoryFlowStage::Rewrite` added (additive).
+
+### Migration
+
+| Before (0.4.0) | After (planned 0.5.0) |
+|---|---|
+| `impl Context for MyEngine` | configure `Context` (`with_assembler` / `with_rewriter` / `with_topic_detector` / `with_summarizer` / `with_distiller`); whole write-phase replacement is retired |
+| `DefaultContext` | `Context` |
+| `Agent` holds `Arc<dyn Context>` | `Arc<Context>`; `AgentBuilder::context(Context)` |
+| `ContextAssemblerInput.memory` | `ContextAssemblerInput.reader` |
+| — | `ContextAssemblerInput.rewritten_input` (engine-filled) |
+| `summarize(entries, model, events)` | `summarize(entries, model)` |
+| hard-coded mechanical distillation | `MemoryDistiller` (default mechanical; transform-then-pop) |
+| `with_summary_model` | `with_model` |
+| `with_summary_prompt` | removed — implement `MemorySummarizer` |
+| `SummaryBlock` / `KnowledgeFragment` / `FragmentIdentity` | `L2Entry` / `L3Entry` / `L3Identity` |
+| `L1Entry` without constructor | `L1Entry::new` + `created_at`; `L2Entry::created_at` |
+| `topic()` / `set_topic()` crate-private | public |
+| `TurnContext` | removed (framework-internal) |
+
+### Notes
+
+- Without a rewriter the read phase is behavior-identical to 0.4.0.
+- The engine model resolves as `with_model ?? agent_model`; auxiliary
+  model calls emit `Requested` / `Responded` with `round: None` and
+  never `StreamDelta`.
+- Boundaries (no current requirement): whole write-phase replacement,
+  conversation-end flush hooks, remote storage in the default memory
+  pipeline, streaming-narration switches.
+
 ## [0.4.0] - 2026-09-13
 
 The scheduling-and-lifecycle release: the time-driven Scheduler

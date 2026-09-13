@@ -1,7 +1,7 @@
 # Synonz 0.5.0 实现计划
 
-- 状态: IMPLEMENTING（2026-09-13，irylex 评审通过并开工；里程碑
-  完成记录见 §6）
+- 状态: VERIFIED（2026-09-13，M28-M32 完成并验证——全量回归
+  221/221、clippy/doc 零警告、fmt 干净；发布决策待 irylex 确认）
 - 日期: 2026-09-13
 - 依据: ADR-0019（APPROVED——上下文引擎扩展面）、架构设计文档
   v6（APPROVED）
@@ -276,3 +276,30 @@ M31 蒸馏槽的物料面）；M31 收敛写侧与模型归属；M32 收尾扫�
   保留 L2 且可见（`FlowFailed { Distill }`、L3 为空）；
 - **验证**：全量回归 **221/221** 全绿、clippy 零警告、`cargo doc
   --workspace --no-deps` 零警告、fmt 干净。
+
+### M32 收尾与验证 ✅（2026-09-13）
+
+- **文档**：v6 落点核对通过（引擎形态 / 读侧槽 / 写侧子钩子 /
+  `MemoryReader` / 命名 / 时间戳与代码一致；v6 补实施记录与状态表
+  更新）；**扩展指南**落地 `docs/design/extension-guide-context-memory.
+  zh-CN.md`（扩展点总图、四档路径、读/写配方、存储接入与 G3、模型
+  角色、边界绕行、T2 主题、Route A 映射、常见坑）；**ADR-0017 评审
+  修订四**（引擎契约与配置面更新：`with_summary_prompt` 移除、
+  `with_summary_model` → `with_model`、装配输入 `memory` → `reader`）；
+  **CHANGELOG 0.5.0**（Highlights / Added / Changed / Breaking /
+  Migration / Notes——Unreleased，发布准备时定稿）；README 指针
+  （v6 + 0.5.0 计划）已在 v6 批准时更新；
+- **示例**：`scheduler` 实跑通过（自动保存 ×3、系统任务快照、
+  shutdown 收尾）；其余示例（含 `chat_tui`）随 API 编译通过，未触及
+  移除面；
+- **命名终稿**：按 coding.md §5 核对通过（`Context` /
+  `TurnInputRewriter` / `MemoryDistiller` / `MemoryReader` / `L2Entry` /
+  `L3Entry` / `L3Identity`）；rustdoc / 测试注释无 ADR 编号引用
+  （coding.md 立法）——清出 2 处并修正；
+- **全量验证**：`cargo fmt --check` 干净、`clippy --workspace
+  --all-targets --all-features` 零警告、`cargo doc --workspace
+  --no-deps` 零警告、`cargo test --workspace --all-features`
+  **221/221** 全绿；
+- **发布决策**：**待 irylex 确认**——版本号 0.5.0（工作标签）、五份
+  crate README 同步、依序 publish、tag `v0.5.0`、GitHub Release；
+  本波止于"等待发布"。
