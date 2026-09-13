@@ -418,3 +418,25 @@ irylex 反馈：状态栏消失（要运行动效 + 每秒 token + 思考耗时 
 
 验证：示例测试 **34/34**；全量回归 **213/213** 全绿、clippy 零警告、
 `cargo doc --workspace` 零警告、fmt 干净。
+
+## 19. 第九轮运行反馈（2026-09-12）
+
+irylex 反馈：trace 面板与 chat 内容看起来一模一样，想知道"每次发给
+LLM 的提示词到底是什么"。
+
+核查：新增测试锁定管线正确——observer 记录 `ModelEvent::Requested`，
+含 system 消息与完整消息序列；差异确实存在（chat 不含 system 提示、
+不按模型轮次刷新、工具内容被摘要），但可读渲染太像聊天叙事，一眼看
+不出这是"请求本体"。
+
+处置：trace 面板改为**请求检查器**形态——
+- 顶部：`request #N · round · purpose · N messages（角色计数）· ctx
+  ~N tok / N chars` + 声明工具行（tool_choice 说明）；
+- 每条消息：`── #i ROLE · N chars ───` 分隔线（角色着色）+ **完整原始
+  内容折行**（工具调用显示完整参数 JSON、工具结果显示完整文本，不再
+  摘要）；
+- 底部：`── end of request ──`；
+- 新增测试：trace 管线含 system 消息；检查器显示角色与完整工具参数。
+
+验证：示例测试 **36/36**；全量回归 **215/215** 全绿、clippy 零警告、
+`cargo doc --workspace` 零警告、fmt 干净。

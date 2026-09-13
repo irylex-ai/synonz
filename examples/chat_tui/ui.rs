@@ -8,11 +8,10 @@ use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{Block, Borders, Clear, Paragraph, Widget};
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
-use synonz::{ContentBlock, Message, Role, ToolResult};
+use synonz::{ContentBlock, Message, Role, ToolContent, ToolResult};
 
 use crate::app::{
-    ChatState, CommandSpec, Entry, Focus, Selection, Status, TextInput, effort_label,
-    summarize_arguments, summarize_content,
+    ChatState, CommandSpec, Entry, Focus, Selection, Status, TextInput, effort_label, message_chars,
 };
 use crate::setup::{PopupKind, Setup, Step};
 
@@ -560,7 +559,7 @@ fn draw_trace(frame: &mut Frame, chat: &mut ChatState, area: Rect) {
     let mut plains: Vec<String> = Vec::new();
     let (system, user, assistant, tool) = entry.role_counts;
     let header = format!(
-        "#{} · round {} · {} · {} messages (system {system} · user {user} · assistant {assistant} · tool {tool}) · ctx ~{} tok / {} chars",
+        "request #{} · round {} · {} · {} messages (system {system} · user {user} · assistant {assistant} · tool {tool}) · ctx ~{} tok / {} chars",
         entry.number,
         entry
             .round
@@ -571,18 +570,27 @@ fn draw_trace(frame: &mut Frame, chat: &mut ChatState, area: Rect) {
         format_count(entry.context_tokens),
         format_count(entry.context_chars),
     );
-    lines.push(Line::from(Span::styled(header.clone(), hint_style())));
-    plains.push(header);
-    lines.push(Line::default());
-    plains.push(String::new());
-    for message in &entry.messages {
-        for (line, plain) in trace_message_lines(message, inner.width as usize) {
+    push_plain(&mut lines, &mut plains, header, hint_style());
+    push_plain(
+        &mut lines,
+        &mut plains,
+        "tools declared: read_file, list_dir, file_info (tool_choice: provider auto)".to_string(),
+        hint_style(),
+    );
+    push_plain(&mut lines, &mut plains, String::new(), Style::default());
+    for (index, message) in entry.messages.iter().enumerate() {
+        for (line, plain) in trace_message_lines(index, message, inner.width as usize) {
             lines.push(line);
             plains.push(plain);
         }
-        lines.push(Line::default());
-        plains.push(String::new());
+        push_plain(&mut lines, &mut plains, String::new(), Style::default());
     }
+    push_plain(
+        &mut lines,
+        &mut plains,
+        "── end of request ──".to_string(),
+        hint_style(),
+    );
     chat.trace_view = plains;
     let max_scroll = lines.len().saturating_sub(inner.height as usize);
     chat.last_trace_max = max_scroll.min(u16::MAX as usize) as u16;
@@ -606,55 +614,74 @@ fn draw_trace(frame: &mut Frame, chat: &mut ChatState, area: Rect) {
     }
 }
 
-/// One trace message: (styled line, plain text) pairs, wrapped by width.
-fn trace_message_lines(message: &Message, width: usize) -> Vec<(Line<'static>, String)> {
-    let (label, style) = match message.role {
-        Role::System => ("system", reasoning_style()),
-        Role::User => ("user", user_style()),
-        Role::Assistant => ("assistant", assistant_style()),
-        Role::Tool => ("tool", tool_style()),
+/// Appends a styled line and its plain text in lockstep.
+fn push_plain(
+    lines: &mut Vec<Line<'static>>,
+    plains: &mut Vec<String>,
+    text: String,
+    style: Style,
+) {
+    lines.push(Line::from(Span::styled(text.clone(), style)));
+    plains.push(text);
+}
+
+/// One message as a request-inspector section: an index/role/size rule,
+/// then the full content (wrapped, never summarized).
+fn trace_message_lines(
+    index: usize,
+    message: &Message,
+    width: usize,
+) -> Vec<(Line<'static>, String)> {
+    let (role, style) = match message.role {
+        Role::System => ("SYSTEM", reasoning_style()),
+        Role::User => ("USER", user_style()),
+        Role::Assistant => ("ASSISTANT", assistant_style()),
+        Role::Tool => ("TOOL", tool_style()),
         _ => ("?", hint_style()),
     };
-    let indent = label.chars().count() + 2;
-    let body_width = width.saturating_sub(indent).max(8);
-    let mut parts = Vec::new();
+    let mut rule = format!("── #{index} {role} · {} chars ", message_chars(message));
+    let used = rule.chars().count();
+    rule.push_str(&"─".repeat(width.saturating_sub(used).min(120)));
+    let mut lines = vec![(
+        Line::from(Span::styled(
+            rule.clone(),
+            style.add_modifier(Modifier::BOLD),
+        )),
+        rule,
+    )];
     for block in &message.blocks {
-        match block {
-            ContentBlock::Text { text } => parts.push(text.clone()),
-            ContentBlock::ToolCall(call) => parts.push(format!(
-                "⚙ {}({})",
-                call.name,
-                summarize_arguments(&call.arguments)
-            )),
-            ContentBlock::ToolResult { result, .. } => match result {
-                ToolResult::Ok { content } => {
-                    parts.push(format!("→ {}", summarize_content(content)));
+        let body = match block {
+            ContentBlock::Text { text } => text.clone(),
+            ContentBlock::ToolCall(call) => {
+                format!("tool_call {}({})", call.name, call.arguments)
+            }
+            ContentBlock::ToolResult { call_id, result } => match result {
+                ToolResult::Ok { content } => format!(
+                    "tool_result {}: {}",
+                    call_id.as_str(),
+                    tool_content_text(content)
+                ),
+                ToolResult::Err { message } => {
+                    format!("tool_error {}: {message}", call_id.as_str())
                 }
-                ToolResult::Err { message } => parts.push(format!("✗ {message}")),
-                _ => parts.push("→ done".to_string()),
+                _ => "tool_result".to_string(),
             },
-            other => parts.push(format!("{other:?}")),
+            other => format!("{other:?}"),
+        };
+        for part in wrap(&body, width) {
+            lines.push((Line::raw(part.clone()), part));
         }
     }
-    let body = parts.join("\n");
-    let mut lines = Vec::new();
-    for (index, part) in wrap(&body, body_width).into_iter().enumerate() {
-        let plain = if index == 0 {
-            format!("{label} {part}")
-        } else {
-            format!("{:indent$}{part}", "")
-        };
-        let line = if index == 0 {
-            Line::from(vec![
-                Span::styled(format!("{label} "), style.add_modifier(Modifier::BOLD)),
-                Span::raw(part),
-            ])
-        } else {
-            Line::from(Span::raw(format!("{:indent$}{part}", "")))
-        };
-        lines.push((line, plain));
-    }
     lines
+}
+
+/// Tool result content as plain display text.
+fn tool_content_text(content: &ToolContent) -> String {
+    match content {
+        ToolContent::Text { text } => text.clone(),
+        ToolContent::Json { value } => value.to_string(),
+        _ => "(content)".to_string(),
+    }
 }
 
 fn field_line(
@@ -932,5 +959,27 @@ mod tests {
     #[test]
     fn wrap_counts_double_width_characters() {
         assert_eq!(wrap("你好世界", 4), vec!["你好", "世界"]);
+    }
+
+    #[test]
+    fn trace_inspector_shows_roles_and_full_tool_arguments() {
+        use synonz::{ContentBlock, Message, Role, ToolCall};
+        let message = Message::new(
+            Role::Assistant,
+            vec![ContentBlock::ToolCall(ToolCall::new(
+                "c1",
+                "read_file",
+                serde_json::json!({"path": "src/main.rs"}),
+            ))],
+        );
+        let lines = trace_message_lines(2, &message, 80);
+        let plains: Vec<&str> = lines.iter().map(|(_, plain)| plain.as_str()).collect();
+        assert!(plains[0].contains("#2 ASSISTANT"), "{plains:?}");
+        assert!(
+            plains
+                .iter()
+                .any(|line| line.contains("tool_call read_file") && line.contains("src/main.rs")),
+            "the full arguments must be visible: {plains:?}"
+        );
     }
 }

@@ -296,6 +296,11 @@ impl TraceStore {
     }
 }
 
+/// Content characters of one message (the trace inspector's size label).
+pub fn message_chars(message: &Message) -> usize {
+    message_metrics(message).0
+}
+
 /// Content characters of one message, split into ASCII and wide classes.
 fn message_metrics(message: &Message) -> (usize, usize, usize) {
     let mut chars = 0;

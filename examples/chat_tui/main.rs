@@ -614,6 +614,34 @@ mod tests {
         assert_eq!(base64("你好".as_bytes()), "5L2g5aW9");
     }
 
+    /// The trace must record the exact outgoing prompt: system first, then
+    /// the conversation messages.
+    #[tokio::test]
+    async fn the_trace_records_the_full_prompt_including_system() {
+        let trace = TraceStore::default();
+        let runtime = SynonzRuntime::builder().observer(trace.clone()).build();
+        let agent = Agent::builder()
+            .runtime(&runtime)
+            .model(MockModel::finishing_with_text("pong"))
+            .system_prompt("SYSTEM-MARKER")
+            .build()
+            .expect("model is set");
+        let subject = Subject::of(SubjectType::User, "test");
+        let mut conversation = Conversation::new(&runtime, &subject);
+        let mut execution = agent.run(conversation.turn_input("ping"));
+        while let Some(event) = execution.next().await {
+            if matches!(event, synonz::ExecutionEvent::Completed(_)) {
+                break;
+            }
+        }
+        let entry = trace.latest().expect("the trace recorded the request");
+        assert_eq!(entry.messages[0].role, synonz::Role::System);
+        assert!(entry.messages[0].blocks.iter().any(|block| {
+            matches!(block, synonz::ContentBlock::Text { text } if text == "SYSTEM-MARKER")
+        }));
+        assert_eq!(entry.role_counts.0, 1, "one system message");
+    }
+
     /// A scripted model drives one real turn into the transcript — the
     /// assembly path, with no terminal involved.
     #[tokio::test]
