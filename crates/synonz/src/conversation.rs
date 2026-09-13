@@ -410,12 +410,18 @@ impl Conversation {
     }
 
     /// The current topic (conversation topic state machine), if any.
-    pub(crate) fn topic(&self) -> Option<String> {
+    ///
+    /// The topic is the framework's tag for the conversation's active
+    /// thread (set by the engine's topic strategy on turn completion).
+    /// Multi-topic sets and shift trajectories belong to the engine side,
+    /// not to this single active tag.
+    pub fn topic(&self) -> Option<String> {
         self.topic.lock().unwrap_or_else(|p| p.into_inner()).clone()
     }
 
-    /// Updates the current topic.
-    pub(crate) fn set_topic(&self, topic: &str) {
+    /// Updates the current topic (the engine's topic strategy path; public
+    /// so applications and custom setups can curate the active tag).
+    pub fn set_topic(&self, topic: &str) {
         *self.topic.lock().unwrap_or_else(|p| p.into_inner()) = Some(topic.to_string());
     }
 

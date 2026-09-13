@@ -31,32 +31,33 @@ use crate::Subject;
 /// A memory fragment's topic tag.
 pub type Topic = String;
 
-/// The identity triple locating one memory fragment.
+/// The identity triple locating one memory entry.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct FragmentIdentity {
+pub struct L3Identity {
     /// The owning subject (full `(type, id)` identity).
     pub subject_id: String,
-    /// The conversation the fragment came from.
+    /// The conversation the entry came from.
     pub conversation_id: String,
-    /// The fragment's topic.
+    /// The entry's topic.
     pub topic: Topic,
 }
 
-/// One L3 long-term knowledge fragment.
+/// One L3 long-term knowledge entry.
 #[non_exhaustive]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct KnowledgeFragment {
+pub struct L3Entry {
     /// Where and under what topic this knowledge came from.
-    pub identity: FragmentIdentity,
+    pub identity: L3Identity,
     /// The distilled knowledge (a fact, preference, or conclusion).
     pub content: String,
-    /// Epoch seconds at which the fragment was created (recency ranking).
+    /// Epoch seconds at which the entry was created (recency ranking).
     pub created_at: u64,
 }
 
-impl KnowledgeFragment {
-    /// Creates a knowledge fragment.
-    pub fn new(identity: FragmentIdentity, content: impl Into<String>) -> Self {
+impl L3Entry {
+    /// Creates a knowledge entry (the creation time is stamped
+    /// automatically).
+    pub fn new(identity: L3Identity, content: impl Into<String>) -> Self {
         Self {
             identity,
             content: content.into(),
@@ -65,25 +66,28 @@ impl KnowledgeFragment {
     }
 }
 
-/// An L2 summary block of this conversation's earlier turns.
+/// An L2 summary entry of this conversation's earlier turns.
 #[non_exhaustive]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct SummaryBlock {
+pub struct L2Entry {
     /// The conversation this summary belongs to.
     pub conversation_id: String,
     /// The summarized content.
     pub content: String,
-    /// Sequence order among summary blocks (oldest first).
+    /// Sequence order among summary entries (oldest first).
     pub index: u64,
+    /// Epoch seconds at which the entry was created (recency ranking).
+    pub created_at: u64,
 }
 
-impl SummaryBlock {
-    /// Creates a summary block.
+impl L2Entry {
+    /// Creates an L2 entry (the creation time is stamped automatically).
     pub fn new(conversation_id: impl Into<String>, content: impl Into<String>, index: u64) -> Self {
         Self {
             conversation_id: conversation_id.into(),
             content: content.into(),
             index,
+            created_at: now_epoch(),
         }
     }
 }
@@ -98,6 +102,25 @@ pub struct L1Entry {
     pub topic: Topic,
     /// The canonical messages of that turn.
     pub messages: Vec<crate::Message>,
+    /// Epoch seconds at which the entry was created (recency ranking).
+    pub created_at: u64,
+}
+
+impl L1Entry {
+    /// Creates an L1 entry (used by the framework and custom L1 stores;
+    /// the creation time is stamped automatically).
+    pub fn new(
+        conversation_id: impl Into<String>,
+        topic: impl Into<String>,
+        messages: Vec<crate::Message>,
+    ) -> Self {
+        Self {
+            conversation_id: conversation_id.into(),
+            topic: topic.into(),
+            messages,
+            created_at: now_epoch(),
+        }
+    }
 }
 
 /// Memory-store failures (bridging/storage machinery; soft where the
@@ -153,14 +176,14 @@ pub trait MemoryL1Store: Send + Sync + 'static {
 /// The L2 storage contract: the summary layer (earlier turns, compressed).
 pub trait MemoryL2Store: Send + Sync + 'static {
     /// Appends an L2 summary block.
-    fn append(&self, subject: &Subject, block: SummaryBlock) -> Result<(), MemoryStoreError>;
+    fn append(&self, subject: &Subject, block: L2Entry) -> Result<(), MemoryStoreError>;
 
     /// The conversation's L2 summary blocks, oldest first.
     fn read(
         &self,
         subject: &Subject,
         conversation_id: &str,
-    ) -> Result<Vec<SummaryBlock>, MemoryStoreError>;
+    ) -> Result<Vec<L2Entry>, MemoryStoreError>;
 
     /// How many L2 blocks a conversation currently holds.
     fn len(&self, subject: &Subject, conversation_id: &str) -> Result<usize, MemoryStoreError>;
@@ -172,7 +195,7 @@ pub trait MemoryL2Store: Send + Sync + 'static {
         subject: &Subject,
         conversation_id: &str,
         n: usize,
-    ) -> Result<Vec<SummaryBlock>, MemoryStoreError>;
+    ) -> Result<Vec<L2Entry>, MemoryStoreError>;
 }
 
 /// The L3 storage contract: the knowledge layer (cross-conversation,
@@ -182,11 +205,7 @@ pub trait MemoryL2Store: Send + Sync + 'static {
 /// search, hybrids — not just storage.
 pub trait MemoryL3Store: Send + Sync + 'static {
     /// Upserts an L3 knowledge fragment.
-    fn upsert(
-        &self,
-        subject: &Subject,
-        fragment: KnowledgeFragment,
-    ) -> Result<(), MemoryStoreError>;
+    fn upsert(&self, subject: &Subject, fragment: L3Entry) -> Result<(), MemoryStoreError>;
 
     /// Retrieves relevant L3 fragments for the query.
     fn query(
@@ -195,7 +214,7 @@ pub trait MemoryL3Store: Send + Sync + 'static {
         query: &str,
         topic: &Topic,
         budget: usize,
-    ) -> Result<Vec<KnowledgeFragment>, MemoryStoreError>;
+    ) -> Result<Vec<L3Entry>, MemoryStoreError>;
 
     /// The subject's complete L3 fragment count (introspection for
     /// budgeting and diagnostics).
@@ -268,11 +287,7 @@ impl Memory {
     }
 
     /// Appends an L2 summary block.
-    pub fn l2_append(
-        &self,
-        subject: &Subject,
-        block: SummaryBlock,
-    ) -> Result<(), MemoryStoreError> {
+    pub fn l2_append(&self, subject: &Subject, block: L2Entry) -> Result<(), MemoryStoreError> {
         self.l2.append(subject, block)
     }
 
@@ -281,7 +296,7 @@ impl Memory {
         &self,
         subject: &Subject,
         conversation_id: &str,
-    ) -> Result<Vec<SummaryBlock>, MemoryStoreError> {
+    ) -> Result<Vec<L2Entry>, MemoryStoreError> {
         self.l2.read(subject, conversation_id)
     }
 
@@ -300,16 +315,12 @@ impl Memory {
         subject: &Subject,
         conversation_id: &str,
         n: usize,
-    ) -> Result<Vec<SummaryBlock>, MemoryStoreError> {
+    ) -> Result<Vec<L2Entry>, MemoryStoreError> {
         self.l2.pop_oldest(subject, conversation_id, n)
     }
 
     /// Upserts an L3 knowledge fragment.
-    pub fn l3_upsert(
-        &self,
-        subject: &Subject,
-        fragment: KnowledgeFragment,
-    ) -> Result<(), MemoryStoreError> {
+    pub fn l3_upsert(&self, subject: &Subject, fragment: L3Entry) -> Result<(), MemoryStoreError> {
         self.l3.upsert(subject, fragment)
     }
 
@@ -320,7 +331,7 @@ impl Memory {
         query: &str,
         topic: &Topic,
         budget: usize,
-    ) -> Result<Vec<KnowledgeFragment>, MemoryStoreError> {
+    ) -> Result<Vec<L3Entry>, MemoryStoreError> {
         self.l3.query(subject, query, topic, budget)
     }
 

@@ -35,7 +35,7 @@ use futures::future::BoxFuture;
 use crate::bus::{EventSink, MemoryEvent, MemoryFlowFailedMoment};
 use crate::conversation::Conversation;
 use crate::event::{CallPurpose, MemoryFlowStage, ModelEvent, TurnEvent};
-use crate::memory::{L1Entry, Memory, SummaryBlock, Topic};
+use crate::memory::{L1Entry, L2Entry, Memory, Topic};
 use crate::message::Message;
 use crate::model::Model;
 use crate::runtime::ConversationTaskSpawner;
@@ -482,11 +482,7 @@ impl BackgroundMaintenanceTask {
         // handoff: the pop takes the oldest N of this conversation).
         if let Err(error) = self.memory.l2_append(
             &self.subject,
-            SummaryBlock {
-                conversation_id: self.conversation_id.clone(),
-                content: summary,
-                index: 0,
-            },
+            L2Entry::new(self.conversation_id.clone(), summary, 0),
         ) {
             self.sink.emit_memory(MemoryEvent::FlowFailed {
                 stage: MemoryFlowStage::Summarize,
@@ -548,16 +544,15 @@ impl BackgroundMaintenanceTask {
         };
         let mut distilled = 0usize;
         for block in popped {
-            let fragment = crate::memory::KnowledgeFragment {
-                identity: crate::memory::FragmentIdentity {
+            let entry = crate::memory::L3Entry::new(
+                crate::memory::L3Identity {
                     subject_id: self.subject.to_string(),
                     conversation_id: block.conversation_id,
                     topic: self.topic.clone(),
                 },
-                content: block.content,
-                created_at: now_epoch(),
-            };
-            if let Err(error) = self.memory.l3_upsert(&self.subject, fragment) {
+                block.content,
+            );
+            if let Err(error) = self.memory.l3_upsert(&self.subject, entry) {
                 self.sink.emit_memory(MemoryEvent::FlowFailed {
                     stage: MemoryFlowStage::Distill,
                     detail: format!("l3 upsert: {error}"),
@@ -767,11 +762,4 @@ fn text_of(message: &Message) -> Option<String> {
         }
     }
     (!text.is_empty()).then_some(text)
-}
-
-fn now_epoch() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0)
 }

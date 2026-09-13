@@ -491,16 +491,15 @@ impl SynonzRuntime {
         let topic = conversation.topic().unwrap_or_default();
         let mut promoted = 0usize;
         for block in blocks {
-            let fragment = crate::memory::KnowledgeFragment {
-                identity: crate::memory::FragmentIdentity {
+            let entry = crate::memory::L3Entry::new(
+                crate::memory::L3Identity {
                     subject_id: subject.to_string(),
                     conversation_id: block.conversation_id,
                     topic: topic.clone(),
                 },
-                content: block.content,
-                created_at: now_epoch(),
-            };
-            if let Err(error) = memory.l3_upsert(subject, fragment) {
+                block.content,
+            );
+            if let Err(error) = memory.l3_upsert(subject, entry) {
                 self.inner
                     .event_bus
                     .emit(SynonzEvent::Memory(MemoryEvent::FlowFailed {

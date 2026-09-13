@@ -206,14 +206,14 @@ async fn layered_assembly_reads_memory_layers() {
     memory
         .l2_append(
             &subject,
-            synonz::SummaryBlock::new("conv-4", "earlier we discussed travel plans", 0),
+            synonz::L2Entry::new("conv-4", "earlier we discussed travel plans", 0),
         )
         .unwrap();
     memory
         .l3_upsert(
             &subject,
-            synonz::KnowledgeFragment::new(
-                synonz::FragmentIdentity {
+            synonz::L3Entry::new(
+                synonz::L3Identity {
                     subject_id: subject.to_string(),
                     conversation_id: "old-conv".into(),
                     topic: "weather".into(),
@@ -355,14 +355,10 @@ impl synonz::MemoryL1Store for BrokenL1 {
 }
 
 impl synonz::MemoryL2Store for BrokenL2 {
-    fn append(&self, _: &Subject, _: synonz::SummaryBlock) -> Result<(), synonz::MemoryStoreError> {
+    fn append(&self, _: &Subject, _: synonz::L2Entry) -> Result<(), synonz::MemoryStoreError> {
         Err(synonz::MemoryStoreError::Storage("down".into()))
     }
-    fn read(
-        &self,
-        _: &Subject,
-        _: &str,
-    ) -> Result<Vec<synonz::SummaryBlock>, synonz::MemoryStoreError> {
+    fn read(&self, _: &Subject, _: &str) -> Result<Vec<synonz::L2Entry>, synonz::MemoryStoreError> {
         Err(synonz::MemoryStoreError::Storage("down".into()))
     }
     fn len(&self, _: &Subject, _: &str) -> Result<usize, synonz::MemoryStoreError> {
@@ -373,17 +369,13 @@ impl synonz::MemoryL2Store for BrokenL2 {
         _: &Subject,
         _: &str,
         _: usize,
-    ) -> Result<Vec<synonz::SummaryBlock>, synonz::MemoryStoreError> {
+    ) -> Result<Vec<synonz::L2Entry>, synonz::MemoryStoreError> {
         Err(synonz::MemoryStoreError::Storage("down".into()))
     }
 }
 
 impl synonz::MemoryL3Store for BrokenL3 {
-    fn upsert(
-        &self,
-        _: &Subject,
-        _: synonz::KnowledgeFragment,
-    ) -> Result<(), synonz::MemoryStoreError> {
+    fn upsert(&self, _: &Subject, _: synonz::L3Entry) -> Result<(), synonz::MemoryStoreError> {
         Err(synonz::MemoryStoreError::Storage("down".into()))
     }
     fn query(
@@ -392,7 +384,7 @@ impl synonz::MemoryL3Store for BrokenL3 {
         _: &str,
         _: &String,
         _: usize,
-    ) -> Result<Vec<synonz::KnowledgeFragment>, synonz::MemoryStoreError> {
+    ) -> Result<Vec<synonz::L3Entry>, synonz::MemoryStoreError> {
         Err(synonz::MemoryStoreError::Storage("down".into()))
     }
     fn len(&self, _: &Subject) -> Result<usize, synonz::MemoryStoreError> {

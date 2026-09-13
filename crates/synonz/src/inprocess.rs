@@ -17,8 +17,7 @@ use crate::conversation::{
     ConversationStoreError, ConversationSummary,
 };
 use crate::memory::{
-    KnowledgeFragment, L1Entry, MemoryL1Store, MemoryL2Store, MemoryL3Store, MemoryStoreError,
-    SummaryBlock, Topic,
+    L1Entry, L2Entry, L3Entry, MemoryL1Store, MemoryL2Store, MemoryL3Store, MemoryStoreError, Topic,
 };
 
 // ─────────────────────── conversation persistence ───────────────────────
@@ -271,11 +270,7 @@ impl MemoryL1Store for InProcessMemoryL1Store {
         messages: Vec<crate::Message>,
     ) -> Result<(), MemoryStoreError> {
         let mut l1 = self.l1.lock().unwrap_or_else(|p| p.into_inner());
-        let entry = L1Entry {
-            conversation_id: conversation_id.to_string(),
-            topic: topic.to_string(),
-            messages,
-        };
+        let entry = L1Entry::new(conversation_id, topic.to_string(), messages);
         l1.entry(subject.to_string()).or_default().push(entry);
         Ok(())
     }
@@ -341,11 +336,11 @@ impl MemoryL1Store for InProcessMemoryL1Store {
 #[derive(Default)]
 pub(crate) struct InProcessMemoryL2Store {
     // subject -> conversation id -> ordered L2 blocks.
-    l2: Mutex<HashMap<String, Vec<SummaryBlock>>>,
+    l2: Mutex<HashMap<String, Vec<L2Entry>>>,
 }
 
 impl MemoryL2Store for InProcessMemoryL2Store {
-    fn append(&self, subject: &Subject, block: SummaryBlock) -> Result<(), MemoryStoreError> {
+    fn append(&self, subject: &Subject, block: L2Entry) -> Result<(), MemoryStoreError> {
         let mut l2 = self.l2.lock().unwrap_or_else(|p| p.into_inner());
         l2.entry(subject.to_string()).or_default().push(block);
         Ok(())
@@ -355,7 +350,7 @@ impl MemoryL2Store for InProcessMemoryL2Store {
         &self,
         subject: &Subject,
         conversation_id: &str,
-    ) -> Result<Vec<SummaryBlock>, MemoryStoreError> {
+    ) -> Result<Vec<L2Entry>, MemoryStoreError> {
         let l2 = self.l2.lock().unwrap_or_else(|p| p.into_inner());
         Ok(l2
             .get(&subject.to_string())
@@ -387,7 +382,7 @@ impl MemoryL2Store for InProcessMemoryL2Store {
         subject: &Subject,
         conversation_id: &str,
         n: usize,
-    ) -> Result<Vec<SummaryBlock>, MemoryStoreError> {
+    ) -> Result<Vec<L2Entry>, MemoryStoreError> {
         let mut l2 = self.l2.lock().unwrap_or_else(|p| p.into_inner());
         let Some(blocks) = l2.get_mut(&subject.to_string()) else {
             return Ok(Vec::new());
@@ -415,15 +410,11 @@ impl MemoryL2Store for InProcessMemoryL2Store {
 #[derive(Default)]
 pub(crate) struct InProcessMemoryL3Store {
     // subject -> ordered L3 fragments.
-    l3: Mutex<HashMap<String, Vec<KnowledgeFragment>>>,
+    l3: Mutex<HashMap<String, Vec<L3Entry>>>,
 }
 
 impl MemoryL3Store for InProcessMemoryL3Store {
-    fn upsert(
-        &self,
-        subject: &Subject,
-        fragment: KnowledgeFragment,
-    ) -> Result<(), MemoryStoreError> {
+    fn upsert(&self, subject: &Subject, fragment: L3Entry) -> Result<(), MemoryStoreError> {
         let mut l3 = self.l3.lock().unwrap_or_else(|p| p.into_inner());
         let fragments = l3.entry(subject.to_string()).or_default();
         // Upsert by identity: replace an existing fragment on the same
@@ -445,9 +436,9 @@ impl MemoryL3Store for InProcessMemoryL3Store {
         query: &str,
         topic: &Topic,
         budget: usize,
-    ) -> Result<Vec<KnowledgeFragment>, MemoryStoreError> {
+    ) -> Result<Vec<L3Entry>, MemoryStoreError> {
         let l3 = self.l3.lock().unwrap_or_else(|p| p.into_inner());
-        let mut candidates: Vec<KnowledgeFragment> = l3
+        let mut candidates: Vec<L3Entry> = l3
             .get(&subject.to_string())
             .map(|fragments| {
                 fragments

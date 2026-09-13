@@ -213,3 +213,17 @@ M31 蒸馏槽的物料面）；M31 收敛写侧与模型归属；M32 收尾扫�
   `Arc<dyn Context>` / 公开 `TurnContext` 残留。
 
 （后续里程碑按 M21-M27 体例继续写入。）
+
+### M29 命名统一与 API 修补 ✅（2026-09-13）
+
+- **条目改名**：`SummaryBlock` → `L2Entry`、`KnowledgeFragment` →
+  `L3Entry`、`FragmentIdentity` → `L3Identity`——定义、`Memory` facade、
+  惰性存储（`inprocess.rs`）、终结促进（`runtime.rs`）、蒸馏
+  （`context.rs`）、导出面（`lib.rs`）、测试与 rustdoc 全量替换；
+- **时间戳与构造器**：`L1Entry::new(conversation_id, topic, messages)` +
+  `created_at`（外部 L1 store 无法构造条目的硬缺口关闭）；
+  `L2Entry.created_at`（`new` 自动置时间）；`L3Entry::new` 沿用；
+- **主题访问器**：`Conversation::topic()` / `set_topic()` 公开（rustdoc
+  写明 T2 语义：活跃主题=框架标签；多主题集合/切换轨迹归引擎态）；
+- **验证**：全量回归 **216/216** 全绿、clippy 零警告、`cargo doc
+  --workspace --no-deps` 零警告、fmt 干净；全仓旧名零残留。
