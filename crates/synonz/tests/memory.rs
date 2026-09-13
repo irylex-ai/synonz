@@ -637,7 +637,6 @@ async fn summarization_failure_is_a_visible_background_fact() {
             &'a self,
             _entries: &'a [synonz::L1Entry],
             _model: &'a dyn synonz::Model,
-            _events: &'a synonz::EventSink,
         ) -> synonz::BoxFuture<'a, Result<String, String>> {
             Box::pin(async { Err("summarizer down".into()) })
         }
@@ -719,4 +718,146 @@ async fn topic_shift_compacts_and_emits_the_fact() {
         facts.iter().any(|f| f.starts_with("compacted")),
         "the shift's compaction consequence fired: {facts:?}"
     );
+}
+
+/// Records auxiliary model facts (`round: None`) seen on the bus.
+type AuxFacts = Arc<Mutex<Vec<(bool, Option<usize>)>>>;
+
+#[derive(Default, Clone)]
+struct AuxModelRecorder {
+    // (responded, round) for each Model fact.
+    facts: AuxFacts,
+}
+
+impl synonz::Observer for AuxModelRecorder {
+    fn on_event(&self, _ctx: &synonz::ObserverContext, event: &SynonzEvent) {
+        let SynonzEvent::Turn(synonz::TurnEvent::Model(model)) = event else {
+            return;
+        };
+        let line = match model {
+            synonz::ModelEvent::Requested { round, .. } => (false, *round),
+            synonz::ModelEvent::Responded { round, .. } => (true, *round),
+            _ => return,
+        };
+        self.facts.lock().unwrap().push(line);
+    }
+}
+
+/// A summarizer that only calls the provided model handle (emits nothing
+/// itself — narration is the framework's job).
+struct QuietSummarizer;
+
+impl synonz::MemorySummarizer for QuietSummarizer {
+    fn summarize<'a>(
+        &'a self,
+        _entries: &'a [synonz::L1Entry],
+        model: &'a dyn synonz::Model,
+    ) -> synonz::BoxFuture<'a, Result<String, String>> {
+        Box::pin(async move {
+            let request =
+                synonz::ModelRequest::new(vec![synonz::Message::user("summarize")], Vec::new());
+            let _ = synonz::complete(model, request).await;
+            Ok("summary".into())
+        })
+    }
+}
+
+#[tokio::test]
+async fn auxiliary_model_calls_are_narrated_by_the_framework() {
+    let recorder = AuxModelRecorder::default();
+    let runtime = SynonzRuntime::builder().observer(recorder.clone()).build();
+    let (_unused, subject) = env();
+    let mut conv = Conversation::with_id(&runtime, &subject, "conv-aux");
+    let agent = Agent::builder()
+        .runtime(&runtime)
+        .model(text_model(&["a1", "a2", "summary"]))
+        .context(Context::new().l1_window(1).with_summarizer(QuietSummarizer))
+        .build()
+        .unwrap();
+    let _ = agent.run(conv.turn_input("one")).await.unwrap();
+    let _ = agent.run(conv.turn_input("two")).await.unwrap();
+    eventually(|| {
+        let facts = recorder.facts.lock().unwrap();
+        facts
+            .iter()
+            .any(|(responded, round)| !responded && round.is_none())
+            && facts
+                .iter()
+                .any(|(responded, round)| *responded && round.is_none())
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn engine_model_routes_auxiliary_calls() {
+    let (runtime, subject) = env();
+    let reasoning = text_model(&["a1", "a2"]);
+    let engine = text_model(&["engine summary"]);
+    let mut conv = Conversation::with_id(&runtime, &subject, "conv-engine-model");
+    let agent = Agent::builder()
+        .runtime(&runtime)
+        .model(reasoning.clone())
+        .context(
+            Context::new()
+                .l1_window(1)
+                .with_model(Arc::new(engine.clone())),
+        )
+        .build()
+        .unwrap();
+    let _ = agent.run(conv.turn_input("one")).await.unwrap();
+    let _ = agent.run(conv.turn_input("two")).await.unwrap();
+    eventually(|| engine.calls() >= 1).await;
+    assert_eq!(reasoning.calls(), 2, "reasoning on the agent model");
+    assert!(engine.calls() >= 1, "auxiliary on the engine model");
+}
+
+/// A distiller that always fails: L2 must be kept.
+struct BrokenDistiller;
+
+impl synonz::MemoryDistiller for BrokenDistiller {
+    fn distill<'a>(
+        &'a self,
+        _blocks: &'a [synonz::L2Entry],
+        _conversation_id: &'a str,
+        _topic: &'a str,
+        _reader: synonz::MemoryReader<'a>,
+        _model: &'a dyn synonz::Model,
+    ) -> synonz::BoxFuture<'a, Result<Vec<String>, String>> {
+        Box::pin(async { Err("distiller down".into()) })
+    }
+}
+
+#[tokio::test]
+async fn distillation_failure_keeps_l2_and_is_visible() {
+    let recorder = StageRecorder::default();
+    let runtime = SynonzRuntime::builder().observer(recorder.clone()).build();
+    let (_unused, subject) = env();
+    let model = RoutingModel::new(&["a1", "a2", "a3"], &["sum1", "sum2"]);
+    let mut conv = Conversation::with_id(&runtime, &subject, "conv-distill-fail");
+    let agent = Agent::builder()
+        .runtime(&runtime)
+        .model(model)
+        .context(
+            Context::new()
+                .l1_window(1)
+                .l2_cap(1)
+                .with_distiller(BrokenDistiller),
+        )
+        .build()
+        .unwrap();
+    for text in ["one", "two", "three"] {
+        let _ = agent.run(conv.turn_input(text)).await.unwrap();
+    }
+    eventually(|| {
+        let stages = recorder.stages.lock().unwrap();
+        stages.contains(&synonz::MemoryFlowStage::Distill)
+    })
+    .await;
+
+    let memory = runtime.memory();
+    assert!(
+        memory.l2_len(&subject, "conv-distill-fail").unwrap() >= 1,
+        "L2 kept after the failed transform"
+    );
+    assert_eq!(memory.l3_len(&subject).unwrap(), 0, "nothing distilled");
 }

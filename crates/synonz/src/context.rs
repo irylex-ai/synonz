@@ -30,14 +30,16 @@
 
 use std::sync::Arc;
 
+use futures::StreamExt;
 use futures::future::BoxFuture;
 
 use crate::bus::{EventSink, MemoryEvent, MemoryFlowFailedMoment};
 use crate::conversation::Conversation;
+use crate::error::ModelError;
 use crate::event::{CallPurpose, MemoryFlowStage, ModelEvent, TurnEvent};
 use crate::memory::{L1Entry, L2Entry, Memory, MemoryReader, Topic};
 use crate::message::Message;
-use crate::model::Model;
+use crate::model::{Model, ModelRequest, ModelStream, ModelStreamItem};
 use crate::runtime::ConversationTaskSpawner;
 use crate::subject::Subject;
 
@@ -184,19 +186,39 @@ pub trait ContextAssembler: Send + Sync + 'static {
 /// The summarization strategy: how L1 turns become an L2 summary (the
 /// content transform of compaction).
 ///
-/// The summarizer owns the narration of its model calls (it emits the
-/// `ContextManagement` events through the sink, with `round: None` —
-/// off-loop maintenance). Returning `Err` hands the lossless-degradation
-/// decision to the engine (the raw transcript becomes the summary, and
-/// the failure is surfaced — never silent).
+/// The framework narrates the strategy's model calls (the engine hands it
+/// a framed handle); the strategy must not emit events itself. Returning
+/// `Err` hands the lossless-degradation decision to the engine (the raw
+/// transcript becomes the summary, and the failure is surfaced — never
+/// silent).
 pub trait MemorySummarizer: Send + Sync + 'static {
     /// Summarizes the given L1 entries into one short summary text.
     fn summarize<'a>(
         &'a self,
         entries: &'a [L1Entry],
         model: &'a dyn Model,
-        events: &'a EventSink,
     ) -> BoxFuture<'a, Result<String, String>>;
+}
+
+/// The distillation strategy: how L2 overflow becomes L3 knowledge (the
+/// content transform of distillation).
+///
+/// Reads across layers through the read-only view (L1 anchoring, L2
+/// subject, existing L3 normalization). Returns knowledge texts only; the
+/// engine stamps identity and time, performs the L3 upsert, and pops the
+/// processed L2 entries **after the transform succeeds** (a failed
+/// transform keeps L2 — never lose data). The framework narrates the
+/// strategy's model calls.
+pub trait MemoryDistiller: Send + Sync + 'static {
+    /// Distills the given L2 entries into L3 knowledge texts.
+    fn distill<'a>(
+        &'a self,
+        blocks: &'a [L2Entry],
+        conversation_id: &'a str,
+        topic: &'a str,
+        reader: MemoryReader<'a>,
+        model: &'a dyn Model,
+    ) -> BoxFuture<'a, Result<Vec<String>, String>>;
 }
 
 /// The topic strategy: the conversation topic state machine.
@@ -241,7 +263,9 @@ pub struct Context {
     assembler: Arc<dyn ContextAssembler>,
     rewriter: Option<Arc<dyn TurnInputRewriter>>,
     summarizer: Arc<dyn MemorySummarizer>,
+    distiller: Arc<dyn MemoryDistiller>,
     topic_detector: Arc<dyn ConversationTopicDetector>,
+    model: Option<Arc<dyn Model>>,
     l1_window: usize,
     l2_cap: usize,
 }
@@ -254,14 +278,17 @@ const DEFAULT_SUMMARY_PROMPT: &str = "Summarize the following conversation turns
 
 impl Context {
     /// Creates the engine with everything defaulted (floors 20/8,
-    /// first-segment topic detection, prompt summarization, layered
-    /// assembly, no input rewriting).
+    /// first-segment topic detection, prompt summarization, mechanical
+    /// distillation, layered assembly, no input rewriting; the engine
+    /// model defaults to the agent's model).
     pub fn new() -> Self {
         Self {
             assembler: Arc::new(LayeredMemoryContextAssembler),
             rewriter: None,
-            summarizer: Arc::new(PromptMemorySummarizer::default()),
+            summarizer: Arc::new(DefaultMemorySummarizer),
+            distiller: Arc::new(MechanicalMemoryDistiller),
             topic_detector: Arc::new(FirstSegmentTopicDetector),
+            model: None,
             l1_window: 20,
             l2_cap: 8,
         }
@@ -286,6 +313,12 @@ impl Context {
         self
     }
 
+    /// Replaces the distillation strategy.
+    pub fn with_distiller(mut self, distiller: impl MemoryDistiller + 'static) -> Self {
+        self.distiller = Arc::new(distiller);
+        self
+    }
+
     /// Replaces the topic strategy.
     pub fn with_topic_detector(
         mut self,
@@ -295,21 +328,12 @@ impl Context {
         self
     }
 
-    /// Configures the built-in summarizer's prompt (a shallow-customization
-    /// convenience; a full `with_summarizer` replacement overrides it).
-    pub fn with_summary_prompt(mut self, prompt: impl Into<String>) -> Self {
-        self.summarizer = Arc::new(PromptMemorySummarizer::new(prompt.into(), None));
-        self
-    }
-
-    /// Gives the built-in summarizer a dedicated model (the background
-    /// model: summarization budgets against it instead of the run's
-    /// model). A shallow-customization convenience.
-    pub fn with_summary_model(mut self, model: Arc<dyn Model>) -> Self {
-        self.summarizer = Arc::new(PromptMemorySummarizer::new(
-            DEFAULT_SUMMARY_PROMPT.to_string(),
-            Some(model),
-        ));
+    /// Sets the engine model: the model the engine's maintenance calls
+    /// (summarization, distillation) resolve to. Default: the agent's
+    /// model. Memory follows the context — there is no separate memory
+    /// model.
+    pub fn with_model(mut self, model: Arc<dyn Model>) -> Self {
+        self.model = Some(model);
         self
     }
 
@@ -448,11 +472,20 @@ impl Context {
         //    teardown drains them.
         let shift_flush = decision.shifted;
         let l1_window = self.l1_window;
+        // Model resolution: the engine model when configured, otherwise
+        // the agent's model. The strategy handle is framed so the
+        // framework narrates every auxiliary call.
+        let resolved = self.model.clone().unwrap_or(agent_model);
+        let narrated: Arc<dyn Model> = Arc::new(NarratedModel {
+            inner: resolved,
+            sink: events.clone(),
+        });
         let jobs = BackgroundMaintenanceTask {
             summarizer: Arc::clone(&self.summarizer),
+            distiller: Arc::clone(&self.distiller),
             memory: memory.clone(),
             sink: events.clone(),
-            model: agent_model,
+            model: narrated,
             subject: subject.clone(),
             conversation_id: conversation_id.to_string(),
             topic: decision.topic.clone(),
@@ -476,6 +509,7 @@ impl Context {
 #[derive(Clone)]
 struct BackgroundMaintenanceTask {
     summarizer: Arc<dyn MemorySummarizer>,
+    distiller: Arc<dyn MemoryDistiller>,
     memory: Memory,
     sink: EventSink,
     model: Arc<dyn Model>,
@@ -531,7 +565,7 @@ impl BackgroundMaintenanceTask {
         };
         let summary = match self
             .summarizer
-            .summarize(&entries, self.model.as_ref(), &self.sink)
+            .summarize(&entries, self.model.as_ref())
             .await
         {
             Ok(summary) => summary,
@@ -579,10 +613,10 @@ impl BackgroundMaintenanceTask {
         });
     }
 
-    /// Distills L2 overflow into L3 knowledge (mechanical: the summary
-    /// becomes long-term knowledge under the conversation's topic — no
-    /// model call; LLM-based extraction is a future pluggable
-    /// improvement).
+    /// Distills L2 overflow into L3 knowledge through the configured
+    /// strategy (the default is mechanical: each summary becomes
+    /// long-term knowledge under the conversation's topic). Transform
+    /// first, pop after — a failed transform keeps L2.
     async fn distill(&self) {
         let l2_len = match self.memory.l2_len(&self.subject, &self.conversation_id) {
             Ok(len) => len,
@@ -599,29 +633,62 @@ impl BackgroundMaintenanceTask {
         if overflow == 0 {
             return;
         }
-        let popped = match self
-            .memory
-            .l2_pop_oldest(&self.subject, &self.conversation_id, overflow)
-        {
-            Ok(popped) => popped,
+        // Peek the processed prefix: transform first, pop after.
+        let blocks: Vec<L2Entry> = match self.memory.l2_read(&self.subject, &self.conversation_id) {
+            Ok(blocks) => blocks.into_iter().take(overflow).collect(),
             Err(error) => {
                 self.sink.emit_memory(MemoryEvent::FlowFailed {
                     stage: MemoryFlowStage::Distill,
-                    detail: format!("l2 pop: {error}"),
+                    detail: format!("distill read: {error}"),
                     moment: MemoryFlowFailedMoment::Background,
                 });
                 return;
             }
         };
+        let reader = self.memory.reader(&self.subject);
+        let contents = match self
+            .distiller
+            .distill(
+                &blocks,
+                &self.conversation_id,
+                &self.topic,
+                reader,
+                self.model.as_ref(),
+            )
+            .await
+        {
+            Ok(contents) => contents,
+            Err(error) => {
+                // Lossless degradation: the L2 entries stay.
+                self.sink.emit_memory(MemoryEvent::FlowFailed {
+                    stage: MemoryFlowStage::Distill,
+                    detail: format!("distillation failed (L2 kept): {error}"),
+                    moment: MemoryFlowFailedMoment::Background,
+                });
+                return;
+            }
+        };
+        // The transform succeeded: pop the processed prefix.
+        if let Err(error) =
+            self.memory
+                .l2_pop_oldest(&self.subject, &self.conversation_id, overflow)
+        {
+            self.sink.emit_memory(MemoryEvent::FlowFailed {
+                stage: MemoryFlowStage::Distill,
+                detail: format!("l2 pop: {error}"),
+                moment: MemoryFlowFailedMoment::Background,
+            });
+            return;
+        }
         let mut distilled = 0usize;
-        for block in popped {
+        for content in contents {
             let entry = crate::memory::L3Entry::new(
                 crate::memory::L3Identity {
                     subject_id: self.subject.to_string(),
-                    conversation_id: block.conversation_id,
+                    conversation_id: self.conversation_id.clone(),
                     topic: self.topic.clone(),
                 },
-                block.content,
+                content,
             );
             if let Err(error) = self.memory.l3_upsert(&self.subject, entry) {
                 self.sink.emit_memory(MemoryEvent::FlowFailed {
@@ -717,60 +784,93 @@ impl ContextAssembler for LayeredMemoryContextAssembler {
     }
 }
 
-/// The built-in summarizer: prompt-driven summarization through the model,
-/// with an optional dedicated background model.
-pub(crate) struct PromptMemorySummarizer {
-    prompt: String,
-    model: Option<Arc<dyn Model>>,
-}
+/// The built-in summarizer: prompt-driven summarization through the model
+/// (the framework narrates the call; the prompt is strategy content —
+/// replace the strategy to change it).
+pub(crate) struct DefaultMemorySummarizer;
 
-impl PromptMemorySummarizer {
-    fn new(prompt: String, model: Option<Arc<dyn Model>>) -> Self {
-        Self { prompt, model }
-    }
-}
-
-impl Default for PromptMemorySummarizer {
-    fn default() -> Self {
-        Self::new(DEFAULT_SUMMARY_PROMPT.to_string(), None)
-    }
-}
-
-impl MemorySummarizer for PromptMemorySummarizer {
+impl MemorySummarizer for DefaultMemorySummarizer {
     fn summarize<'a>(
         &'a self,
         entries: &'a [L1Entry],
         model: &'a dyn Model,
-        events: &'a EventSink,
     ) -> BoxFuture<'a, Result<String, String>> {
         Box::pin(async move {
             if entries.is_empty() {
                 return Ok(String::new());
             }
             let transcript = transcript_of(entries);
-            let request = Message::user(format!("{}\n\n{transcript}", self.prompt));
-            let _ = events
+            let request = Message::user(format!("{DEFAULT_SUMMARY_PROMPT}\n\n{transcript}"));
+            let call = crate::model::ModelRequest::new(vec![request], Vec::new());
+            match crate::model::complete(model, call).await {
+                Ok((message, _usage)) => Ok(text_of(&message).unwrap_or_default()),
+                Err(error) => Err(error.to_string()),
+            }
+        })
+    }
+}
+
+/// The built-in distiller: mechanical promotion — each summary becomes one
+/// knowledge text under the conversation's topic (no model call; replace
+/// the strategy for LLM-based extraction).
+pub(crate) struct MechanicalMemoryDistiller;
+
+impl MemoryDistiller for MechanicalMemoryDistiller {
+    fn distill<'a>(
+        &'a self,
+        blocks: &'a [L2Entry],
+        _conversation_id: &'a str,
+        _topic: &'a str,
+        _reader: MemoryReader<'a>,
+        _model: &'a dyn Model,
+    ) -> BoxFuture<'a, Result<Vec<String>, String>> {
+        Box::pin(async move { Ok(blocks.iter().map(|block| block.content.clone()).collect()) })
+    }
+}
+
+/// The framework's narration wrapper for engine-issued auxiliary model
+/// calls: emits `Requested` before the call and `Responded` on its finish
+/// item (bus + delivery), and never emits `StreamDelta` (auxiliary calls
+/// consume the final result — there is no product stream to narrate).
+struct NarratedModel {
+    inner: Arc<dyn Model>,
+    sink: EventSink,
+}
+
+impl Model for NarratedModel {
+    fn stream(&self, request: ModelRequest) -> BoxFuture<'_, Result<ModelStream, ModelError>> {
+        Box::pin(async move {
+            let _ = self
+                .sink
                 .emit_turn(TurnEvent::Model(ModelEvent::Requested {
                     purpose: CallPurpose::ContextManagement,
-                    messages: vec![request.clone()],
+                    messages: request.messages.clone(),
                     round: None,
                 }))
                 .await;
-            let effective: &dyn Model = self.model.as_deref().unwrap_or(model);
-            let call = crate::model::ModelRequest::new(vec![request], Vec::new());
-            match crate::model::complete(effective, call).await {
-                Ok((message, usage)) => {
-                    let _ = events
-                        .emit_turn(TurnEvent::Model(ModelEvent::Responded {
-                            message: message.clone(),
-                            usage,
-                            round: None,
-                        }))
-                        .await;
-                    Ok(text_of(&message).unwrap_or_default())
+            let inner = self.inner.stream(request).await?;
+            let sink = self.sink.clone();
+            let stream = futures::stream::unfold(Some(inner), move |state| {
+                let sink = sink.clone();
+                async move {
+                    let mut inner = state?;
+                    match inner.next().await {
+                        Some(ModelStreamItem::Finish { message, usage }) => {
+                            let _ = sink
+                                .emit_turn(TurnEvent::Model(ModelEvent::Responded {
+                                    message: message.clone(),
+                                    usage,
+                                    round: None,
+                                }))
+                                .await;
+                            Some((ModelStreamItem::Finish { message, usage }, None))
+                        }
+                        Some(item) => Some((item, Some(inner))),
+                        None => None,
+                    }
                 }
-                Err(error) => Err(error.to_string()),
-            }
+            });
+            Ok(stream.boxed())
         })
     }
 }

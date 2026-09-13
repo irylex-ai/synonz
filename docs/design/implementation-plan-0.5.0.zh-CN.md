@@ -251,3 +251,28 @@ M31 蒸馏槽的物料面）；M31 收敛写侧与模型归属；M32 收尾扫�
   降级（总线 `FlowFailed { Rewrite }` + 原输入到达模型）；
 - **验证**：全量回归 **218/218** 全绿、clippy 零警告、`cargo doc
   --workspace --no-deps` 零警告、fmt 干净。
+
+### M31 写侧：摘要收敛、蒸馏槽与模型叙述归属 ✅（2026-09-13）
+
+- **摘要收敛**：`MemorySummarizer::summarize(entries, model)` **移除
+  `events` 参数**（破坏项）；内置实现（`DefaultMemorySummarizer`）
+  删除手工 `Requested`/`Responded` 发射；`PromptMemorySummarizer` 名字
+  退役（prompt/model 均不可配，无字段默认实现）；
+- **`MemoryDistiller` 槽**：新公开策略槽 `distill(blocks,
+  conversation_id, topic, reader, model) -> Result<Vec<String>, String>`；
+  `Context::with_distiller`；默认 `MechanicalMemoryDistiller`（机械
+  提升）；**先变换、成功后再 pop**（失败保留 L2 +
+  `FlowFailed { Distill }`）；
+- **模型角色**：`with_summary_model` → **`with_model`**（破坏项）；
+  **移除 `with_summary_prompt`**（破坏项）；`Context` 持 `model` 字段，
+  轮末解析 `with_model ?? agent_model`；
+- **叙述包装**：crate 内部 `NarratedModel`——`Requested` 前置、
+  `Responded` 于 `Finish`（`CallPurpose::ContextManagement`、
+  `round: None`），**永不发 `StreamDelta`、无 `emit_deltas` 开关**；
+  推理循环手动叙述不变；内容槽不持 `EventSink`；
+- **测试**：新增 3 项——辅助调用由框架叙述（自定义 summarizer 只调用
+  传入句柄、自身不发事件，观察者仍收 `Requested`/`Responded`）、
+  `with_model` 路由（推理走 agent 模型、辅助走引擎模型）、蒸馏失败
+  保留 L2 且可见（`FlowFailed { Distill }`、L3 为空）；
+- **验证**：全量回归 **221/221** 全绿、clippy 零警告、`cargo doc
+  --workspace --no-deps` 零警告、fmt 干净。

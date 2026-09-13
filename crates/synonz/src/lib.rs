@@ -47,7 +47,8 @@ pub use bus::{
 };
 pub use context::{
     AssemblyFailure, Context, ContextAssembler, ContextAssemblerInput, ContextAssemblerOutput,
-    ConversationTopicDetector, MemoryFlowError, MemorySummarizer, TopicDecision, TurnInputRewriter,
+    ConversationTopicDetector, MemoryDistiller, MemoryFlowError, MemorySummarizer, TopicDecision,
+    TurnInputRewriter,
 };
 pub use conversation::{
     Conversation, ConversationCursor, ConversationPage, ConversationQuery, ConversationState,
