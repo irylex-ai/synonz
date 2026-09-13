@@ -1,7 +1,7 @@
 # Synonz 0.4.0 实现计划
 
-- 状态: VERIFIED（2026-09-12，M21-M27 完成；172/172 全绿、clippy/doc
-  零警告、fmt 干净；发布决策待 irylex 代码评审后）
+- 状态: RELEASED（2026-09-13，M21-M27 完成并发布 0.4.0；216/216
+  全绿、clippy/doc 零警告、fmt 干净；发布决策见 §6）
 - 日期: 2026-09-11
 - 依据: ADR-0018（APPROVED——系统调度与生命周期完备）、架构设计
   文档 v5（APPROVED）、ADR-0011/0017 修订注记
@@ -322,9 +322,11 @@ M27 增补背景：真实开发场景（TUI 示例）验证公开 API 时发现�
   （`ConversationSummary` / `ConversationCursor` / `ConversationPage`
   / `ConversationQuery`）、快照（`scheduler_snapshot`）按 coding.md
   §5 核对通过；
-- **发布决策**：**未执行**——等 irylex 代码评审后确认（发布执行
-  检查单：bump 五 crate 0.3.1→0.4.0 → dry-run → 依序 publish →
-  tag v0.4.0 → GitHub Release）。
+- **发布决策**：**已执行**（2026-09-13）——bump 五 crate 0.3.1→0.4.0、
+  同步五份 crate README、全量回归 216/216、依序 publish
+  （derive → synonz → openai → anthropic → mcp）、tag `v0.4.0`、
+  GitHub Release；发布后核验：五个 `max_stable_version = 0.4.0`，
+  下载已发布 `.crate` 实测包内 README 与仓库一致（含 `chat_tui` 行）。
 
 ### M27 适配器运行时可调选项 ✅（2026-09-12）
 
