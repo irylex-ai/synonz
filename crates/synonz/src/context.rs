@@ -35,7 +35,7 @@ use futures::future::BoxFuture;
 use crate::bus::{EventSink, MemoryEvent, MemoryFlowFailedMoment};
 use crate::conversation::Conversation;
 use crate::event::{CallPurpose, MemoryFlowStage, ModelEvent, TurnEvent};
-use crate::memory::{L1Entry, L2Entry, Memory, Topic};
+use crate::memory::{L1Entry, L2Entry, Memory, MemoryReader, Topic};
 use crate::message::Message;
 use crate::model::Model;
 use crate::runtime::ConversationTaskSpawner;
@@ -68,44 +68,52 @@ impl MemoryFlowError {
 
 /// The assembly payload: what the assembler consumes — the minimal
 /// sufficient set. Deliberately narrow: a strategy reads the **memory**
-/// plus the identity, topic, and input needed to query it; reading the
-/// conversation entity is not expressible (the assembly never reads the
-/// truth domain).
+/// through a read-only [`MemoryReader`] plus the identity, topic, and
+/// input needed to query it; reading the conversation entity is not
+/// expressible (the assembly never reads the truth domain).
 ///
-/// The material domain is open for growth (`non_exhaustive`): future
-/// perception/runtime materials (environment snapshots, tool catalogs,
-/// in-run messages) join as new fields without breaking strategies.
+/// `input` is the turn's original text (the truth domain);
+/// `rewritten_input` is the model view the read-side preprocessing
+/// ([`TurnInputRewriter`]) produced — the engine fills it before the
+/// assembler runs. The material domain is open for growth
+/// (`non_exhaustive`): future perception/runtime materials (environment
+/// snapshots, tool catalogs, in-run messages) join as new fields without
+/// breaking strategies.
 #[non_exhaustive]
 pub struct ContextAssemblerInput<'a> {
-    /// The layered memory (the primary material — the state's persistent
-    /// part).
-    pub memory: &'a Memory,
+    /// The read-only memory view (the primary material — the state's
+    /// persistent part).
+    pub reader: MemoryReader<'a>,
     /// The subject owning the memory.
     pub subject: &'a Subject,
     /// The conversation whose layers are assembled.
     pub conversation_id: &'a str,
     /// The conversation's current topic.
     pub topic: &'a str,
-    /// The turn's user input text.
+    /// The turn's original user input text (truth domain).
     pub input: &'a str,
+    /// The model-view input (the rewriter's output); `None` = no rewrite.
+    pub rewritten_input: Option<&'a str>,
 }
 
 impl<'a> ContextAssemblerInput<'a> {
     /// Assembles the input (the struct-literal route stays closed for
     /// field growth; tests and strategies construct through here).
+    /// `rewritten_input` is engine-filled and starts as `None`.
     pub fn new(
-        memory: &'a Memory,
+        reader: MemoryReader<'a>,
         subject: &'a Subject,
         conversation_id: &'a str,
         topic: &'a str,
         input: &'a str,
     ) -> Self {
         Self {
-            memory,
+            reader,
             subject,
             conversation_id,
             topic,
             input,
+            rewritten_input: None,
         }
     }
 }
@@ -134,6 +142,26 @@ pub struct ContextAssemblerOutput {
 }
 
 // ── The strategy slots ──
+
+/// The read-side input preprocessing strategy: rewrites the turn's user
+/// input into the model view used for assembly (for example coreference
+/// resolution against the recent conversation).
+///
+/// Runs **before** assembly; the rewritten text flows into
+/// [`ContextAssemblerInput::rewritten_input`] and the assembler may use it
+/// for recall and composition. The model-visible current user message
+/// stays the original text. `None` = keep the original; `Err` = visible
+/// degradation (the original is kept and the failure is reported through
+/// [`ContextAssemblerOutput::failures`]).
+pub trait TurnInputRewriter: Send + Sync + 'static {
+    /// Produces the model-view input; `input` is the original user text,
+    /// `history` the recent conversation messages the engine provides.
+    fn rewrite<'a>(
+        &'a self,
+        input: &'a str,
+        history: &'a [Message],
+    ) -> BoxFuture<'a, Result<Option<String>, String>>;
+}
 
 /// The assembly strategy: how the context state materializes into the
 /// working payload (what the model sees).
@@ -211,6 +239,7 @@ pub struct TopicDecision {
 /// transform never loses L2.
 pub struct Context {
     assembler: Arc<dyn ContextAssembler>,
+    rewriter: Option<Arc<dyn TurnInputRewriter>>,
     summarizer: Arc<dyn MemorySummarizer>,
     topic_detector: Arc<dyn ConversationTopicDetector>,
     l1_window: usize,
@@ -226,10 +255,11 @@ const DEFAULT_SUMMARY_PROMPT: &str = "Summarize the following conversation turns
 impl Context {
     /// Creates the engine with everything defaulted (floors 20/8,
     /// first-segment topic detection, prompt summarization, layered
-    /// assembly).
+    /// assembly, no input rewriting).
     pub fn new() -> Self {
         Self {
             assembler: Arc::new(LayeredMemoryContextAssembler),
+            rewriter: None,
             summarizer: Arc::new(PromptMemorySummarizer::default()),
             topic_detector: Arc::new(FirstSegmentTopicDetector),
             l1_window: 20,
@@ -240,6 +270,13 @@ impl Context {
     /// Replaces the assembly strategy.
     pub fn with_assembler(mut self, assembler: impl ContextAssembler + 'static) -> Self {
         self.assembler = Arc::new(assembler);
+        self
+    }
+
+    /// Replaces the read-side input preprocessing strategy (default:
+    /// none — the turn input reaches assembly verbatim).
+    pub fn with_rewriter(mut self, rewriter: impl TurnInputRewriter + 'static) -> Self {
+        self.rewriter = Some(Arc::new(rewriter));
         self
     }
 
@@ -298,14 +335,48 @@ impl Default for Context {
 }
 
 impl Context {
-    /// Materializes the state (framework-internal): the full context
-    /// (memory + perception materials) → the working payload's background.
-    /// Called once per run, before the reasoning loop.
-    pub(crate) fn assemble<'a>(
+    /// Materializes the state (framework-internal): the turn input is
+    /// preprocessed into its model view (when a [`TurnInputRewriter`] is
+    /// configured), then the assembler composes the working payload's
+    /// background. Called once per run, before the reasoning loop.
+    pub(crate) async fn assemble<'a>(
         &'a self,
         input: ContextAssemblerInput<'a>,
-    ) -> BoxFuture<'a, ContextAssemblerOutput> {
-        self.assembler.assemble(input)
+    ) -> ContextAssemblerOutput {
+        let Some(rewriter) = &self.rewriter else {
+            return self.assembler.assemble(input).await;
+        };
+
+        // The rewriter's context: this conversation's L1 window (the
+        // engine provides it; the strategy decides how much to use).
+        let history: Vec<Message> = input
+            .reader
+            .l1_window(input.conversation_id)
+            .unwrap_or_default()
+            .into_iter()
+            .flat_map(|entry| entry.messages)
+            .collect();
+
+        match rewriter.rewrite(input.input, &history).await {
+            Ok(Some(rewritten)) => {
+                let rebuilt = ContextAssemblerInput {
+                    rewritten_input: Some(&rewritten),
+                    ..input
+                };
+                self.assembler.assemble(rebuilt).await
+            }
+            Ok(None) => self.assembler.assemble(input).await,
+            Err(error) => {
+                // Visible degradation: the original input stands, and the
+                // failure rides the assembly output's failure list.
+                let mut output = self.assembler.assemble(input).await;
+                output.failures.push(AssemblyFailure {
+                    stage: MemoryFlowStage::Rewrite,
+                    detail: format!("input rewrite: {error}"),
+                });
+                output
+            }
+        }
     }
 
     /// Maintains the state on turn completion (framework-internal): archive
@@ -588,16 +659,17 @@ impl ContextAssembler for LayeredMemoryContextAssembler {
             let mut output = ContextAssemblerOutput::default();
 
             // L3 recall: independent System message (persona/memory
-            // separation).
+            // separation). Recall runs on the model-view input.
             let topic = input.topic.to_string();
-            match input
-                .memory
-                .l3_query(input.subject, input.input, &topic, DEFAULT_L3_BUDGET)
-            {
+            match input.reader.l3_query(
+                input.rewritten_input.unwrap_or(input.input),
+                &topic,
+                DEFAULT_L3_BUDGET,
+            ) {
                 Ok(l3) if !l3.is_empty() => {
                     let recall = l3
                         .iter()
-                        .map(|fragment| format!("- {}", fragment.content))
+                        .map(|entry| format!("- {}", entry.content))
                         .collect::<Vec<_>>()
                         .join("\n");
                     output
@@ -612,7 +684,7 @@ impl ContextAssembler for LayeredMemoryContextAssembler {
             }
 
             // L2: this conversation's earlier turns, summarized.
-            match input.memory.l2_read(input.subject, input.conversation_id) {
+            match input.reader.l2_read(input.conversation_id) {
                 Ok(l2) => {
                     for block in l2 {
                         output.messages.push(Message::system(format!(
@@ -628,7 +700,7 @@ impl ContextAssembler for LayeredMemoryContextAssembler {
             }
 
             // L1: this conversation's recent turns, verbatim, in order.
-            match input.memory.l1_window(input.subject, input.conversation_id) {
+            match input.reader.l1_window(input.conversation_id) {
                 Ok(l1) => {
                     for entry in l1 {
                         output.messages.extend(entry.messages);

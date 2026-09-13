@@ -682,13 +682,13 @@ impl AgentLoopTask {
         let topic = self.conversation.topic().unwrap_or_default();
         let assembled = self
             .context
-            .assemble(ContextAssemblerInput {
-                memory: &memory,
-                subject: self.conversation.subject(),
-                conversation_id: self.conversation.id(),
-                topic: &topic,
-                input: &input.text,
-            })
+            .assemble(ContextAssemblerInput::new(
+                memory.reader(self.conversation.subject()),
+                self.conversation.subject(),
+                self.conversation.id(),
+                &topic,
+                &input.text,
+            ))
             .await;
         for failure in &assembled.failures {
             sink.emit_memory(crate::MemoryEvent::FlowFailed {

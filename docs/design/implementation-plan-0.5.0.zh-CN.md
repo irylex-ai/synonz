@@ -227,3 +227,27 @@ M31 蒸馏槽的物料面）；M31 收敛写侧与模型归属；M32 收尾扫�
   写明 T2 语义：活跃主题=框架标签；多主题集合/切换轨迹归引擎态）；
 - **验证**：全量回归 **216/216** 全绿、clippy 零警告、`cargo doc
   --workspace --no-deps` 零警告、fmt 干净；全仓旧名零残留。
+
+### M30 读侧：只读门面与改写槽 ✅（2026-09-13）
+
+- **`MemoryReader`**：公开只读值门面（`Memory::reader(subject)`；
+  `l1_window` / `l1_len` / `l2_read` / `l2_len` / `l3_query` /
+  `l3_len`）——写与策展方法**在类型上不存在**（编译期拒绝）；`Memory`
+  读写 facade 保持（应用面照用）；
+- **组装输入改造**：`ContextAssemblerInput.memory: &Memory` →
+  `reader: MemoryReader<'a>`（破坏项）；`new()` 同步改签名并新增
+  `rewritten_input: Option<&str>`（引擎填充）；内置装配器改用
+  `reader`，L3 召回按 `rewritten_input.unwrap_or(input)`（模型视图）；
+- **`TurnInputRewriter`**：新公开读侧槽（`rewrite(input, history)`；
+  `None`=原文；`Err`=可见降级保留原文）；`Context::with_rewriter`
+  （缺省 = 无改写）；
+- **引擎编排**：`Context::assemble` 内部——reader 取 L1 窗口 →
+  rewriter → 用 `rewritten_input` 重建 input → assembler；无 rewriter
+  时行为与 0.4.0 等价（纯加性兼容）；
+- **词表**：`MemoryFlowStage` 增 `Rewrite` 变体（`non_exhaustive`，
+  加性）；失败经 `AssemblyFailure { stage: Rewrite }` 上浮；
+- **测试**：新增 2 项——rewriter 模型视图进入组装（自定义装配器观测
+  `rewritten_input`；当前 user 消息仍为原文）、rewriter 失败可见且
+  降级（总线 `FlowFailed { Rewrite }` + 原输入到达模型）；
+- **验证**：全量回归 **218/218** 全绿、clippy 零警告、`cargo doc
+  --workspace --no-deps` 零警告、fmt 干净。

@@ -235,6 +235,8 @@ pub enum ToolEvent {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum MemoryFlowStage {
+    /// Preprocessing the turn input into its model view (rewrite).
+    Rewrite,
     /// Reading a memory layer during background assembly.
     AssembleRead,
     /// Writing the L1 archive after a completed turn.

@@ -47,7 +47,7 @@ pub use bus::{
 };
 pub use context::{
     AssemblyFailure, Context, ContextAssembler, ContextAssemblerInput, ContextAssemblerOutput,
-    ConversationTopicDetector, MemoryFlowError, MemorySummarizer, TopicDecision,
+    ConversationTopicDetector, MemoryFlowError, MemorySummarizer, TopicDecision, TurnInputRewriter,
 };
 pub use conversation::{
     Conversation, ConversationCursor, ConversationPage, ConversationQuery, ConversationState,
@@ -61,7 +61,7 @@ pub use event::{
 pub use io::{AgentInput, AgentOutput};
 pub use memory::{
     L1Entry, L2Entry, L3Entry, L3Identity, Memory, MemoryL1Store, MemoryL2Store, MemoryL3Store,
-    MemoryStoreError, Topic,
+    MemoryReader, MemoryStoreError, Topic,
 };
 pub use message::{
     CallId, CanonicalViolation, ContentBlock, Message, Role, ToolCall, ToolContent, ToolResult,

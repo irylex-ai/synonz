@@ -267,8 +267,8 @@ impl ContextAssembler for PrependStrategy {
                 .messages
                 .push(synonz::Message::system("custom strategy was here"));
             for entry in input
-                .memory
-                .l1_window(input.subject, input.conversation_id)
+                .reader
+                .l1_window(input.conversation_id)
                 .unwrap_or_default()
             {
                 output.messages.extend(entry.messages);
@@ -436,6 +436,115 @@ async fn assembly_memory_failures_are_visible_not_silent() {
         .filter(|stage| **stage == synonz::MemoryFlowStage::AssembleRead)
         .count();
     assert_eq!(assemble_reads, 3, "l1, l2, l3 all report: {stages:?}");
+}
+
+/// A rewriter that marks the input as resolved (the model view).
+struct MarkResolved;
+
+impl synonz::TurnInputRewriter for MarkResolved {
+    fn rewrite<'a>(
+        &'a self,
+        input: &'a str,
+        _history: &'a [synonz::Message],
+    ) -> synonz::BoxFuture<'a, Result<Option<String>, String>> {
+        Box::pin(async move { Ok(Some(format!("resolved: {input}"))) })
+    }
+}
+
+/// An assembler that exposes the model-view input it received.
+struct ExposeView;
+
+impl ContextAssembler for ExposeView {
+    fn assemble<'a>(
+        &'a self,
+        input: ContextAssemblerInput<'a>,
+    ) -> synonz::BoxFuture<'a, ContextAssemblerOutput> {
+        Box::pin(async move {
+            let mut output = ContextAssemblerOutput::default();
+            if let Some(view) = input.rewritten_input {
+                output.messages.push(synonz::Message::system(view));
+            }
+            output
+        })
+    }
+}
+
+#[tokio::test]
+async fn rewriter_feeds_the_model_view_into_assembly() {
+    let (runtime, subject) = env();
+    let model = text_model(&["ok"]);
+    let mut conv = Conversation::with_id(&runtime, &subject, "conv-rw");
+    let agent = Agent::builder()
+        .runtime(&runtime)
+        .model(model.clone())
+        .context(
+            Context::new()
+                .with_rewriter(MarkResolved)
+                .with_assembler(ExposeView),
+        )
+        .build()
+        .unwrap();
+    let _ = agent.run(conv.turn_input("go")).await.unwrap();
+
+    let request = &model.requests()[0];
+    // The assembler saw the model view...
+    assert!(request.messages.iter().any(|m| {
+        m.blocks
+            .iter()
+            .any(|b| matches!(b, synonz::ContentBlock::Text { text } if text == "resolved: go"))
+    }));
+    // ...while the current user message stays the original text.
+    let last = request.messages.last().unwrap();
+    assert!(
+        last.blocks
+            .iter()
+            .any(|b| matches!(b, synonz::ContentBlock::Text { text } if text == "go"))
+    );
+}
+
+/// A rewriter that always fails.
+struct BrokenRewriter;
+
+impl synonz::TurnInputRewriter for BrokenRewriter {
+    fn rewrite<'a>(
+        &'a self,
+        _input: &'a str,
+        _history: &'a [synonz::Message],
+    ) -> synonz::BoxFuture<'a, Result<Option<String>, String>> {
+        Box::pin(async { Err("rewriter down".into()) })
+    }
+}
+
+#[tokio::test]
+async fn rewriter_failure_is_visible_and_degraded() {
+    let recorder = StageRecorder::default();
+    let runtime = SynonzRuntime::builder().observer(recorder.clone()).build();
+    let (_unused, subject) = env();
+    let model = text_model(&["ok"]);
+    let mut conv = Conversation::with_id(&runtime, &subject, "conv-rw-fail");
+    let agent = Agent::builder()
+        .runtime(&runtime)
+        .model(model.clone())
+        .context(Context::new().with_rewriter(BrokenRewriter))
+        .build()
+        .unwrap();
+    let output = agent.run(conv.turn_input("go")).await.unwrap();
+    assert_eq!(output.text(), Some("ok"));
+
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    let stages = recorder.stages.lock().unwrap();
+    assert!(
+        stages.contains(&synonz::MemoryFlowStage::Rewrite),
+        "rewrite failure visible: {stages:?}"
+    );
+    // Degraded: the original input reached the model.
+    let request = &model.requests()[0];
+    let last = request.messages.last().unwrap();
+    assert!(
+        last.blocks
+            .iter()
+            .any(|b| matches!(b, synonz::ContentBlock::Text { text } if text == "go"))
+    );
 }
 
 #[tokio::test]

@@ -339,6 +339,67 @@ impl Memory {
     pub fn l3_len(&self, subject: &Subject) -> Result<usize, MemoryStoreError> {
         self.l3.len(subject)
     }
+
+    /// A read-only, subject-scoped view of this memory: the strategy
+    /// slots' material face. Writes and curation are not expressible
+    /// through the view (compile-time rejection) — writes stay closed
+    /// over the engine.
+    pub fn reader<'a>(&'a self, subject: &'a Subject) -> MemoryReader<'a> {
+        MemoryReader {
+            memory: self,
+            subject,
+        }
+    }
+}
+
+/// A read-only, subject-scoped view of the layered memory: the material
+/// face strategy slots read through.
+///
+/// The view has no append/pop/upsert methods — a read-only strategy
+/// cannot write or curate even by mistake (the stronger form of "curation
+/// stays in the engine layer"); construct one through
+/// [`Memory::reader`].
+#[derive(Clone, Copy)]
+pub struct MemoryReader<'a> {
+    memory: &'a Memory,
+    subject: &'a Subject,
+}
+
+impl<'a> MemoryReader<'a> {
+    /// The conversation's recent L1 entries, oldest first.
+    pub fn l1_window(&self, conversation_id: &str) -> Result<Vec<L1Entry>, MemoryStoreError> {
+        self.memory.l1_window(self.subject, conversation_id)
+    }
+
+    /// How many L1 entries a conversation currently holds.
+    pub fn l1_len(&self, conversation_id: &str) -> Result<usize, MemoryStoreError> {
+        self.memory.l1_len(self.subject, conversation_id)
+    }
+
+    /// The conversation's L2 entries, oldest first.
+    pub fn l2_read(&self, conversation_id: &str) -> Result<Vec<L2Entry>, MemoryStoreError> {
+        self.memory.l2_read(self.subject, conversation_id)
+    }
+
+    /// How many L2 entries a conversation currently holds.
+    pub fn l2_len(&self, conversation_id: &str) -> Result<usize, MemoryStoreError> {
+        self.memory.l2_len(self.subject, conversation_id)
+    }
+
+    /// Retrieves relevant L3 entries for the query (budget-controlled).
+    pub fn l3_query(
+        &self,
+        query: &str,
+        topic: &Topic,
+        budget: usize,
+    ) -> Result<Vec<L3Entry>, MemoryStoreError> {
+        self.memory.l3_query(self.subject, query, topic, budget)
+    }
+
+    /// The subject's complete L3 entry count.
+    pub fn l3_len(&self) -> Result<usize, MemoryStoreError> {
+        self.memory.l3_len(self.subject)
+    }
 }
 
 fn now_epoch() -> u64 {
