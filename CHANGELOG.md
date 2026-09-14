@@ -4,13 +4,12 @@ All notable changes to Synonz are documented in this file. The format
 follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 versions follow [Semantic Versioning](https://semver.org/).
 
-## [Unreleased]
+## [0.5.0] - 2026-09-14
 
-The context-engine extension release (planned as 0.5.0; release decision
-pending): the engine becomes a concrete type with a read/write phase
-asymmetry, a read-only memory view, input rewriting, a distillation
-slot, and engine-model narration. **Breaking** — migrate with the table
-below.
+The context-engine extension release: the engine becomes a concrete
+type with a read/write phase asymmetry, a read-only memory view, input
+rewriting, a distillation slot, and engine-model narration. **Breaking**
+— migrate with the table below.
 
 ### Highlights
 
@@ -77,7 +76,7 @@ below.
 
 ### Migration
 
-| Before (0.4.0) | After (planned 0.5.0) |
+| Before (0.4.0) | After (0.5.0) |
 |---|---|
 | `impl Context for MyEngine` | configure `Context` (`with_assembler` / `with_rewriter` / `with_topic_detector` / `with_summarizer` / `with_distiller`); whole write-phase replacement is retired |
 | `DefaultContext` | `Context` |

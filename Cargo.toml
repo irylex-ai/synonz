@@ -10,7 +10,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.4.0"
+version = "0.5.0"
 edition = "2024"
 license = "Apache-2.0"
 readme = "README.md"
@@ -37,11 +37,11 @@ proc-macro2 = "1"
 ratatui = "0.30"
 crossterm = { version = "0.29", features = ["event-stream"] }
 unicode-width = "0.2"
-synonz = { path = "crates/synonz", version = "0.4.0" }
-synonz-derive = { path = "crates/synonz-derive", version = "0.4.0" }
-synonz-openai = { path = "crates/synonz-openai", version = "0.4.0" }
-synonz-anthropic = { path = "crates/synonz-anthropic", version = "0.4.0" }
-synonz-mcp = { path = "crates/synonz-mcp", version = "0.4.0" }
+synonz = { path = "crates/synonz", version = "0.5.0" }
+synonz-derive = { path = "crates/synonz-derive", version = "0.5.0" }
+synonz-openai = { path = "crates/synonz-openai", version = "0.5.0" }
+synonz-anthropic = { path = "crates/synonz-anthropic", version = "0.5.0" }
+synonz-mcp = { path = "crates/synonz-mcp", version = "0.5.0" }
 
 [workspace.lints.rust]
 unsafe_code = "deny"
