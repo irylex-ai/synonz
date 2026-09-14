@@ -291,7 +291,11 @@ M31 蒸馏槽的物料面）；M31 收敛写侧与模型归属；M32 收尾扫�
   （v6 + 0.5.0 计划）已在 v6 批准时更新；
 - **示例**：`scheduler` 实跑通过（自动保存 ×3、系统任务快照、
   shutdown 收尾）；其余示例（含 `chat_tui`）随 API 编译通过，未触及
-  移除面；
+  移除面；**评审期全量实测**：`custom_tool` / `events` / `cancellation`
+  / `mcp_tools` / `scheduler` 全部 exit 0；`openai_chat` /
+  `anthropic_chat` 无 key 时提示退出（exit 0）；`chat_tui` 增加非 TTY
+  友好提示（无交互终端时明确说明并退出，替代原生 OS 错误）——交互
+  终端下的完整会话需人工实跑（无头环境无法应答光标位置查询）；
 - **命名终稿**：按 coding.md §5 核对通过（`Context` /
   `TurnInputRewriter` / `MemoryDistiller` / `MemoryReader` / `L2Entry` /
   `L3Entry` / `L3Identity`）；rustdoc / 测试注释无 ADR 编号引用

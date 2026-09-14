@@ -17,6 +17,7 @@ mod tools;
 mod ui;
 
 use std::io;
+use std::io::IsTerminal;
 use std::panic;
 use std::time::Duration;
 
@@ -56,6 +57,10 @@ type ChatTerminal = Terminal<CrosstermBackend<io::Stdout>>;
 
 #[tokio::main]
 async fn main() -> io::Result<()> {
+    if !io::stdin().is_terminal() || !io::stdout().is_terminal() {
+        eprintln!("chat_tui requires an interactive terminal (stdin and stdout must be a TTY)");
+        return Ok(());
+    }
     install_panic_hook();
     let mut terminal = setup_terminal()?;
     let result = run(&mut terminal).await;
