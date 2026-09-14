@@ -1,8 +1,7 @@
 //! (crate-internal) Cancellation engine: three entries, one signal.
 //!
-//! Per the cancellation ADR, the framework adopts the ecosystem primitive
-//! ([`CancellationToken`]) and converges all cancellation entries onto a
-//! single internal token:
+//! The framework adopts the ecosystem primitive ([`CancellationToken`]) and
+//! converges all cancellation entries onto a single internal token:
 //!
 //! - **drop**: the run stream owns a [`CancelHandle`] whose drop guard
 //!   cancels the token when the consumer walks away;

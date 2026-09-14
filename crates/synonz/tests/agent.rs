@@ -1,8 +1,8 @@
 //! End-to-end agent behavior tests driven by `MockModel`.
 //!
-//! These tests verify the loop's externally meaningful behavior against the
-//! ADR commitments: explicit lifecycle, complete event narrative, soft tool
-//! failures, cancellation semantics, and the round budget.
+//! These tests verify the loop's externally meaningful behavior: explicit
+//! lifecycle, complete event narrative, soft tool failures, cancellation
+//! semantics, and the round budget.
 //!
 //! Requires the `test-util` feature (the tests run against `MockModel`).
 #![cfg(feature = "test-util")]
