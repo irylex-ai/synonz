@@ -1,7 +1,7 @@
 # Synonz 0.5.0 实现计划
 
-- 状态: VERIFIED（2026-09-13，M28-M32 完成并验证——全量回归
-  221/221、clippy/doc 零警告、fmt 干净；发布决策待 irylex 确认）
+- 状态: RELEASED（2026-09-14，五个 crate 0.5.0 已发布；tag `v0.5.0`
+  + GitHub Release；发布记录见 §6）
 - 日期: 2026-09-13
 - 依据: ADR-0019（APPROVED——上下文引擎扩展面）、架构设计文档
   v6（APPROVED）
@@ -307,3 +307,19 @@ M31 蒸馏槽的物料面）；M31 收敛写侧与模型归属；M32 收尾扫�
 - **发布决策**：**待 irylex 确认**——版本号 0.5.0（工作标签）、五份
   crate README 同步、依序 publish、tag `v0.5.0`、GitHub Release；
   本波止于"等待发布"。
+
+### 发布记录（2026-09-14）✅
+
+- **批准**：irylex（2026-09-14，"现在可以发布了"）；
+- **发布前**：版本 bump 0.4.0 → 0.5.0（workspace + 5 path 依赖）；
+  CHANGELOG 定稿 `[0.5.0] - 2026-09-14`；六份 README 逐字节一致；
+  全量回归 **221/221**（clippy/doc 零警告、fmt 干净）；提交
+  `b53f11b chore(release): prepare 0.5.0` 推送 origin（15 commits）；
+- **发布**：依序 publish `synonz-derive` → `synonz` → `synonz-openai`
+  → `synonz-anthropic` → `synonz-mcp`，五者 0.5.0 全部上传成功；
+  tag `v0.5.0` 推送；GitHub Release：
+  https://github.com/irylex-ai/synonz/releases/tag/v0.5.0 ；
+- **发布后核验**（§10 实测非假设）：crates.io 五 crate
+  `max_stable_version = 0.5.0`；从 static.crates.io 下载五份 `.crate`
+  解包，包内 README 与仓库 README **逐字节一致**（`chat_tui` 行在位）；
+- **状态**：RELEASED。
