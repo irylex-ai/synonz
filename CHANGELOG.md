@@ -4,6 +4,97 @@ All notable changes to Synonz are documented in this file. The format
 follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 versions follow [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+The memory-management release (planned as 0.6.0; release decision
+pending): memory entries become addressable items with an application
+management surface, equal-power in-place updates, effective forgetting
+and a layer-agnostic application face. **Breaking** — migrate with the
+table below and `docs/design/migration-0.6.0.zh-CN.md`.
+
+### Highlights
+
+- **Memory management surface**: `Memory` is the application face —
+  `list` / `get` / `edit` / `forget` / `forget_matching` over
+  `MemoryItem` (L2 `Summary` + L3 `Knowledge` items), with keyset
+  pagination (`MemoryQuery` / `MemoryListCursor` / `MemoryPage`) and
+  content-free `Updated` / `Removed` facts.
+- **Stable ids and freshness**: entries carry framework-generated ids
+  and `updated_at`; listing, cursors and recall rank by
+  `(updated_at desc, id asc)`.
+- **Equal-power updates**: user edits and system distillation share one
+  in-place path (same identity slot, id preserved, last writer wins);
+  content quality belongs to the strategies, not to the kernel.
+- **Effective forgetting**: reads go through the management face; the
+  in-flight maintenance re-validates its sources by id and claims them
+  by id before writing — forgotten sources are never written back.
+  Re-learning the fact from new evidence is allowed.
+- **Application face / internal separation**: layer primitives and the
+  three store slots move into the crate-internal `MemoryLayerStore`;
+  `Memory::reader`'s constructor is internalized (`MemoryReader` stays
+  public for strategy slots).
+
+### Added
+
+- **Memory management** (`synonz`): `MemoryType`, `MemorySource`,
+  `MemoryItem`, `MemoryQuery`, `MemoryCursor`, `MemoryListCursor`,
+  `MemoryPage`, `MemoryForgetFailure`, `MemoryForgetResult`,
+  `MemoryStoreQuery`; `Memory::list` / `get` / `edit` / `forget` /
+  `forget_matching`.
+- **Store contracts** (`synonz`): `MemoryL2Store` / `MemoryL3Store`
+  gain required `get` / `update` / `remove` / `list`;
+  `MemoryStoreError::EntryNotFound`.
+- **Events** (`synonz`): `MemoryEvent::Updated` / `Removed`
+  (content-free).
+- **Entries** (`synonz`): `id` and `updated_at`; `L2Entry::topic` and
+  `L2Entry::with_topic`.
+- **Test utilities** (`test-util`): `Memory::seed_l1` / `seed_l2` /
+  `seed_l3`, `Memory::reader_for_tests`,
+  `Memory::l1_len_for_tests` / `l2_len_for_tests` / `l3_len_for_tests`.
+
+### Changed
+
+- Recall ranking uses `(updated_at desc, id asc)`.
+- Distillation and conversation-end promotion claim sources by id
+  (forgotten sources are skipped; a source set that changes during a
+  transform discards that output with a visible `FlowFailed` fact).
+- `MemoryL3Store::upsert` preserves the existing id on same-identity
+  replace.
+
+### Breaking Changes
+
+- `Memory` no longer exposes the layer primitives (`l1_append` /
+  `l1_window` / `l1_pop_oldest` / layer lengths, `l2_append` / `l2_read`
+  / `l2_pop_oldest`, `l3_upsert` / `l3_query` / `l3_len`); use the
+  management surface (applications) or the crate-internal mechanism
+  (framework).
+- `Memory::reader` is no longer publicly constructible (`MemoryReader`
+  the type is unchanged and still handed to strategy slots through
+  their payloads).
+- `MemoryL2Store` / `MemoryL3Store` implementations must add the four
+  by-id methods (compile-time requirement).
+- `L2Entry` / `L3Entry` gain fields (`id`, `updated_at`; L2 `topic`) —
+  downstream struct literals must move to the constructors.
+- Recall ordering changes from `created_at` to `updated_at`.
+
+### Migration
+
+| Before (0.5.0) | After (planned 0.6.0) |
+|---|---|
+| `memory.l1_append(...)` (application seeding) | `test-util` `memory.seed_l1(...)` (tests/fixtures) |
+| `memory.l1_len` / `l2_len` / `l3_len` (application reads) | `memory.list(...)` (management) or `test-util` `*_len_for_tests` |
+| `memory.l3_upsert(entry)` (application write) | no application write path: conversations distill; imports run out-of-band; tests seed |
+| `memory.reader(&subject)` | internal; strategy slots receive `MemoryReader` through payloads; tests use `reader_for_tests` |
+| custom `MemoryL2Store` / `MemoryL3Store` | implement `get` / `update` / `remove` / `list`; keep ids on same-identity upsert |
+| recall by `created_at` | by `(updated_at desc, id asc)` |
+
+### Notes
+
+- Boundaries (no current requirement): application `add`, out-of-band
+  import guarantees, strict global time order, semantic search,
+  fact aggregation (strategy-level), physical/backup erasure, L1
+  retention/session cleanup.
+
 ## [0.5.0] - 2026-09-14
 
 The context-engine extension release: the engine becomes a concrete

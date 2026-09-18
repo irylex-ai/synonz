@@ -36,7 +36,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 | Crate | Purpose |
 |---|---|
-| `synonz` | Core: `Agent`, the Context state engine, the event bus and `SynonzEvent` vocabulary, the three-slot `Memory`, the time-driven scheduler, canonical messages, the reasoning loop |
+| `synonz` | Core: `Agent`, the Context state engine, the event bus and `SynonzEvent` vocabulary, the layered `Memory` (management face over the three storage slots), the time-driven scheduler, canonical messages, the reasoning loop |
 | `synonz-derive` | `#[derive(Tool)]` typed tool ergonomics (re-exported by `synonz`) |
 | `synonz-openai` | OpenAI-compatible `Model` adapter |
 | `synonz-anthropic` | Anthropic `Model` adapter |

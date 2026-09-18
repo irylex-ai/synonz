@@ -1,11 +1,11 @@
-# Synonz 上下文记忆扩展指南（0.5.0）
+# Synonz 上下文记忆扩展指南（0.6.0）
 
-- 状态: VERIFIED（2026-09-14，随 0.5.0 发布；内容与实测行为一致）
-- 日期: 2026-09-13
-- 依据: ADR-0019（APPROVED）、架构设计文档 v6（APPROVED）
+- 状态: VERIFIED（2026-09-19，随 0.6.0 波次实施；内容与实测行为一致）
+- 日期: 2026-09-19
+- 依据: ADR-0019、ADR-0020（均 APPROVED）、架构设计文档 v7（APPROVED）
 - 性质: 开发文档——扩展实操指引（映射、配方、边界、常见坑）；
-  架构决策理由见 ADR-0019 与 v6，本文不重复论证
-- 适用: 0.5.0 起；替换 0.4.0 的"实现 `trait Context`"扩展路径
+  架构决策理由见 ADR-0019/0020 与 v7，本文不重复论证
+- 适用: 0.6.0 起；替换 0.4.0 的"实现 `trait Context`"扩展路径
 
 ---
 
@@ -19,11 +19,13 @@
 | 写侧子钩子 | `ConversationTopicDetector` | 主题标签与漂移判定 | `Context::with_topic_detector` | 首段启发式（内化） |
 | 写侧子钩子 | `MemorySummarizer` | L1→L2 内容变换 | `Context::with_summarizer` | 提示词摘要（内化） |
 | 写侧子钩子 | `MemoryDistiller` | L2→L3 内容生成 | `Context::with_distiller` | 机械提升 |
-| 存储位 | `MemoryL1/L2/L3Store` | 逐层持久化 | `RuntimeBuilder::memory_*_store` | 进程内 |
+| 存储位 | `MemoryL1/L2/L3Store` | 逐层持久化（L2/L3 含按 id 的 `get`/`update`/`remove`/`list`） | `RuntimeBuilder::memory_*_store` | 进程内 |
 | 旁路 | `Observer` | 全量事件目击 | `RuntimeBuilder::observer` | 无 |
+| 应用面 | `Memory` | 条目管理（查看/纠正/遗忘） | `runtime.memory()` | — |
 
 配置面：`l1_window` / `l2_cap`（楼层参数）、`with_model`（引擎模型）。
-载荷门面：`MemoryReader`（只读；策略槽的物料面）。
+载荷门面：`MemoryReader`（只读；策略槽的物料面，框架构造、随载荷交
+给槽）。
 
 **不可扩展**（ADR-0019 边界）：写相位的整段编排（主题→归档→压实→
 蒸馏的顺序与写入）由框架独占——写权限不外放。
@@ -39,8 +41,49 @@
 | 换主题判定 | 实现 `ConversationTopicDetector` |
 | 换召回/组合/格式（不同装配哲学） | 实现 `ContextAssembler` |
 | 组织前的指代消解 / 输入规范化 | 实现 `TurnInputRewriter` |
-| 换持久化介质 | 实现对应的 `MemoryL*Store` |
+| 换持久化介质 | 实现对应的 `MemoryL*Store`（L2/L3 必选补齐按 id 的方法，见 §5） |
 | 会话终结时做外部收尾 | 订阅 `ConversationEvent::Ended`（Observer） |
+| 用户/应用纠正与遗忘记忆 | `Memory` 应用面（`list`/`get`/`edit`/`forget`/`forget_matching`，见 §2.1） |
+| 批量导入 / 迁移 | 框架外：自持存储句柄直接写；测试/fixtures 用 `test-util` 种子 |
+
+### 2.1 应用面：记忆管理（ADR-0020）
+
+```rust
+let memory = runtime.memory();              // 应用面（条目管理）
+let subject = Subject::of(SubjectType::User, "u-1");
+
+// 统一的记忆列表：Summary 块在前、Knowledge 块在后（各按更新时间倒序）
+let page = memory.list(&subject, MemoryQuery::new(20))?;
+for item in &page.items {
+    // MemoryItem { id, memory_type, content, source, created_at, updated_at }
+}
+
+// 纠正：原地更新（id / 类型 / 来源不变，更新时间刷新）
+memory.edit(&subject, &item.id, "corrected text")?;
+
+// 遗忘：单条（幂等）/ 批量过滤（逐条尽力、limit 为批量上限）
+memory.forget(&subject, &item.id)?;
+memory.forget_matching(&subject, MemoryQuery::new(100).with_keyword("outdated"))?;
+```
+
+- **条目 = L2 情景摘要（`MemoryType::Summary`）+ L3 知识
+  （`MemoryType::Knowledge`）**；L1 是原始材料，不在管理面；
+- **分页**：keyset（`MemoryQuery` / `MemoryListCursor` /
+  `MemoryPage`），`limit` 有界；列表顺序是**结构序**（不是严格全局
+  时间序）；
+- **新鲜度**：统一 `updated_at`（创建 = `created_at`；编辑/更新
+  刷新）——列表排序、分页游标与召回排序同一口径；
+- **同权**：用户编辑与系统写入走同一路径、无优先级（同身份槽原地
+  更新，后到者生效）；**错误覆盖属于策略质量**（算法/提示词/写前
+  对账），在策略槽里改进；
+- **遗忘有效性**：操作返回后所有读路径不可见；在途维护经"按 id
+  重校验 + 写前认领"不回写（框架内部，槽无感）；被删记忆在新对话中
+  被重新告知 = 新证据（会再次生成）；
+- **事实**：`MemoryEvent::Updated` / `Removed`（不含内容）；
+- **不做日常新增**：新记忆来自对话沉淀；测试/fixtures 用
+  `test-util`（`seed_l1/l2/l3` + `reader_for_tests`）；批量导入/
+  迁移由应用自持存储句柄在框架外完成（框架不感知、无事实、无有序
+  保证——文档化边界）。
 
 ---
 
@@ -145,7 +188,9 @@ impl MemoryDistiller for EntityExtraction {
 
 - 返回**知识文本**；`L3Entry` 的身份 `(subject, conversation, topic)`
   与时间由引擎补齐；
-- **先变换、成功后再 pop**：`Err` 保留 L2（不丢数据）+ 可见事实；
+- **先变换、成功后再认领**：`Err` 保留 L2（不丢数据）+ 可见事实；
+  在途遗忘经"变换前按 id 重校验 + 写前按 id 认领"处理——来源集合
+  有变即丢弃本次产物（框架内部，槽无感）；
 - 默认机械实现：每条 L2 → 一条知识文本（无模型调用）。
 
 ---
@@ -154,8 +199,11 @@ impl MemoryDistiller for EntityExtraction {
 
 - 三存储位为**同步契约**；注册即用，逐层可换（L2 Redis / L3 向量库
   等）；
-- L1 自定义实现返回条目用 `L1Entry::new(conversation_id, topic,
-  messages)`（自动置 `created_at`）；L2 用 `L2Entry::new(...)`；
+- 条目构造：`L1Entry::new(conversation_id, topic, messages)`；`L2Entry::new(conversation_id, content, index).with_topic(topic)`；`L3Entry::new(identity, content)`——`id` 与时间戳自动生成（旧数据缺省见迁移指南）；
+- **自定义存储迁移（0.6.0 必选）**：`MemoryL2Store` / `MemoryL3Store`
+  需补齐 `get` / `update` / `remove` / `list`（按 id 与 keyset 枚举）；
+  `MemoryL3Store::upsert` 同身份替换需**保留原 id**；完整清单见
+  `docs/design/migration-0.6.0.zh-CN.md`；
 - **边界 G3（远程存储）**：网络 I/O 型介质不进入默认 Memory 管线的
   保障范围——两条可行路径：
   1. **策略内自持**：在 `ContextAssembler` / `MemoryDistiller` 等槽
@@ -193,6 +241,12 @@ impl MemoryDistiller for EntityExtraction {
 | 远程存储（G3） | 不进默认 Memory 管线 | §5 两条路径 |
 | 辅助叙述流式（`emit_deltas`） | 辅助调用恒无 `StreamDelta` | 无当前需求；出现再引入开关 |
 | 多主题集合 / 切换轨迹 | 框架只有活跃主题标签（T2） | 见 §8 |
+| 应用日常新增（`add`） | 不提供（ADR-0020） | 对话沉淀；测试走 `test-util`；批量导入在框架外（自持存储句柄） |
+| 严格全局时间序（跨类型归并） | 列表为结构序（Summary 块 → Knowledge 块） | 应用各自拉两页归并（可加性后续） |
+| 语义搜索 | v1 由 `list` 的关键字过滤表达 | 将来单独立项 |
+| 事实聚合 / 矛盾消解 | 归策略层（ADR-0020） | 自定义 `MemoryDistiller` 用查询 + 管理动词实现 |
+| 物理删除 / 副本 / 备份 / 加密擦除 | 归存储实现 | 自定义存储自行负责并在文档承诺 |
+| L1 留存与会话级清理 | 另行立项 | 自持存储句柄在框架外清理 |
 
 ---
 
@@ -240,4 +294,13 @@ impl MemoryDistiller for EntityExtraction {
    条目按 upsert 语义合并——一批蒸馏文本共享同一身份，返回多文本时
    注意最终保留语义；
 7. **终结收尾不属于引擎**：`shutdown()` / `end()` 的收尾是 Runtime
-   结构行为（drain + 机械促进），不要指望引擎钩子。
+   结构行为（drain + 机械促进），不要指望引擎钩子；
+8. **编辑会被后续系统写入覆盖**：同权语义（同身份槽原地更新、后到
+   者生效）——要"编辑优先"就在策略层解决（写前对账/提示词），内核
+   不设优先级；
+9. **列表不是严格全局时间序**：Summary 块整块在前、Knowledge 块在
+   后；需要混合时间线时应用自行归并；
+10. **`MemoryReader` 不能自行构造**：由框架经载荷交给策略槽；自测
+    走 `test-util`（`reader_for_tests`）；
+11. **遗忘后重新被告知 = 新证据**：会再次生成条目（预期行为，不是
+    复活）；物理不可恢复由存储实现负责。

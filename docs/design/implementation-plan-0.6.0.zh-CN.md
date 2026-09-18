@@ -1,6 +1,7 @@
 # Synonz 0.6.0 实现计划
 
-- 状态: DRAFT（待 irylex 评审后转 APPROVED）
+- 状态: VERIFIED（2026-09-19，M33-M38 完成并验证——全量回归
+  232/232、clippy/doc 零警告、fmt 干净；发布决策待 irylex 确认）
 - 日期: 2026-09-19
 - 依据: ADR-0020（APPROVED——记忆管理面与条目语义）、架构设计文档
   v7（APPROVED）
@@ -297,3 +298,27 @@ M38 收尾与验证（扩展指南、迁移指南、CHANGELOG、README、全量�
   预变换路径由代码保证（公开 API 无法精确打点，未单独测试）；
 - 验证：全量回归 **232/232** 全绿、clippy 零警告、`cargo doc
   --workspace --no-deps` 零警告、fmt 干净。
+
+### M38 收尾与验证 ✅（2026-09-19）
+
+- **示例验证（契约变更必做）**：`cargo build -p synonz-examples
+  --bins` 全部通过；**五个离线示例实跑 exit 0**（`custom_tool` /
+  `events` / `cancellation` / `mcp_tools` / `scheduler`）；**两个网络
+  示例**无 key 时提示退出（exit 0）；`chat_tui` 编译通过 + 非 TTY
+  友好提示（交互实跑由人工另行确认）；示例未触及变更面（无需改写）；
+- **文档**：扩展指南更新（新增 §2.1 管理面配方、扩展点表与边界行、
+  迁移指引、"常见坑"8-11）；**迁移指南新增**
+  `docs/design/migration-0.6.0.zh-CN.md`（应用代码 / 自定义存储 /
+  数据缺省 / 行为变化 / 检查清单）；CHANGELOG 0.6.0 完整
+  （Highlights / Added / Changed / Breaking / Migration / Notes）；
+  v7 落点核对通过（实施记录 + 状态表更新）；README 六份同步
+  （`Memory` 描述改为"管理面 over 三存储槽"）；
+- **命名终稿**：按 coding.md §5 核对通过（referential nouns、无
+  碰撞；`MemorySource` 与 `EventSource`、`MemoryStoreQuery` 与
+  `MemoryQuery` 的区分已在指南/文档写明）；
+- **全量验证**：fmt 干净、clippy 零警告、`cargo doc --workspace
+  --no-deps` 零警告、`cargo test --workspace --all-features`
+  **232/232** 全绿；
+- **发布决策**：**待 irylex 确认**——版本号 0.6.0（工作标签）、五份
+  crate README 同步（已随仓库同步）、依序 publish、tag `v0.6.0`、
+  GitHub Release；本波止于"等待发布"。
