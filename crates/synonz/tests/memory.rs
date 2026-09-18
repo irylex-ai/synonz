@@ -12,7 +12,10 @@
 
 use std::sync::Arc;
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
+
+use tokio::sync::Notify;
 
 use synonz::{
     Agent, Context, ContextAssembler, ContextAssemblerInput, ContextAssemblerOutput, Conversation,
@@ -1137,5 +1140,99 @@ async fn management_facts_are_emitted() {
             .iter()
             .any(|(kind, ids)| kind == "removed" && ids == &vec![entry.id.clone()]),
         "removed fact: {facts:?}"
+    );
+}
+
+/// A distiller that signals when it is invoked, gates its first call
+/// until released, and records the sources it was given (id + content).
+#[derive(Default, Clone)]
+struct GatedDistiller {
+    started: Arc<Notify>,
+    release: Arc<Notify>,
+    gated_once: Arc<AtomicBool>,
+    seen: Arc<Mutex<Vec<(String, String)>>>,
+}
+
+impl synonz::MemoryDistiller for GatedDistiller {
+    fn distill<'a>(
+        &'a self,
+        blocks: &'a [synonz::L2Entry],
+        _conversation_id: &'a str,
+        _topic: &'a str,
+        _reader: synonz::MemoryReader<'a>,
+        _model: &'a dyn synonz::Model,
+    ) -> synonz::BoxFuture<'a, Result<Vec<String>, String>> {
+        Box::pin(async move {
+            self.seen
+                .lock()
+                .unwrap()
+                .extend(blocks.iter().map(|b| (b.id.clone(), b.content.clone())));
+            self.started.notify_one();
+            if !self.gated_once.swap(true, Ordering::SeqCst) {
+                self.release.notified().await;
+            }
+            Ok(blocks.iter().map(|b| b.content.clone()).collect())
+        })
+    }
+}
+
+/// Forgetting a distillation source while the transform is in flight
+/// must not resurrect its content as knowledge (ADR-0020).
+#[tokio::test]
+async fn forgetting_a_source_during_distillation_discards_the_output() {
+    let recorder = StageRecorder::default();
+    let runtime = SynonzRuntime::builder().observer(recorder.clone()).build();
+    let subject = Subject::of(SubjectType::User, "u-race");
+    let distiller = GatedDistiller::default();
+    let model = RoutingModel::new(&["a1", "a2", "a3"], &["sum1", "sum2"]);
+    let mut conv = Conversation::with_id(&runtime, &subject, "conv-race");
+    let agent = Agent::builder()
+        .runtime(&runtime)
+        .model(model)
+        .context(
+            Context::new()
+                .l1_window(1)
+                .l2_cap(1)
+                .with_distiller(distiller.clone()),
+        )
+        .build()
+        .unwrap();
+    for text in ["one", "two", "three"] {
+        let _ = agent.run(conv.turn_input(text)).await.unwrap();
+    }
+
+    // Wait for the in-flight distillation, then forget its sources.
+    tokio::time::timeout(Duration::from_secs(5), distiller.started.notified())
+        .await
+        .expect("distillation started");
+    let seen = distiller.seen.lock().unwrap().clone();
+    assert!(!seen.is_empty(), "the distiller received sources");
+    let memory = runtime.memory();
+    for (id, _) in &seen {
+        assert_eq!(memory.forget(&subject, id).unwrap().removed, 1);
+    }
+    distiller.release.notify_one();
+
+    // The produced output must be discarded: none of the forgotten
+    // contents surfaces as knowledge, and the discard is visible.
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    let forgotten: Vec<&str> = seen.iter().map(|(_, content)| content.as_str()).collect();
+    let knowledge = memory
+        .list(
+            &subject,
+            synonz::MemoryQuery::new(50).with_memory_type(synonz::MemoryType::Knowledge),
+        )
+        .unwrap();
+    assert!(
+        knowledge.items.iter().all(|item| !forgotten
+            .iter()
+            .any(|content| item.content.contains(content))),
+        "no resurrection: {:?}",
+        knowledge.items
+    );
+    let stages = recorder.stages.lock().unwrap();
+    assert!(
+        stages.contains(&synonz::MemoryFlowStage::Distill),
+        "the discard is visible: {stages:?}"
     );
 }

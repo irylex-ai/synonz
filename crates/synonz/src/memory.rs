@@ -692,16 +692,6 @@ impl MemoryLayerStore {
         self.l2.len(subject, conversation_id)
     }
 
-    /// Removes the oldest `n` L2 blocks of a conversation and returns them.
-    pub(crate) fn l2_pop_oldest(
-        &self,
-        subject: &Subject,
-        conversation_id: &str,
-        n: usize,
-    ) -> Result<Vec<L2Entry>, MemoryStoreError> {
-        self.l2.pop_oldest(subject, conversation_id, n)
-    }
-
     /// Upserts an L3 knowledge entry (same-identity replace preserves the id).
     pub(crate) fn l3_upsert(
         &self,

@@ -465,11 +465,14 @@ impl SynonzRuntime {
         }
 
         // 2. Mechanical promotion: every L2 block becomes L3 knowledge
-        //    under the conversation's topic.
+        //    under the conversation's topic. Concurrency discipline
+        //    (ADR-0020): each source is claimed by id before promotion —
+        //    entries forgotten in the meantime are skipped, never
+        //    resurrected.
         let subject = conversation.subject();
         let memory = self.inner.memory.layers();
-        let l2_len = match memory.l2_len(subject, conversation.id()) {
-            Ok(len) => len,
+        let blocks = match memory.l2_read(subject, conversation.id()) {
+            Ok(blocks) => blocks,
             Err(error) => {
                 self.inner
                     .event_bus
@@ -481,25 +484,26 @@ impl SynonzRuntime {
                 return;
             }
         };
-        if l2_len == 0 {
+        if blocks.is_empty() {
             return;
         }
-        let blocks = match memory.l2_pop_oldest(subject, conversation.id(), l2_len) {
-            Ok(blocks) => blocks,
-            Err(error) => {
-                self.inner
-                    .event_bus
-                    .emit(SynonzEvent::Memory(MemoryEvent::FlowFailed {
-                        stage: MemoryFlowStage::Distill,
-                        detail: format!("promotion pop: {error}"),
-                        moment: MemoryFlowFailedMoment::AtConversationEnd,
-                    }));
-                return;
-            }
-        };
         let topic = conversation.topic().unwrap_or_default();
         let mut promoted = 0usize;
         for block in blocks {
+            match memory.l2_remove(subject, &block.id) {
+                Ok(true) => {}
+                Ok(false) => continue,
+                Err(error) => {
+                    self.inner
+                        .event_bus
+                        .emit(SynonzEvent::Memory(MemoryEvent::FlowFailed {
+                            stage: MemoryFlowStage::Distill,
+                            detail: format!("promotion claim: {error}"),
+                            moment: MemoryFlowFailedMoment::AtConversationEnd,
+                        }));
+                    return;
+                }
+            }
             let entry = crate::memory::L3Entry::new(
                 crate::memory::L3Identity {
                     subject_id: subject.to_string(),

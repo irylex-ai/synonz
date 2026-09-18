@@ -277,3 +277,23 @@ M38 收尾与验证（扩展指南、迁移指南、CHANGELOG、README、全量�
   ④`test-util` 除种子/reader 外补三个读数方法（`*_len_for_tests`）；
 - 验证：全量回归 **231/231** 全绿、clippy 零警告、`cargo doc
   --workspace --no-deps` 零警告、fmt 干净（M35+M36 合并验证）。
+
+### M37 并发纪律（遗忘不回写）✅（2026-09-19）
+
+- **蒸馏**（`BackgroundMaintenanceTask::distill`）：peek → **变换前
+  按 id 重校验**（只把幸存者交给策略；被提前遗忘的来源跳过并发
+  `FlowFailed{Distill}`）→ 策略纯变换 → **写前逐条按 id 认领
+  （remove）幸存者**：认领失败（期间被删）或出错即**丢弃本次产物**
+  + `FlowFailed{Distill}`；全部认领成功才写 L3；
+- **终结促进**（`Runtime::finalize_conversation`）：改为 `l2_read` +
+  逐条按 id `remove` 认领（`false` 跳过，不复活）；upsert 失败发事实；
+- 压实（L1）保持按位置弹出（L1 不可管理、无竞态面）；
+  `MemoryLayerStore::l2_pop_oldest` 包装退役（存储 trait 方法保留）；
+- **确定性竞态测试**：`GatedDistiller`（首个调用阻塞并暴露源
+  id/内容）+ 三回合触发蒸馏 → 在途遗忘来源 → 释放 → 断言知识中不含
+  被遗忘内容、`FlowFailed{Distill}` 可见；
+- **B 类决议**：预变换跳过仅发事实；写前认领失败一律丢弃产物
+  （宁可本次不蒸馏，也不回写遗忘内容）；"部分来源被提前遗忘"的
+  预变换路径由代码保证（公开 API 无法精确打点，未单独测试）；
+- 验证：全量回归 **232/232** 全绿、clippy 零警告、`cargo doc
+  --workspace --no-deps` 零警告、fmt 干净。

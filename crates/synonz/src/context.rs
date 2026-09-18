@@ -617,6 +617,12 @@ impl BackgroundMaintenanceTask {
     /// strategy (the default is mechanical: each summary becomes
     /// long-term knowledge under the conversation's topic). Transform
     /// first, pop after — a failed transform keeps L2.
+    ///
+    /// Concurrency discipline (ADR-0020): sources are re-validated by id
+    /// before the transform (already-forgotten ones are skipped) and
+    /// again before the write; if the source set changes during the
+    /// transform, the produced output is discarded (it may contain
+    /// forgotten content) and the survivors stay for a later pass.
     async fn distill(&self) {
         let l2_len = match self.memory.l2_len(&self.subject, &self.conversation_id) {
             Ok(len) => len,
@@ -633,8 +639,8 @@ impl BackgroundMaintenanceTask {
         if overflow == 0 {
             return;
         }
-        // Peek the processed prefix: transform first, pop after.
-        let blocks: Vec<L2Entry> = match self.memory.l2_read(&self.subject, &self.conversation_id) {
+        // Peek the processed prefix.
+        let peeked: Vec<L2Entry> = match self.memory.l2_read(&self.subject, &self.conversation_id) {
             Ok(blocks) => blocks.into_iter().take(overflow).collect(),
             Err(error) => {
                 self.sink.emit_memory(MemoryEvent::FlowFailed {
@@ -645,11 +651,41 @@ impl BackgroundMaintenanceTask {
                 return;
             }
         };
+        // Pre-transform validation: only sources that still exist reach
+        // the strategy (entries forgotten meanwhile are skipped).
+        let mut survivors: Vec<L2Entry> = Vec::with_capacity(peeked.len());
+        for block in &peeked {
+            match self.memory.l2_get(&self.subject, &block.id) {
+                Ok(Some(current)) => survivors.push(current),
+                Ok(None) => {}
+                Err(error) => {
+                    self.sink.emit_memory(MemoryEvent::FlowFailed {
+                        stage: MemoryFlowStage::Distill,
+                        detail: format!("distill validate: {error}"),
+                        moment: MemoryFlowFailedMoment::Background,
+                    });
+                    return;
+                }
+            }
+        }
+        if survivors.is_empty() {
+            return;
+        }
+        if survivors.len() < peeked.len() {
+            self.sink.emit_memory(MemoryEvent::FlowFailed {
+                stage: MemoryFlowStage::Distill,
+                detail: format!(
+                    "{} source(s) were forgotten before distillation; skipped",
+                    peeked.len() - survivors.len()
+                ),
+                moment: MemoryFlowFailedMoment::Background,
+            });
+        }
         let reader = self.memory.reader(&self.subject);
         let contents = match self
             .distiller
             .distill(
-                &blocks,
+                &survivors,
                 &self.conversation_id,
                 &self.topic,
                 reader,
@@ -668,17 +704,29 @@ impl BackgroundMaintenanceTask {
                 return;
             }
         };
-        // The transform succeeded: pop the processed prefix.
-        if let Err(error) =
-            self.memory
-                .l2_pop_oldest(&self.subject, &self.conversation_id, overflow)
-        {
-            self.sink.emit_memory(MemoryEvent::FlowFailed {
-                stage: MemoryFlowStage::Distill,
-                detail: format!("l2 pop: {error}"),
-                moment: MemoryFlowFailedMoment::Background,
-            });
-            return;
+        // Post-transform validation and claim: if a source vanished
+        // during the transform (or between validation and claim), the
+        // output may contain forgotten content — discard it.
+        for block in &survivors {
+            match self.memory.l2_remove(&self.subject, &block.id) {
+                Ok(true) => {}
+                Ok(false) => {
+                    self.sink.emit_memory(MemoryEvent::FlowFailed {
+                        stage: MemoryFlowStage::Distill,
+                        detail: "sources changed during distillation; output discarded".to_string(),
+                        moment: MemoryFlowFailedMoment::Background,
+                    });
+                    return;
+                }
+                Err(error) => {
+                    self.sink.emit_memory(MemoryEvent::FlowFailed {
+                        stage: MemoryFlowStage::Distill,
+                        detail: format!("l2 claim: {error}"),
+                        moment: MemoryFlowFailedMoment::Background,
+                    });
+                    return;
+                }
+            }
         }
         let mut distilled = 0usize;
         for content in contents {
