@@ -11,6 +11,12 @@
   新增管理事实词汇）、ADR-0019（上下文引擎扩展面——策略槽只读、
   写入收口、`MemoryReader` 只读物料面；本 ADR 细化其构造归属）
 - 版本承载: 0.6.0（工作标签；发布准备时按纳入范围定号）
+- 评审修订（2026-09-19，命名评审）：条目类别改名——
+  `MemoryKind::{Episode, Fact}` → **`MemoryType::{Summary, Knowledge}`**
+  （`Summary` ↔ L2 情景摘要、`Knowledge` ↔ L3 知识；`Fact` 偏窄，
+  L3 还含偏好与结论）；`MemoryListCursor` 的阶段取值随之改为
+  `Summary | Knowledge`。正文 Decision/Consequences 中出现的旧名
+  以本修订为准。
 
 ## Context（背景）
 
