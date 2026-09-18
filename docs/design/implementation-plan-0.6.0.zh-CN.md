@@ -110,9 +110,10 @@ M38 收尾与验证（扩展指南、迁移指南、CHANGELOG、README、全量�
 | # | 子项 | 要点 |
 |---|---|---|
 | 1 | 测试全量 | 全量回归（fmt / clippy / doc / test --all-features）；新增测试按 §4；新引入 flaky 即缺陷 |
-| 2 | 文档 | **扩展指南更新**（管理面用法、导入边界、自定义存储迁移清单、"错误覆盖归策略质量"的规则）；**迁移指南**（自定义存储必补方法、L3 upsert 保 id、公开面移除、id/updated_at 迁移）；CHANGELOG 0.6.0（破坏项 + 迁移表 + 边界）；README 指针（随 v7 批准已更新）；v7 落点核对与实施记录 |
-| 3 | 命名终稿 | 按 coding.md §5 核对：`MemoryType` / `MemorySource` / `MemoryQuery` / `MemoryCursor` / `MemoryListCursor` / `MemoryPage` / `MemoryForgetResult` / `MemoryStoreQuery` / `MemoryLayerStore` |
-| 4 | 发布决策 | bump 0.5.0→0.6.0、五份 crate README 同步、dry-run、依序 publish、tag `v0.6.0`、GitHub Release——**等 irylex 确认后执行** |
+| 2 | **示例验证**（契约变更必做） | `cargo build -p synonz-examples --bins` 全部通过；**离线示例实跑**（`custom_tool` / `events` / `cancellation` / `scheduler` / `mcp_tools`）exit 0；**网络示例**（`openai_chat` / `anthropic_chat`）无 key 时提示退出（exit 0）；`chat_tui` 随新契约编译通过，并由人工在交互终端实跑（无头环境无法应答终端查询）；**触及变更面**（`Memory` facade / `MemoryReader` / 条目类型 / 事件词汇）的示例同步改写并记录 |
+| 3 | 文档 | **扩展指南更新**（管理面用法、导入边界、自定义存储迁移清单、"错误覆盖归策略质量"的规则）；**迁移指南**（自定义存储必补方法、L3 upsert 保 id、公开面移除、id/updated_at 迁移）；CHANGELOG 0.6.0（破坏项 + 迁移表 + 边界）；README 指针（随 v7 批准已更新）；v7 落点核对与实施记录 |
+| 4 | 命名终稿 | 按 coding.md §5 核对：`MemoryType` / `MemorySource` / `MemoryQuery` / `MemoryCursor` / `MemoryListCursor` / `MemoryPage` / `MemoryForgetResult` / `MemoryStoreQuery` / `MemoryLayerStore` |
+| 5 | 发布决策 | bump 0.5.0→0.6.0、五份 crate README 同步、dry-run、依序 publish、tag `v0.6.0`、GitHub Release——**等 irylex 确认后执行** |
 
 ---
 
@@ -155,7 +156,11 @@ M38 收尾与验证（扩展指南、迁移指南、CHANGELOG、README、全量�
 8. **事实**：`Updated`/`Removed` 发出且不含内容；
 9. **文档一致**：扩展指南与迁移指南落地；CHANGELOG 0.6.0 完整；
    v7 落点核对通过；
-10. **延期项记录在案**：`add`/框架外导入保证/物理擦除/L1 清理/严格
+10. **示例验证（契约变更必做）**：`cargo build -p synonz-examples
+    --bins` 全部通过；五个离线示例实跑 exit 0；两个网络示例无 key
+    时提示退出；`chat_tui` 编译通过并人工交互实跑；触及变更面的示例
+    已同步改写并记录；
+11. **延期项记录在案**：`add`/框架外导入保证/物理擦除/L1 清理/严格
     时间序/语义搜索/事实聚合/内容质量。
 
 ---
