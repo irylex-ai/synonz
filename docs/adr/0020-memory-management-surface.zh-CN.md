@@ -15,8 +15,10 @@
   `MemoryKind::{Episode, Fact}` → **`MemoryType::{Summary, Knowledge}`**
   （`Summary` ↔ L2 情景摘要、`Knowledge` ↔ L3 知识；`Fact` 偏窄，
   L3 还含偏好与结论）；`MemoryListCursor` 的阶段取值随之改为
-  `Summary | Knowledge`。正文 Decision/Consequences 中出现的旧名
-  以本修订为准。
+  `Summary | Knowledge`；`MemoryItem` / `MemoryQuery` / 管理事实的字段
+  `kind` → **`memory_type`**（`type` 为 Rust 关键字，取显式名）。正文
+  Decision/Consequences 中出现的旧名一律以本修订为准（正文的
+  `kind` 读作 `memory_type`，"跨 kind" 读作"跨类型"）。
 
 ## Context（背景）
 
