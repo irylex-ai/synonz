@@ -372,6 +372,26 @@ impl synonz::MemoryL2Store for BrokenL2 {
     ) -> Result<Vec<synonz::L2Entry>, synonz::MemoryStoreError> {
         Err(synonz::MemoryStoreError::Storage("down".into()))
     }
+    fn get(
+        &self,
+        _: &Subject,
+        _: &str,
+    ) -> Result<Option<synonz::L2Entry>, synonz::MemoryStoreError> {
+        Err(synonz::MemoryStoreError::Storage("down".into()))
+    }
+    fn update(&self, _: &Subject, _: synonz::L2Entry) -> Result<bool, synonz::MemoryStoreError> {
+        Err(synonz::MemoryStoreError::Storage("down".into()))
+    }
+    fn remove(&self, _: &Subject, _: &str) -> Result<bool, synonz::MemoryStoreError> {
+        Err(synonz::MemoryStoreError::Storage("down".into()))
+    }
+    fn list(
+        &self,
+        _: &Subject,
+        _: synonz::MemoryStoreQuery,
+    ) -> Result<synonz::MemoryPage<synonz::L2Entry>, synonz::MemoryStoreError> {
+        Err(synonz::MemoryStoreError::Storage("down".into()))
+    }
 }
 
 impl synonz::MemoryL3Store for BrokenL3 {
@@ -388,6 +408,26 @@ impl synonz::MemoryL3Store for BrokenL3 {
         Err(synonz::MemoryStoreError::Storage("down".into()))
     }
     fn len(&self, _: &Subject) -> Result<usize, synonz::MemoryStoreError> {
+        Err(synonz::MemoryStoreError::Storage("down".into()))
+    }
+    fn get(
+        &self,
+        _: &Subject,
+        _: &str,
+    ) -> Result<Option<synonz::L3Entry>, synonz::MemoryStoreError> {
+        Err(synonz::MemoryStoreError::Storage("down".into()))
+    }
+    fn update(&self, _: &Subject, _: synonz::L3Entry) -> Result<bool, synonz::MemoryStoreError> {
+        Err(synonz::MemoryStoreError::Storage("down".into()))
+    }
+    fn remove(&self, _: &Subject, _: &str) -> Result<bool, synonz::MemoryStoreError> {
+        Err(synonz::MemoryStoreError::Storage("down".into()))
+    }
+    fn list(
+        &self,
+        _: &Subject,
+        _: synonz::MemoryStoreQuery,
+    ) -> Result<synonz::MemoryPage<synonz::L3Entry>, synonz::MemoryStoreError> {
         Err(synonz::MemoryStoreError::Storage("down".into()))
     }
 }

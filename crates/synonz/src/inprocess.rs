@@ -17,7 +17,8 @@ use crate::conversation::{
     ConversationStoreError, ConversationSummary,
 };
 use crate::memory::{
-    L1Entry, L2Entry, L3Entry, MemoryL1Store, MemoryL2Store, MemoryL3Store, MemoryStoreError, Topic,
+    L1Entry, L2Entry, L3Entry, MemoryCursor, MemoryL1Store, MemoryL2Store, MemoryL3Store,
+    MemoryPage, MemoryStoreError, MemoryStoreQuery, Topic,
 };
 
 // ─────────────────────── conversation persistence ───────────────────────
@@ -401,6 +402,73 @@ impl MemoryL2Store for InProcessMemoryL2Store {
         *blocks = kept;
         Ok(popped)
     }
+
+    fn get(&self, subject: &Subject, id: &str) -> Result<Option<L2Entry>, MemoryStoreError> {
+        let l2 = self.l2.lock().unwrap_or_else(|p| p.into_inner());
+        Ok(l2
+            .get(&subject.to_string())
+            .and_then(|blocks| blocks.iter().find(|b| b.id == id).cloned()))
+    }
+
+    fn update(&self, subject: &Subject, entry: L2Entry) -> Result<bool, MemoryStoreError> {
+        let mut l2 = self.l2.lock().unwrap_or_else(|p| p.into_inner());
+        let Some(blocks) = l2.get_mut(&subject.to_string()) else {
+            return Ok(false);
+        };
+        let Some(existing) = blocks.iter_mut().find(|b| b.id == entry.id) else {
+            return Ok(false);
+        };
+        *existing = entry;
+        Ok(true)
+    }
+
+    fn remove(&self, subject: &Subject, id: &str) -> Result<bool, MemoryStoreError> {
+        let mut l2 = self.l2.lock().unwrap_or_else(|p| p.into_inner());
+        let Some(blocks) = l2.get_mut(&subject.to_string()) else {
+            return Ok(false);
+        };
+        let before = blocks.len();
+        blocks.retain(|b| b.id != id);
+        Ok(blocks.len() != before)
+    }
+
+    fn list(
+        &self,
+        subject: &Subject,
+        query: MemoryStoreQuery,
+    ) -> Result<MemoryPage<L2Entry>, MemoryStoreError> {
+        let l2 = self.l2.lock().unwrap_or_else(|p| p.into_inner());
+        let matching: Vec<L2Entry> = l2
+            .get(&subject.to_string())
+            .map(|blocks| {
+                blocks
+                    .iter()
+                    .filter(|b| {
+                        query
+                            .conversation_id
+                            .as_deref()
+                            .is_none_or(|c| b.conversation_id == c)
+                    })
+                    .filter(|b| query.from.is_none_or(|f| b.freshness() >= f))
+                    .filter(|b| query.to.is_none_or(|t| b.freshness() < t))
+                    .filter(|b| {
+                        query
+                            .keyword
+                            .as_deref()
+                            .is_none_or(|k| contains_ci(&b.content, k))
+                    })
+                    .cloned()
+                    .collect()
+            })
+            .unwrap_or_default();
+        Ok(page_entries(
+            matching,
+            |b| b.freshness(),
+            |b| b.id.as_str(),
+            query.after.as_ref(),
+            query.limit,
+        ))
+    }
 }
 
 /// In-process L3 knowledge store (default implementation).
@@ -418,12 +486,15 @@ impl MemoryL3Store for InProcessMemoryL3Store {
         let mut l3 = self.l3.lock().unwrap_or_else(|p| p.into_inner());
         let fragments = l3.entry(subject.to_string()).or_default();
         // Upsert by identity: replace an existing fragment on the same
-        // (conversation, topic) identity, otherwise append.
+        // (conversation, topic) identity, preserving its id (the id is
+        // the entry's stable address across updates), otherwise append.
         if let Some(existing) = fragments
             .iter_mut()
             .find(|f| f.identity == fragment.identity)
         {
+            let id = std::mem::take(&mut existing.id);
             *existing = fragment;
+            existing.id = id;
         } else {
             fragments.push(fragment);
         }
@@ -450,8 +521,13 @@ impl MemoryL3Store for InProcessMemoryL3Store {
                     .collect()
             })
             .unwrap_or_default();
-        // Recency ranking: newer first, then take the budget.
-        candidates.sort_by_key(|f| std::cmp::Reverse(f.created_at));
+        // Freshness ranking: newer first (updated_at, id tiebreak), then
+        // take the budget.
+        candidates.sort_by(|a, b| {
+            b.freshness()
+                .cmp(&a.freshness())
+                .then_with(|| a.id.cmp(&b.id))
+        });
         candidates.truncate(budget);
         Ok(candidates)
     }
@@ -463,6 +539,119 @@ impl MemoryL3Store for InProcessMemoryL3Store {
             .map(|fragments| fragments.len())
             .unwrap_or(0))
     }
+
+    fn get(&self, subject: &Subject, id: &str) -> Result<Option<L3Entry>, MemoryStoreError> {
+        let l3 = self.l3.lock().unwrap_or_else(|p| p.into_inner());
+        Ok(l3
+            .get(&subject.to_string())
+            .and_then(|fragments| fragments.iter().find(|f| f.id == id).cloned()))
+    }
+
+    fn update(&self, subject: &Subject, entry: L3Entry) -> Result<bool, MemoryStoreError> {
+        let mut l3 = self.l3.lock().unwrap_or_else(|p| p.into_inner());
+        let Some(fragments) = l3.get_mut(&subject.to_string()) else {
+            return Ok(false);
+        };
+        let Some(existing) = fragments.iter_mut().find(|f| f.id == entry.id) else {
+            return Ok(false);
+        };
+        *existing = entry;
+        Ok(true)
+    }
+
+    fn remove(&self, subject: &Subject, id: &str) -> Result<bool, MemoryStoreError> {
+        let mut l3 = self.l3.lock().unwrap_or_else(|p| p.into_inner());
+        let Some(fragments) = l3.get_mut(&subject.to_string()) else {
+            return Ok(false);
+        };
+        let before = fragments.len();
+        fragments.retain(|f| f.id != id);
+        Ok(fragments.len() != before)
+    }
+
+    fn list(
+        &self,
+        subject: &Subject,
+        query: MemoryStoreQuery,
+    ) -> Result<MemoryPage<L3Entry>, MemoryStoreError> {
+        let l3 = self.l3.lock().unwrap_or_else(|p| p.into_inner());
+        let matching: Vec<L3Entry> = l3
+            .get(&subject.to_string())
+            .map(|fragments| {
+                fragments
+                    .iter()
+                    .filter(|f| {
+                        query
+                            .conversation_id
+                            .as_deref()
+                            .is_none_or(|c| f.identity.conversation_id == c)
+                    })
+                    .filter(|f| query.from.is_none_or(|from| f.freshness() >= from))
+                    .filter(|f| query.to.is_none_or(|to| f.freshness() < to))
+                    .filter(|f| {
+                        query
+                            .keyword
+                            .as_deref()
+                            .is_none_or(|k| contains_ci(&f.content, k))
+                    })
+                    .cloned()
+                    .collect()
+            })
+            .unwrap_or_default();
+        Ok(page_entries(
+            matching,
+            |f| f.freshness(),
+            |f| f.id.as_str(),
+            query.after.as_ref(),
+            query.limit,
+        ))
+    }
+}
+
+/// Sorts matching entries (freshness descending, id ascending), applies
+/// the keyset cursor and returns one page. The cursor is a value, so
+/// deletions between pages neither skip nor duplicate entries.
+fn page_entries<E: Clone>(
+    mut matching: Vec<E>,
+    freshness: impl Fn(&E) -> u64,
+    id: impl Fn(&E) -> &str,
+    after: Option<&MemoryCursor>,
+    limit: usize,
+) -> MemoryPage<E> {
+    matching.sort_by(|a, b| {
+        freshness(b)
+            .cmp(&freshness(a))
+            .then_with(|| id(a).cmp(id(b)))
+    });
+    let start = match after {
+        Some(cursor) => matching
+            .iter()
+            .position(|entry| {
+                freshness(entry) < cursor.updated_at
+                    || (freshness(entry) == cursor.updated_at && id(entry) > cursor.id.as_str())
+            })
+            .unwrap_or(matching.len()),
+        None => 0,
+    };
+    let remaining = matching.split_off(start);
+    let take = limit.min(remaining.len());
+    let items = remaining[..take].to_vec();
+    let next = if remaining.len() > take {
+        items
+            .last()
+            .map(|entry| MemoryCursor::new(freshness(entry), id(entry).to_string()))
+    } else {
+        None
+    };
+    MemoryPage::new(items, next)
+}
+
+/// Case-insensitive substring matching (ASCII lowercase folding).
+fn contains_ci(haystack: &str, needle: &str) -> bool {
+    if needle.is_empty() {
+        return true;
+    }
+    haystack.to_lowercase().contains(&needle.to_lowercase())
 }
 
 /// Cheap topic matching: exact match or token overlap.
@@ -499,4 +688,137 @@ fn text_matches(query: &str, content: &str) -> bool {
         .split(|c: char| !c.is_alphanumeric())
         .filter(|t| !t.is_empty())
         .any(|t| query_tokens.contains(t))
+}
+
+#[cfg(test)]
+mod layer_store_tests {
+    use super::*;
+    use crate::SubjectType;
+    use crate::memory::L3Identity;
+
+    fn subject() -> Subject {
+        Subject::of(SubjectType::User, "u-store-tests")
+    }
+
+    #[test]
+    fn l2_get_update_remove_roundtrip() {
+        let store = InProcessMemoryL2Store::default();
+        let subject = subject();
+        let entry = L2Entry::new("c1", "one", 0);
+        let id = entry.id.clone();
+        store.append(&subject, entry).unwrap();
+
+        assert_eq!(store.get(&subject, &id).unwrap().unwrap().content, "one");
+        assert!(store.get(&subject, "missing").unwrap().is_none());
+
+        let mut edited = store.get(&subject, &id).unwrap().unwrap();
+        edited.content = "one-edited".into();
+        edited.updated_at = edited.created_at + 10;
+        assert!(store.update(&subject, edited).unwrap());
+        assert_eq!(
+            store.get(&subject, &id).unwrap().unwrap().content,
+            "one-edited"
+        );
+        assert!(
+            !store
+                .update(&subject, L2Entry::new("c1", "ghost", 0))
+                .unwrap()
+        );
+
+        assert!(store.remove(&subject, &id).unwrap());
+        assert!(!store.remove(&subject, &id).unwrap());
+    }
+
+    #[test]
+    fn l2_list_paginates_and_survives_deletion() {
+        let store = InProcessMemoryL2Store::default();
+        let subject = subject();
+        for i in 0..5u64 {
+            let mut entry = L2Entry::new("c1", format!("entry-{i}"), i);
+            entry.created_at = 100 + i;
+            entry.updated_at = 100 + i;
+            store.append(&subject, entry).unwrap();
+        }
+
+        let page = store.list(&subject, MemoryStoreQuery::new(2)).unwrap();
+        assert_eq!(page.items.len(), 2);
+        assert_eq!(page.items[0].content, "entry-4");
+        assert_eq!(page.items[1].content, "entry-3");
+        let cursor = page.next.unwrap();
+
+        // Delete an entry that was not returned yet; the cursor is a
+        // value, so the next page neither skips nor duplicates.
+        let victim = store
+            .list(&subject, MemoryStoreQuery::new(10))
+            .unwrap()
+            .items[2]
+            .id
+            .clone();
+        assert!(store.remove(&subject, &victim).unwrap());
+
+        let page = store
+            .list(&subject, MemoryStoreQuery::new(10).with_after(cursor))
+            .unwrap();
+        let contents: Vec<&str> = page.items.iter().map(|e| e.content.as_str()).collect();
+        assert_eq!(contents, vec!["entry-1", "entry-0"]);
+        assert!(page.next.is_none());
+    }
+
+    #[test]
+    fn l2_list_filters() {
+        let store = InProcessMemoryL2Store::default();
+        let subject = subject();
+        store
+            .append(&subject, L2Entry::new("c1", "alpha", 0))
+            .unwrap();
+        store
+            .append(&subject, L2Entry::new("c1", "beta", 1))
+            .unwrap();
+        store
+            .append(&subject, L2Entry::new("c2", "gamma", 0))
+            .unwrap();
+
+        let page = store
+            .list(
+                &subject,
+                MemoryStoreQuery::new(10)
+                    .with_conversation("c1")
+                    .with_keyword("BET"),
+            )
+            .unwrap();
+        assert_eq!(page.items.len(), 1);
+        assert_eq!(page.items[0].content, "beta");
+    }
+
+    #[test]
+    fn l3_upsert_preserves_the_id_and_list_roundtrips() {
+        let store = InProcessMemoryL3Store::default();
+        let subject = subject();
+        let identity = L3Identity {
+            subject_id: subject.to_string(),
+            conversation_id: "c1".into(),
+            topic: "t".into(),
+        };
+        let first = L3Entry::new(identity.clone(), "v1");
+        let id = first.id.clone();
+        store.upsert(&subject, first).unwrap();
+        store
+            .upsert(&subject, L3Entry::new(identity, "v2"))
+            .unwrap();
+
+        let page = store.list(&subject, MemoryStoreQuery::new(10)).unwrap();
+        assert_eq!(page.items.len(), 1);
+        assert_eq!(page.items[0].id, id);
+        assert_eq!(page.items[0].content, "v2");
+
+        let mut edited = store.get(&subject, &id).unwrap().unwrap();
+        edited.content = "v3".into();
+        edited.updated_at = edited.created_at + 5;
+        assert!(store.update(&subject, edited).unwrap());
+        assert_eq!(store.get(&subject, &id).unwrap().unwrap().content, "v3");
+
+        assert!(store.remove(&subject, &id).unwrap());
+        assert!(!store.remove(&subject, &id).unwrap());
+        assert!(store.get(&subject, &id).unwrap().is_none());
+    }
 }

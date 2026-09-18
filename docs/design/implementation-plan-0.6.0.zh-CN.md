@@ -207,5 +207,34 @@ M38 收尾与验证（扩展指南、迁移指南、CHANGELOG、README、全量�
 
 ## 6. 里程碑完成记录
 
-（待实施——每波完成后按 M28-M32 的体例写入：子项落地要点、B 类
-决议、A 类请示结果、测试计数与验证证据。）
+### M33 条目数据模型与新鲜度 ✅（2026-09-19）
+
+- `L2Entry` / `L3Entry` 增 `id`（框架生成：epoch 秒 + 进程 id + 原子
+  计数混入纳秒余数；无新依赖）与 `updated_at`（创建 = `created_at`，
+  更新刷新）；`new(...)` 自动生成 id 并置时间；
+- **旧数据迁移缺省**：`id` 缺失 → 反序列化时生成
+  （`#[serde(default = ...)]`）；`updated_at` 缺失 → 0，排序按
+  `max(updated_at, created_at)` 归一（crate 内部 `freshness()`）；
+- L3 `upsert` 同身份替换**保留原 id**（内置实现）；
+- 召回排序：`l3_query` 改为 `(freshness desc, id asc)`；
+- 测试：构造置 id/时间、旧序列化数据缺省回退（2 项）。
+
+### M34 存储契约扩展 ✅（2026-09-19）
+
+- 公开类型：`MemoryCursor`（单源位置 `updated_at + id`）、
+  `MemoryPage<T, C = MemoryCursor>`（`items` + `next`，带 `new`）、
+  `MemoryStoreQuery`（会话 / 时间范围 / 关键字 / `after` / `limit`
+  + `with_*` 构造链）；`MemoryStoreError` 加性变体 `EntryNotFound`；
+- 契约：`MemoryL2Store` / `MemoryL3Store` **必选新增** `get` /
+  `update`（bool=存在性）/ `remove`（幂等 bool）/ `list`（keyset）；
+  L3 `upsert` 文档更新为"保 id"；L1 契约不变；
+- 内置实现全部补齐（`page_entries` 归并 + `contains_ci`）；
+- **B 类决议**：游标为值（`(freshness, id)` 严格后位），对跨界删除
+  鲁棒（不跳不重）；`limit=0` 返回空末页；`update` 由调用方提供完整
+  条目（并负责刷新 `updated_at`）；
+- 测试：L2 增删改查往返、分页在删除下稳定、组合过滤；L3 upsert 保
+  id + 增删改查（4 项）；`BrokenL2/L3` 测试桩补齐新方法；
+- 验证：全量回归 **227/227** 全绿、clippy 零警告、`cargo doc
+  --workspace --no-deps` 零警告、fmt 干净（M33+M34 合并验证）。
+
+（后续里程碑按 M28-M32 体例继续写入。）

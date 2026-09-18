@@ -22,6 +22,7 @@
 //! and never constructed by hand — the runtime is its single authority.
 
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -46,23 +47,41 @@ pub struct L3Identity {
 #[non_exhaustive]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct L3Entry {
+    /// The framework-generated opaque id (stable across edits).
+    /// Entries from older serialized data get one on load.
+    #[serde(default = "generate_id")]
+    pub id: String,
     /// Where and under what topic this knowledge came from.
     pub identity: L3Identity,
     /// The distilled knowledge (a fact, preference, or conclusion).
     pub content: String,
-    /// Epoch seconds at which the entry was created (recency ranking).
+    /// Epoch seconds at which the entry was created.
     pub created_at: u64,
+    /// Epoch seconds at which the entry was last written — the freshness
+    /// key (list ordering, pagination cursors, recall ranking). Entries
+    /// from older serialized data carry 0; order by
+    /// `max(updated_at, created_at)`.
+    #[serde(default)]
+    pub updated_at: u64,
 }
 
 impl L3Entry {
-    /// Creates a knowledge entry (the creation time is stamped
-    /// automatically).
+    /// Creates a knowledge entry: the id is generated and the
+    /// creation/update times are stamped automatically.
     pub fn new(identity: L3Identity, content: impl Into<String>) -> Self {
+        let now = now_epoch();
         Self {
+            id: generate_id(),
             identity,
             content: content.into(),
-            created_at: now_epoch(),
+            created_at: now,
+            updated_at: now,
         }
+    }
+
+    /// The freshness stamp used for ordering (`max(updated_at, created_at)`).
+    pub(crate) fn freshness(&self) -> u64 {
+        self.updated_at.max(self.created_at)
     }
 }
 
@@ -70,25 +89,44 @@ impl L3Entry {
 #[non_exhaustive]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct L2Entry {
+    /// The framework-generated opaque id (stable across edits).
+    /// Entries from older serialized data get one on load.
+    #[serde(default = "generate_id")]
+    pub id: String,
     /// The conversation this summary belongs to.
     pub conversation_id: String,
     /// The summarized content.
     pub content: String,
     /// Sequence order among summary entries (oldest first).
     pub index: u64,
-    /// Epoch seconds at which the entry was created (recency ranking).
+    /// Epoch seconds at which the entry was created.
     pub created_at: u64,
+    /// Epoch seconds at which the entry was last written — the freshness
+    /// key (list ordering, pagination cursors, recall ranking). Entries
+    /// from older serialized data carry 0; order by
+    /// `max(updated_at, created_at)`.
+    #[serde(default)]
+    pub updated_at: u64,
 }
 
 impl L2Entry {
-    /// Creates an L2 entry (the creation time is stamped automatically).
+    /// Creates an L2 entry: the id is generated and the creation/update
+    /// times are stamped automatically.
     pub fn new(conversation_id: impl Into<String>, content: impl Into<String>, index: u64) -> Self {
+        let now = now_epoch();
         Self {
+            id: generate_id(),
             conversation_id: conversation_id.into(),
             content: content.into(),
             index,
-            created_at: now_epoch(),
+            created_at: now,
+            updated_at: now,
         }
+    }
+
+    /// The freshness stamp used for ordering (`max(updated_at, created_at)`).
+    pub(crate) fn freshness(&self) -> u64 {
+        self.updated_at.max(self.created_at)
     }
 }
 
@@ -134,6 +172,121 @@ pub enum MemoryStoreError {
     /// The requested subject was not found.
     #[error("subject not found: {0}")]
     SubjectNotFound(String),
+    /// The requested entry id does not exist (update/edit paths).
+    #[error("memory entry not found: {0}")]
+    EntryNotFound(String),
+}
+
+/// One ordering position of the store-level keyset pagination: the
+/// entry's freshness stamp + id.
+///
+/// The listing order is **freshness (`max(updated_at, created_at)`)
+/// descending, id ascending**; a cursor resumes strictly after that
+/// position. Being a value (not an offset), it stays correct when
+/// entries are deleted between pages.
+#[non_exhaustive]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MemoryCursor {
+    /// The entry's freshness stamp (`max(updated_at, created_at)`).
+    pub updated_at: u64,
+    /// The entry's id (the ascending tiebreak).
+    pub id: String,
+}
+
+impl MemoryCursor {
+    /// Creates a cursor at the given position.
+    pub fn new(updated_at: u64, id: impl Into<String>) -> Self {
+        Self {
+            updated_at,
+            id: id.into(),
+        }
+    }
+}
+
+/// One page of a store listing.
+#[non_exhaustive]
+#[derive(Debug, Clone, PartialEq)]
+pub struct MemoryPage<T, C = MemoryCursor> {
+    /// The page's items, in listing order (up to the requested limit).
+    pub items: Vec<T>,
+    /// The cursor to resume from when the store observed at least one
+    /// more matching entry; `None` when the page is the last.
+    pub next: Option<C>,
+}
+
+impl<T, C> MemoryPage<T, C> {
+    /// Creates a page (store implementations build these when answering
+    /// list queries).
+    pub fn new(items: Vec<T>, next: Option<C>) -> Self {
+        Self { items, next }
+    }
+}
+
+/// The store-level listing query: filters + keyset pagination.
+///
+/// This is the **single-source** form: the store's layer implies its
+/// memory type; the application face composes per-type pages into the
+/// unified listing.
+#[non_exhaustive]
+#[derive(Debug, Clone, PartialEq)]
+pub struct MemoryStoreQuery {
+    /// Restrict to one conversation (`None` matches all).
+    pub conversation_id: Option<String>,
+    /// Restrict by freshness `>= from` (`None` = unbounded).
+    pub from: Option<u64>,
+    /// Restrict by freshness `< to` (`None` = unbounded).
+    pub to: Option<u64>,
+    /// Case-insensitive substring over the content; `None` matches all.
+    pub keyword: Option<String>,
+    /// Resume strictly after this position; `None` starts from the top.
+    pub after: Option<MemoryCursor>,
+    /// The maximum number of entries to return (must be positive;
+    /// `0` yields an empty last page).
+    pub limit: usize,
+}
+
+impl MemoryStoreQuery {
+    /// Creates a query returning up to `limit` entries.
+    pub fn new(limit: usize) -> Self {
+        Self {
+            conversation_id: None,
+            from: None,
+            to: None,
+            keyword: None,
+            after: None,
+            limit,
+        }
+    }
+
+    /// Filters to one conversation.
+    pub fn with_conversation(mut self, conversation_id: impl Into<String>) -> Self {
+        self.conversation_id = Some(conversation_id.into());
+        self
+    }
+
+    /// Filters by freshness (lower bound, inclusive).
+    pub fn with_from(mut self, from: u64) -> Self {
+        self.from = Some(from);
+        self
+    }
+
+    /// Filters by freshness (upper bound, exclusive).
+    pub fn with_to(mut self, to: u64) -> Self {
+        self.to = Some(to);
+        self
+    }
+
+    /// Filters by a case-insensitive content substring.
+    pub fn with_keyword(mut self, keyword: impl Into<String>) -> Self {
+        self.keyword = Some(keyword.into());
+        self
+    }
+
+    /// Resumes after a cursor (a previous page's `next`).
+    pub fn with_after(mut self, cursor: MemoryCursor) -> Self {
+        self.after = Some(cursor);
+        self
+    }
 }
 
 /// The L1 storage contract: the working memory layer (recent turns,
@@ -196,6 +349,25 @@ pub trait MemoryL2Store: Send + Sync + 'static {
         conversation_id: &str,
         n: usize,
     ) -> Result<Vec<L2Entry>, MemoryStoreError>;
+
+    /// Fetches one entry by its stable id (`None` when absent).
+    fn get(&self, subject: &Subject, id: &str) -> Result<Option<L2Entry>, MemoryStoreError>;
+
+    /// Replaces the entry carrying the same id (the caller supplies the
+    /// full entry; the id is the stable address). Returns `false` when
+    /// no such id exists.
+    fn update(&self, subject: &Subject, entry: L2Entry) -> Result<bool, MemoryStoreError>;
+
+    /// Removes the entry by id. Idempotent: returns `false` when absent.
+    fn remove(&self, subject: &Subject, id: &str) -> Result<bool, MemoryStoreError>;
+
+    /// Lists entries with filters and keyset pagination (freshness
+    /// descending, id ascending).
+    fn list(
+        &self,
+        subject: &Subject,
+        query: MemoryStoreQuery,
+    ) -> Result<MemoryPage<L2Entry>, MemoryStoreError>;
 }
 
 /// The L3 storage contract: the knowledge layer (cross-conversation,
@@ -204,7 +376,9 @@ pub trait MemoryL2Store: Send + Sync + 'static {
 /// Implementations own the retrieval *logic* — topic matching, semantic
 /// search, hybrids — not just storage.
 pub trait MemoryL3Store: Send + Sync + 'static {
-    /// Upserts an L3 knowledge fragment.
+    /// Upserts an L3 knowledge entry: same-identity entries are replaced
+    /// **preserving the original id** (the id is the entry's stable
+    /// address across updates); otherwise the entry is appended.
     fn upsert(&self, subject: &Subject, fragment: L3Entry) -> Result<(), MemoryStoreError>;
 
     /// Retrieves relevant L3 fragments for the query.
@@ -219,6 +393,25 @@ pub trait MemoryL3Store: Send + Sync + 'static {
     /// The subject's complete L3 fragment count (introspection for
     /// budgeting and diagnostics).
     fn len(&self, subject: &Subject) -> Result<usize, MemoryStoreError>;
+
+    /// Fetches one entry by its stable id (`None` when absent).
+    fn get(&self, subject: &Subject, id: &str) -> Result<Option<L3Entry>, MemoryStoreError>;
+
+    /// Replaces the entry carrying the same id (the caller supplies the
+    /// full entry; the id is the stable address). Returns `false` when
+    /// no such id exists.
+    fn update(&self, subject: &Subject, entry: L3Entry) -> Result<bool, MemoryStoreError>;
+
+    /// Removes the entry by id. Idempotent: returns `false` when absent.
+    fn remove(&self, subject: &Subject, id: &str) -> Result<bool, MemoryStoreError>;
+
+    /// Lists entries with filters and keyset pagination (freshness
+    /// descending, id ascending).
+    fn list(
+        &self,
+        subject: &Subject,
+        query: MemoryStoreQuery,
+    ) -> Result<MemoryPage<L3Entry>, MemoryStoreError>;
 }
 
 /// The layered memory as one domain object: the three storage slots
@@ -407,4 +600,65 @@ fn now_epoch() -> u64 {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0)
+}
+
+/// Generates a framework entry id: process-unique without new
+/// dependencies (epoch seconds + process id + atomic counter mixed with
+/// the nanosecond remainder).
+fn generate_id() -> String {
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default();
+    let nth = COUNTER.fetch_add(1, Ordering::Relaxed);
+    format!(
+        "{:x}-{:x}-{:x}",
+        now.as_secs(),
+        std::process::id(),
+        nth ^ u64::from(now.subsec_nanos())
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn entry_construction_stamps_id_and_freshness() {
+        let l2 = L2Entry::new("c1", "summary", 0);
+        assert!(!l2.id.is_empty());
+        assert_eq!(l2.updated_at, l2.created_at);
+        assert_eq!(l2.freshness(), l2.created_at);
+
+        let l3 = L3Entry::new(
+            L3Identity {
+                subject_id: "u".into(),
+                conversation_id: "c1".into(),
+                topic: "t".into(),
+            },
+            "knowledge",
+        );
+        assert!(!l3.id.is_empty());
+        assert_eq!(l3.updated_at, l3.created_at);
+    }
+
+    #[test]
+    fn legacy_serialized_entries_get_an_id_and_freshness_fallback() {
+        // 0.5.0-era payloads carry neither id nor updated_at.
+        let legacy =
+            r#"{"conversation_id":"c1","content":"old summary","index":0,"created_at":42}"#;
+        let l2: L2Entry = serde_json::from_str(legacy).unwrap();
+        assert!(!l2.id.is_empty());
+        assert_eq!(l2.updated_at, 0);
+        assert_eq!(l2.freshness(), 42);
+
+        let legacy = concat!(
+            r#"{"identity":{"subject_id":"u","conversation_id":"c1","topic":"t"},"#,
+            r#""content":"old","created_at":7}"#
+        );
+        let l3: L3Entry = serde_json::from_str(legacy).unwrap();
+        assert!(!l3.id.is_empty());
+        assert_eq!(l3.updated_at, 0);
+        assert_eq!(l3.freshness(), 7);
+    }
 }
