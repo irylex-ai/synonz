@@ -18,7 +18,10 @@
   `Summary | Knowledge`；`MemoryItem` / `MemoryQuery` / 管理事实的字段
   `kind` → **`memory_type`**（`type` 为 Rust 关键字，取显式名）。正文
   Decision/Consequences 中出现的旧名一律以本修订为准（正文的
-  `kind` 读作 `memory_type`，"跨 kind" 读作"跨类型"）。
+  `kind` 读作 `memory_type`，"跨 kind" 读作"跨类型"）；批量遗忘按其
+  "单条 + 批量过滤"的原文拆为 **`forget`（单条 id）+ `forget_matching`
+  （批量，复用 `MemoryQuery` 作过滤）**，结果类型定为
+  **`MemoryForgetResult`**（removed 数量 + 逐条失败清单）。
 
 ## Context（背景）
 
