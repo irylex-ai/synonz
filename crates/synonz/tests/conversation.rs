@@ -204,7 +204,7 @@ async fn failed_turns_enter_the_history_marked() {
     assert_eq!(
         runtime
             .memory()
-            .l1_len(&subject, conv.id())
+            .l1_len_for_tests(&subject, conv.id())
             .expect("l1 len"),
         0
     );

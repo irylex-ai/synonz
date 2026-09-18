@@ -678,7 +678,7 @@ impl AgentLoopTask {
         // continues with the layers that succeeded. (The failures are bus
         // facts: the turn's frame is not built yet; a consumer gone at
         // this point is caught below.)
-        let memory = self.runtime.memory();
+        let memory = self.runtime.memory_layers();
         let topic = self.conversation.topic().unwrap_or_default();
         let assembled = self
             .context
@@ -877,14 +877,14 @@ impl AgentLoopTask {
                 // The synchronous segment (topic + archive) runs before
                 // the terminal; the heavy curation runs in the background
                 // (tracked in the runtime's conversation table).
-                let memory = self.runtime.memory();
+                let memory = self.runtime.memory_layers();
                 let flow_errors = self
                     .context
                     .on_turn_completed(
                         &self.conversation,
                         &input.text,
                         messages[base_len..].to_vec(),
-                        &memory,
+                        memory,
                         Arc::clone(&self.model),
                         sink.clone(),
                         ConversationTaskSpawner::new(&self.runtime, self.conversation.id()),

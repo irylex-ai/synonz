@@ -237,4 +237,43 @@ M38 收尾与验证（扩展指南、迁移指南、CHANGELOG、README、全量�
 - 验证：全量回归 **227/227** 全绿、clippy 零警告、`cargo doc
   --workspace --no-deps` 零警告、fmt 干净（M33+M34 合并验证）。
 
-（后续里程碑按 M28-M32 体例继续写入。）
+### M35 公开边界重切 ✅（2026-09-19）
+
+- 新增 crate 内部 `MemoryLayerStore`：三存储槽聚合 + 全部分层原语 +
+  按 id 操作（get/update/remove/list）+ `MemoryReader` 构造；`Clone`
+  廉价（三个 `Arc`）；
+- `Memory` 收敛为应用面（持有内部对象与事实出口 `EventBus`）；
+  `runtime.memory()` 返回应用面；新增 `Runtime::memory_layers()` 与
+  `Memory::layers()`（均 `pub(crate)`）；
+- `Memory::reader` 构造收为 `pub(crate)`；**`MemoryReader` 类型保持
+  公开**，改为包装内部对象；
+- 接线：`Context::on_turn_completed(…, memory: &MemoryLayerStore, …)`；
+  `BackgroundMaintenanceTask.memory: MemoryLayerStore`；agent 装配与
+  轮末调用、`finalize_conversation` 全部改经内部对象；
+- 公开面下线：分层原语从 `Memory` 移除（编译期核对）；
+- 测试迁移：集成测试种子改 `test-util`（`seed_l1/l2/l3` +
+  `l1/l2/l3_len_for_tests` + `reader_for_tests`），断言走公开管理面或
+  test-util 读数。
+
+### M36 管理面 ✅（2026-09-19）
+
+- 公开类型：`MemoryType`（Summary/Knowledge）、`MemorySource`、
+  `MemoryItem`、`MemoryQuery`、`MemoryListCursor`、`MemoryPage<T, C>`、
+  `MemoryForgetFailure`、`MemoryForgetResult`；
+- 动词：`list`（结构序 + 块内 `(freshness desc, id asc)` + 不足跨源
+  补拉且**跨界一次** + 阶段游标 + `memory_type` 单源）、`get`、
+  `edit`（原地更新、id 不变、`updated_at` 刷新）、`forget`、
+  `forget_matching`（逐条尽力、`limit` 为批量上限、返回
+  `MemoryForgetResult`）；
+- 事实：`MemoryEvent::Updated` / `Removed`（无内容）；`Memory` 持
+  `EventBus`（runtime build 先建总线再注入），管理操作经总线发事实；
+- 测试：合并分页（块序/补拉/续页/单源）、编辑与遗忘（保 id、
+  `EntryNotFound`、幂等）、批量过滤与上限、管理事实（4 项）；
+- **B 类决议**：①`MemoryListCursor.position` 取
+  `Option<MemoryCursor>`（`None` = 阶段起点；v7 草图记为
+  `MemoryCursor`，实施细化为可选）；②`L2Entry` 增 `topic` 字段
+  （`with_topic`；压实写入当前主题；旧数据缺省空串）——`MemoryItem`
+  的来源需要它；③新增测试辅助类型名 `MemoryForgetFailure`；
+  ④`test-util` 除种子/reader 外补三个读数方法（`*_len_for_tests`）；
+- 验证：全量回归 **231/231** 全绿、clippy 零警告、`cargo doc
+  --workspace --no-deps` 零警告、fmt 干净（M35+M36 合并验证）。

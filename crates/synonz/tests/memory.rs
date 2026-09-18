@@ -111,19 +111,19 @@ async fn post_turn_flow_writes_l1_and_demotes_on_turn_count() {
 
     // After turn one, L1 holds one entry (within window).
     let memory = runtime.memory();
-    assert_eq!(memory.l1_len(&subject, "conv-1").unwrap(), 1);
+    assert_eq!(memory.l1_len_for_tests(&subject, "conv-1").unwrap(), 1);
 
     // Turn two overflows: the background flow demotes the oldest into L2
     // (the summarization lane consumes the "summary" script).
     let _ = agent.run(conv.turn_input("two")).await.unwrap();
-    eventually(|| memory.l2_len(&subject, "conv-1").unwrap() >= 1).await;
+    eventually(|| memory.l2_len_for_tests(&subject, "conv-1").unwrap() >= 1).await;
     assert_eq!(
-        memory.l1_len(&subject, "conv-1").unwrap(),
+        memory.l1_len_for_tests(&subject, "conv-1").unwrap(),
         1,
         "window enforced"
     );
     assert_eq!(
-        memory.l2_len(&subject, "conv-1").unwrap(),
+        memory.l2_len_for_tests(&subject, "conv-1").unwrap(),
         1,
         "demoted into L2"
     );
@@ -149,11 +149,14 @@ async fn l2_overflow_distills_into_l3() {
     let memory = runtime.memory();
     // Poll the STABLE end state: the last turn's job ran to completion
     // (distillation happened) — L1 windowed, L2 capped, L3 fed.
-    eventually(|| memory.l3_len(&subject).unwrap() >= 1).await;
-    assert_eq!(memory.l1_len(&subject, "conv-2").unwrap(), 1);
+    eventually(|| memory.l3_len_for_tests(&subject).unwrap() >= 1).await;
+    assert_eq!(memory.l1_len_for_tests(&subject, "conv-2").unwrap(), 1);
     // L2 capped at 1; the rest distilled into L3.
-    assert_eq!(memory.l2_len(&subject, "conv-2").unwrap(), 1);
-    assert!(memory.l3_len(&subject).unwrap() >= 1, "distilled into L3");
+    assert_eq!(memory.l2_len_for_tests(&subject, "conv-2").unwrap(), 1);
+    assert!(
+        memory.l3_len_for_tests(&subject).unwrap() >= 1,
+        "distilled into L3"
+    );
 }
 
 #[tokio::test]
@@ -174,17 +177,17 @@ async fn conversation_end_drains_and_promotes_l2_into_l3() {
     let _ = agent.run(conv.turn_input("one")).await.unwrap();
     let _ = agent.run(conv.turn_input("two")).await.unwrap();
     let memory = runtime.memory();
-    eventually(|| memory.l2_len(&subject, "conv-3").unwrap() >= 1).await;
+    eventually(|| memory.l2_len_for_tests(&subject, "conv-3").unwrap() >= 1).await;
 
     // The end drains the background first — after it returns, the L2
     // block is promoted into L3 (deterministic, no polling needed).
     conv.end(&runtime).await;
     assert_eq!(
-        memory.l2_len(&subject, "conv-3").unwrap(),
+        memory.l2_len_for_tests(&subject, "conv-3").unwrap(),
         0,
         "promoted away"
     );
-    assert!(memory.l3_len(&subject).unwrap() >= 1);
+    assert!(memory.l3_len_for_tests(&subject).unwrap() >= 1);
 }
 
 #[tokio::test]
@@ -193,10 +196,10 @@ async fn layered_assembly_reads_memory_layers() {
     // Seed L1/L2/L3 directly through the memory facade.
     let memory = runtime.memory();
     memory
-        .l1_append(
+        .seed_l1(
             &subject,
             "conv-4",
-            &"weather".to_string(),
+            "weather",
             vec![
                 synonz::Message::user("what about beijing?"),
                 synonz::Message::assistant_text("sunny"),
@@ -204,13 +207,13 @@ async fn layered_assembly_reads_memory_layers() {
         )
         .unwrap();
     memory
-        .l2_append(
+        .seed_l2(
             &subject,
             synonz::L2Entry::new("conv-4", "earlier we discussed travel plans", 0),
         )
         .unwrap();
     memory
-        .l3_upsert(
+        .seed_l3(
             &subject,
             synonz::L3Entry::new(
                 synonz::L3Identity {
@@ -285,10 +288,10 @@ async fn custom_assembler_slot_drives_assembly() {
     // Seed L1 through the memory facade (the strategy reads memory).
     runtime
         .memory()
-        .l1_append(
+        .seed_l1(
             &subject,
             "conv-5",
-            &"chat".to_string(),
+            "chat",
             vec![synonz::Message::user("hi")],
         )
         .unwrap();
@@ -601,7 +604,13 @@ async fn background_engine_drives_a_full_turn() {
     let output = agent.run(conv.turn_input("question")).await.unwrap();
     assert_eq!(output.text(), Some("the answer"));
     assert_eq!(conv.len(), 1);
-    assert_eq!(runtime.memory().l1_len(&subject, "conv-7").unwrap(), 1);
+    assert_eq!(
+        runtime
+            .memory()
+            .l1_len_for_tests(&subject, "conv-7")
+            .unwrap(),
+        1
+    );
 }
 
 /// An observer collecting memory and conversation facts (the bus-facing
@@ -896,8 +905,237 @@ async fn distillation_failure_keeps_l2_and_is_visible() {
 
     let memory = runtime.memory();
     assert!(
-        memory.l2_len(&subject, "conv-distill-fail").unwrap() >= 1,
+        memory
+            .l2_len_for_tests(&subject, "conv-distill-fail")
+            .unwrap()
+            >= 1,
         "L2 kept after the failed transform"
     );
-    assert_eq!(memory.l3_len(&subject).unwrap(), 0, "nothing distilled");
+    assert_eq!(
+        memory.l3_len_for_tests(&subject).unwrap(),
+        0,
+        "nothing distilled"
+    );
+}
+
+// ── management surface (ADR-0020) ──
+
+#[tokio::test]
+async fn management_list_merges_blocks_and_paginates() {
+    let (runtime, subject) = env();
+    let memory = runtime.memory();
+
+    for (index, freshness) in [30u64, 20, 10].into_iter().enumerate() {
+        let mut entry = synonz::L2Entry::new("conv-m", format!("summary-{index}"), index as u64)
+            .with_topic("t");
+        entry.created_at = freshness;
+        entry.updated_at = freshness;
+        memory.seed_l2(&subject, entry).unwrap();
+    }
+    for (index, freshness) in [35u64, 25, 5].into_iter().enumerate() {
+        let mut entry = synonz::L3Entry::new(
+            synonz::L3Identity {
+                subject_id: subject.to_string(),
+                conversation_id: format!("conv-m-{index}"),
+                topic: "t".into(),
+            },
+            format!("fact-{index}"),
+        );
+        entry.created_at = freshness;
+        entry.updated_at = freshness;
+        memory.seed_l3(&subject, entry).unwrap();
+    }
+
+    // The summary block comes first; the page top-ups from knowledge.
+    let page = memory.list(&subject, synonz::MemoryQuery::new(4)).unwrap();
+    let contents: Vec<&str> = page
+        .items
+        .iter()
+        .map(|item| item.content.as_str())
+        .collect();
+    assert_eq!(
+        contents,
+        vec!["summary-0", "summary-1", "summary-2", "fact-0"]
+    );
+    assert_eq!(page.items[0].memory_type, synonz::MemoryType::Summary);
+    assert_eq!(page.items[3].memory_type, synonz::MemoryType::Knowledge);
+    assert_eq!(page.items[0].source.conversation_id, "conv-m");
+    assert_eq!(page.items[0].source.topic, "t");
+
+    // The next page resumes inside the knowledge block.
+    let cursor = page.next.expect("more items");
+    let page = memory
+        .list(&subject, synonz::MemoryQuery::new(10).with_after(cursor))
+        .unwrap();
+    let contents: Vec<&str> = page
+        .items
+        .iter()
+        .map(|item| item.content.as_str())
+        .collect();
+    assert_eq!(contents, vec!["fact-1", "fact-2"]);
+    assert!(page.next.is_none());
+
+    // Single-source listing.
+    let facts = memory
+        .list(
+            &subject,
+            synonz::MemoryQuery::new(10).with_memory_type(synonz::MemoryType::Knowledge),
+        )
+        .unwrap();
+    assert_eq!(facts.items.len(), 3);
+    assert!(
+        facts
+            .items
+            .iter()
+            .all(|item| item.memory_type == synonz::MemoryType::Knowledge)
+    );
+}
+
+#[tokio::test]
+async fn management_edit_and_forget() {
+    let (runtime, subject) = env();
+    let memory = runtime.memory();
+
+    let mut entry = synonz::L3Entry::new(
+        synonz::L3Identity {
+            subject_id: subject.to_string(),
+            conversation_id: "conv-e".into(),
+            topic: "t".into(),
+        },
+        "wrong fact",
+    );
+    entry.created_at = 1;
+    entry.updated_at = 1;
+    memory.seed_l3(&subject, entry.clone()).unwrap();
+
+    let edited = memory.edit(&subject, &entry.id, "corrected fact").unwrap();
+    assert_eq!(edited.id, entry.id);
+    assert_eq!(edited.content, "corrected fact");
+    assert!(edited.updated_at >= entry.updated_at);
+    assert_eq!(
+        memory.get(&subject, &entry.id).unwrap().unwrap().content,
+        "corrected fact"
+    );
+
+    assert!(memory.get(&subject, "missing").unwrap().is_none());
+    assert!(matches!(
+        memory.edit(&subject, "missing", "x").unwrap_err(),
+        synonz::MemoryStoreError::EntryNotFound(_)
+    ));
+
+    let result = memory.forget(&subject, &entry.id).unwrap();
+    assert_eq!(result.removed, 1);
+    assert!(result.failures.is_empty());
+    assert!(memory.get(&subject, &entry.id).unwrap().is_none());
+    assert_eq!(memory.forget(&subject, &entry.id).unwrap().removed, 0);
+}
+
+#[tokio::test]
+async fn management_forget_matching_filters_and_bounds() {
+    let (runtime, subject) = env();
+    let memory = runtime.memory();
+
+    for index in 0..3u64 {
+        let mut entry = synonz::L2Entry::new("conv-f", format!("planning note {index}"), index);
+        entry.created_at = 10 + index;
+        entry.updated_at = 10 + index;
+        memory.seed_l2(&subject, entry).unwrap();
+    }
+    let mut other = synonz::L2Entry::new("conv-f", "shopping list", 9);
+    other.created_at = 10;
+    other.updated_at = 10;
+    memory.seed_l2(&subject, other).unwrap();
+
+    let result = memory
+        .forget_matching(
+            &subject,
+            synonz::MemoryQuery::new(10).with_keyword("planning"),
+        )
+        .unwrap();
+    assert_eq!(result.removed, 3);
+    assert!(result.failures.is_empty());
+
+    let left = memory.list(&subject, synonz::MemoryQuery::new(10)).unwrap();
+    assert_eq!(left.items.len(), 1);
+    assert_eq!(left.items[0].content, "shopping list");
+
+    // The batch is bounded by the query limit.
+    let mut second = synonz::L2Entry::new("conv-f", "second", 1);
+    second.created_at = 1;
+    second.updated_at = 1;
+    memory.seed_l2(&subject, second).unwrap();
+    let result = memory
+        .forget_matching(&subject, synonz::MemoryQuery::new(1))
+        .unwrap();
+    assert_eq!(result.removed, 1);
+    assert_eq!(
+        memory
+            .list(&subject, synonz::MemoryQuery::new(10))
+            .unwrap()
+            .items
+            .len(),
+        1
+    );
+}
+
+/// Records the management facts (`Updated` / `Removed`) seen on the bus.
+/// (kind, ids) per fact.
+type ManagementFacts = Arc<Mutex<Vec<(String, Vec<String>)>>>;
+
+#[derive(Default, Clone)]
+struct ManagementRecorder {
+    facts: ManagementFacts,
+}
+
+impl synonz::Observer for ManagementRecorder {
+    fn on_event(&self, _ctx: &synonz::ObserverContext, event: &SynonzEvent) {
+        let line = match event {
+            SynonzEvent::Memory(synonz::MemoryEvent::Updated { id, .. }) => {
+                ("updated".to_string(), vec![id.clone()])
+            }
+            SynonzEvent::Memory(synonz::MemoryEvent::Removed { ids, .. }) => {
+                ("removed".to_string(), ids.clone())
+            }
+            _ => return,
+        };
+        self.facts.lock().unwrap().push(line);
+    }
+}
+
+#[tokio::test]
+async fn management_facts_are_emitted() {
+    let recorder = ManagementRecorder::default();
+    let runtime = SynonzRuntime::builder().observer(recorder.clone()).build();
+    let subject = Subject::of(SubjectType::User, "u-mgmt-facts");
+    let memory = runtime.memory();
+
+    let mut entry = synonz::L3Entry::new(
+        synonz::L3Identity {
+            subject_id: subject.to_string(),
+            conversation_id: "conv-fact".into(),
+            topic: "t".into(),
+        },
+        "a fact",
+    );
+    entry.created_at = 1;
+    entry.updated_at = 1;
+    memory.seed_l3(&subject, entry.clone()).unwrap();
+
+    memory.edit(&subject, &entry.id, "edited fact").unwrap();
+    memory.forget(&subject, &entry.id).unwrap();
+
+    eventually(|| recorder.facts.lock().unwrap().len() >= 2).await;
+    let facts = recorder.facts.lock().unwrap();
+    assert!(
+        facts
+            .iter()
+            .any(|(kind, ids)| kind == "updated" && ids == &vec![entry.id.clone()]),
+        "updated fact: {facts:?}"
+    );
+    assert!(
+        facts
+            .iter()
+            .any(|(kind, ids)| kind == "removed" && ids == &vec![entry.id.clone()]),
+        "removed fact: {facts:?}"
+    );
 }

@@ -61,8 +61,10 @@ pub use event::{
 };
 pub use io::{AgentInput, AgentOutput};
 pub use memory::{
-    L1Entry, L2Entry, L3Entry, L3Identity, Memory, MemoryCursor, MemoryL1Store, MemoryL2Store,
-    MemoryL3Store, MemoryPage, MemoryReader, MemoryStoreError, MemoryStoreQuery, Topic,
+    L1Entry, L2Entry, L3Entry, L3Identity, Memory, MemoryCursor, MemoryForgetFailure,
+    MemoryForgetResult, MemoryItem, MemoryL1Store, MemoryL2Store, MemoryL3Store, MemoryListCursor,
+    MemoryPage, MemoryQuery, MemoryReader, MemorySource, MemoryStoreError, MemoryStoreQuery,
+    MemoryType, Topic,
 };
 pub use message::{
     CallId, CanonicalViolation, ContentBlock, Message, Role, ToolCall, ToolContent, ToolResult,

@@ -145,6 +145,26 @@ pub enum MemoryEvent {
         /// How many L2 blocks were promoted.
         count: usize,
     },
+    /// One memory entry was corrected through the management face
+    /// (content-free).
+    Updated {
+        /// The owning subject's id.
+        subject_id: String,
+        /// Which kind of memory the entry is.
+        memory_type: crate::memory::MemoryType,
+        /// The entry's stable id.
+        id: String,
+    },
+    /// Memory entries were forgotten through the management face
+    /// (content-free; ids are bounded by the batch limit).
+    Removed {
+        /// The owning subject's id.
+        subject_id: String,
+        /// Which kind of memory the entries are.
+        memory_type: crate::memory::MemoryType,
+        /// The removed entries' stable ids.
+        ids: Vec<String>,
+    },
     /// A memory-flow failure — visible, never silent; it does not abort
     /// whatever emitted it.
     FlowFailed {

@@ -37,7 +37,7 @@ use crate::bus::{EventSink, MemoryEvent, MemoryFlowFailedMoment};
 use crate::conversation::Conversation;
 use crate::error::ModelError;
 use crate::event::{CallPurpose, MemoryFlowStage, ModelEvent, TurnEvent};
-use crate::memory::{L1Entry, L2Entry, Memory, MemoryReader, Topic};
+use crate::memory::{L1Entry, L2Entry, MemoryLayerStore, MemoryReader, Topic};
 use crate::message::Message;
 use crate::model::{Model, ModelRequest, ModelStream, ModelStreamItem};
 use crate::runtime::ConversationTaskSpawner;
@@ -425,7 +425,7 @@ impl Context {
         conversation: &Conversation,
         input: &str,
         messages: Vec<Message>,
-        memory: &Memory,
+        memory: &MemoryLayerStore,
         agent_model: Arc<dyn Model>,
         events: EventSink,
         task_spawner: ConversationTaskSpawner,
@@ -510,7 +510,7 @@ impl Context {
 struct BackgroundMaintenanceTask {
     summarizer: Arc<dyn MemorySummarizer>,
     distiller: Arc<dyn MemoryDistiller>,
-    memory: Memory,
+    memory: MemoryLayerStore,
     sink: EventSink,
     model: Arc<dyn Model>,
     subject: Subject,
@@ -587,7 +587,7 @@ impl BackgroundMaintenanceTask {
         // handoff: the pop takes the oldest N of this conversation).
         if let Err(error) = self.memory.l2_append(
             &self.subject,
-            L2Entry::new(self.conversation_id.clone(), summary, 0),
+            L2Entry::new(self.conversation_id.clone(), summary, 0).with_topic(self.topic.clone()),
         ) {
             self.sink.emit_memory(MemoryEvent::FlowFailed {
                 stage: MemoryFlowStage::Summarize,

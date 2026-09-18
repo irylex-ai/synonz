@@ -32,7 +32,7 @@ use crate::inprocess::{
     InProcessConversationStore, InProcessMemoryL1Store, InProcessMemoryL2Store,
     InProcessMemoryL3Store,
 };
-use crate::memory::{Memory, MemoryL1Store, MemoryL2Store, MemoryL3Store};
+use crate::memory::{Memory, MemoryL1Store, MemoryL2Store, MemoryL3Store, MemoryLayerStore};
 use crate::scheduler::{OverlapPolicy, Schedule, Scheduler, TaskInfo};
 
 /// The per-conversation drain budget: how long conversation-end teardown
@@ -151,19 +151,23 @@ impl RuntimeBuilder {
                  context or inject the host handle via RuntimeBuilder::executor"
             );
         }
+        let event_bus = EventBus::new(self.observers);
         let inner = Arc::new(RuntimeInner {
             conversation_store: self
                 .conversation_store
                 .unwrap_or_else(|| Arc::new(InProcessConversationStore::default())),
             memory: Memory::new(
-                self.memory_l1_store
-                    .unwrap_or_else(|| Arc::new(InProcessMemoryL1Store::default())),
-                self.memory_l2_store
-                    .unwrap_or_else(|| Arc::new(InProcessMemoryL2Store::default())),
-                self.memory_l3_store
-                    .unwrap_or_else(|| Arc::new(InProcessMemoryL3Store::default())),
+                MemoryLayerStore::new(
+                    self.memory_l1_store
+                        .unwrap_or_else(|| Arc::new(InProcessMemoryL1Store::default())),
+                    self.memory_l2_store
+                        .unwrap_or_else(|| Arc::new(InProcessMemoryL2Store::default())),
+                    self.memory_l3_store
+                        .unwrap_or_else(|| Arc::new(InProcessMemoryL3Store::default())),
+                ),
+                event_bus.clone(),
             ),
-            event_bus: EventBus::new(self.observers),
+            event_bus,
             conversations: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
             conversation_idle_timeout: self.conversation_idle_timeout,
             maintenance_drain_timeout: MAINTENANCE_DRAIN_TIMEOUT,
@@ -307,14 +311,19 @@ impl SynonzRuntime {
         Arc::clone(&self.inner.conversation_store)
     }
 
-    /// The layered memory (the three storage slots behind one facade).
+    /// The application face of the layered memory: item management
+    /// (view, correct, forget).
     ///
-    /// Public for the Low Level track: direct memory access (diagnostics,
-    /// custom flows, explicit operations) alongside the framework's own
-    /// orchestration. This is the object's single authority — nobody
-    /// constructs a `Memory` by hand.
+    /// Clones share the same crate-internal mechanism; the framework's
+    /// own orchestration uses that mechanism directly. Nobody constructs
+    /// a `Memory` by hand — the runtime is the object's single authority.
     pub fn memory(&self) -> Memory {
         self.inner.memory.clone()
+    }
+
+    /// The crate-internal memory mechanism (engine / maintenance access).
+    pub(crate) fn memory_layers(&self) -> &MemoryLayerStore {
+        self.inner.memory.layers()
     }
 
     /// The event bus (the resident dual-lane dispatch facility).
@@ -458,7 +467,7 @@ impl SynonzRuntime {
         // 2. Mechanical promotion: every L2 block becomes L3 knowledge
         //    under the conversation's topic.
         let subject = conversation.subject();
-        let memory = &self.inner.memory;
+        let memory = self.inner.memory.layers();
         let l2_len = match memory.l2_len(subject, conversation.id()) {
             Ok(len) => len,
             Err(error) => {
