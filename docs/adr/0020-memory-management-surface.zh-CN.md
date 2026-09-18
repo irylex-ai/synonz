@@ -1,6 +1,6 @@
 # ADR-0020: 记忆管理面与条目语义——应用面/内部分离、同权原地更新与不复活边界
 
-- 状态: DRAFT（待 irylex 评审后转 APPROVED）
+- 状态: APPROVED（2026-09-19，irylex 人工评审通过）
 - 日期: 2026-09-19
 - 决策者: irylex（人类逐点确认；本 ADR 每个决策均经弹窗逐项确认，
   遵循 `.opencode/rules/architecture.md` §5–§9 的渐进决策流程）
