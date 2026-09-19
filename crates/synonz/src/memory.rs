@@ -29,7 +29,6 @@
 //! hand; the runtime is the single authority.
 
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
 
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -1245,21 +1244,11 @@ fn now_epoch() -> u64 {
         .unwrap_or(0)
 }
 
-/// Generates a framework entry id: process-unique without new
-/// dependencies (epoch seconds + process id + atomic counter mixed with
-/// the nanosecond remainder).
+/// Generates a framework entry id: a random UUID v4 rendered as its
+/// canonical hyphenated string (opaque to callers; unique across
+/// processes and restarts without a home-grown scheme).
 fn generate_id() -> String {
-    static COUNTER: AtomicU64 = AtomicU64::new(0);
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default();
-    let nth = COUNTER.fetch_add(1, Ordering::Relaxed);
-    format!(
-        "{:x}-{:x}-{:x}",
-        now.as_secs(),
-        std::process::id(),
-        nth ^ u64::from(now.subsec_nanos())
-    )
+    uuid::Uuid::new_v4().to_string()
 }
 
 #[cfg(test)]

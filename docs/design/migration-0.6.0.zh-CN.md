@@ -51,7 +51,7 @@ fn list(&self, subject: &Subject, query: MemoryStoreQuery)
 
 | 字段 | 缺失时的规则 |
 |---|---|
-| `L2Entry.id` / `L3Entry.id` | 反序列化时自动生成（框架 id） |
+| `L2Entry.id` / `L3Entry.id` | 反序列化时自动生成（框架 UUID v4） |
 | `L2Entry.updated_at` / `L3Entry.updated_at` | 0；排序按 `max(updated_at, created_at)` 归一 |
 | `L2Entry.topic` | 空串（旧摘要无主题标签） |
 

@@ -46,8 +46,8 @@ table below and `docs/design/migration-0.6.0.zh-CN.md`.
   `MemoryStoreError::EntryNotFound`.
 - **Events** (`synonz`): `MemoryEvent::Updated` / `Removed`
   (content-free).
-- **Entries** (`synonz`): `id` and `updated_at`; `L2Entry::topic` and
-  `L2Entry::with_topic`.
+- **Entries** (`synonz`): `id` (UUID v4) and `updated_at`;
+  `L2Entry::topic` and `L2Entry::with_topic`.
 - **Test utilities** (`test-util`): `Memory::seed_l1` / `seed_l2` /
   `seed_l3`, `Memory::reader_for_tests`,
   `Memory::l1_len_for_tests` / `l2_len_for_tests` / `l3_len_for_tests`.

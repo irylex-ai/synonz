@@ -26,6 +26,7 @@ synonz-derive.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
 tokio-util.workspace = true
+uuid.workspace = true
 
 [dev-dependencies]
 # The observer tests exercise a slow observer running concurrently with the

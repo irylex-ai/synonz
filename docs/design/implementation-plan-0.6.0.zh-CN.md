@@ -56,7 +56,7 @@ M38 收尾与验证（扩展指南、迁移指南、CHANGELOG、README、全量�
 
 | # | 子项 | 要点 |
 |---|---|---|
-| 1 | 条目加 `id` | `L2Entry` / `L3Entry` 增 `id`（框架生成：进程唯一、无新依赖——epoch 秒 + 原子计数 + 随机后缀）；`new(...)` 自动生成；`#[serde(default = ...)]` 兼容旧数据（缺失即生成） |
+| 1 | 条目加 `id` | `L2Entry` / `L3Entry` 增 `id`（框架生成 **UUID v4**；`new(...)` 自动生成；`#[serde(default = ...)]` 兼容旧数据（缺失即生成） |
 | 2 | 条目加 `updated_at` | `L2Entry` / `L3Entry` 增 `updated_at`（创建 = `created_at`；任何更新刷新）；旧数据缺失 → 归一为 `created_at` |
 | 3 | L3 `upsert` 保 id | 同身份替换时**保留原 id**（行为契约更新，内置实现按此改） |
 | 4 | 召回排序 | `l3_query` 由 `created_at desc` 改为 **`(updated_at desc, id asc)`**（内置实现 + rustdoc 同步） |
@@ -172,7 +172,7 @@ M38 收尾与验证（扩展指南、迁移指南、CHANGELOG、README、全量�
 
 | 项 | 决议 |
 |---|---|
-| `id` 生成 | 框架生成、进程唯一、无新依赖（epoch 秒 + 原子计数 + 随机后缀）；`new(...)` 自动生成 |
+| `id` 生成 | 框架生成 **UUID v4**（`uuid` 依赖，MIT/Apache-2.0 双许可；字符串形态对调用方不透明）；`new(...)` 自动生成 |
 | 旧数据迁移 | `id` 缺失 → 反序列化时生成；`updated_at` 缺失 → 归一为 `created_at` |
 | `update`/`remove` 返回 | `bool`（存在性）；`remove` 幂等；`MemoryStoreError` 加 `EntryNotFound`（加性）用于 `edit`/`update` 缺失 |
 | `edit` 字段范围 | 仅 `content`；`id`/`memory_type`/`source`/`created_at` 不变；`updated_at` 刷新 |
@@ -210,9 +210,10 @@ M38 收尾与验证（扩展指南、迁移指南、CHANGELOG、README、全量�
 
 ### M33 条目数据模型与新鲜度 ✅（2026-09-19）
 
-- `L2Entry` / `L3Entry` 增 `id`（框架生成：epoch 秒 + 进程 id + 原子
-  计数混入纳秒余数；无新依赖）与 `updated_at`（创建 = `created_at`，
-  更新刷新）；`new(...)` 自动生成 id 并置时间；
+- `L2Entry` / `L3Entry` 增 `id`（框架生成 **UUID v4**——评审修订：
+  由自建"epoch+pid+计数"方案改为标准 UUID；`uuid` 依赖已在依赖树中）
+  与 `updated_at`（创建 = `created_at`，更新刷新）；`new(...)` 自动
+  生成 id 并置时间；
 - **旧数据迁移缺省**：`id` 缺失 → 反序列化时生成
   （`#[serde(default = ...)]`）；`updated_at` 缺失 → 0，排序按
   `max(updated_at, created_at)` 归一（crate 内部 `freshness()`）；
