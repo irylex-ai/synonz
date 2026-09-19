@@ -1,4 +1,4 @@
-//! The memory system: fragment model and the layered memory store
+//! The memory system: entry model and the layered memory store
 //! contracts.
 //!
 //! Memory is the subject-owned abstraction of interaction. Three layers,
@@ -10,16 +10,23 @@
 //! - **L2**: summaries of this conversation's earlier turns (cached);
 //! - **L3**: distilled long-term knowledge, cross-conversation.
 //!
-//! Every fragment is uniquely located by the triple
-//! `(subject_id, conversation_id, topic)`. Orchestration (when flows
-//! happen) belongs to the framework; storage and retrieval logic belongs
-//! to the store implementations.
+//! Entries carry framework-generated stable ids (the management address);
+//! the `(subject_id, conversation_id, topic)` triple remains the L3
+//! same-identity key (an upsert replaces that slot while preserving the
+//! id). Orchestration (when flows happen) belongs to the framework;
+//! storage and retrieval logic belongs to the store implementations.
 //!
-//! [`Memory`] is the domain object on the usage side: one handle
-//! aggregating the three slots, so callers read and write through a
-//! single coherent facade (`memory.l1_append(..)`) while the storage
-//! sides stay independently replaceable. It is assembled by the runtime
-//! and never constructed by hand — the runtime is its single authority.
+//! Two audiences, two views over one mechanism:
+//!
+//! - [`Memory`] is the **application face**: item-level management
+//!   (`list` / `get` / `edit` / `forget` / `forget_matching`) over
+//!   layer-agnostic [`MemoryItem`]s;
+//! - [`MemoryReader`] is the **strategy material face**: the read-only,
+//!   subject-scoped view handed to strategy slots through their payloads.
+//!
+//! Both sit on the crate-internal mechanism (the three storage slots
+//! aggregated), assembled by the runtime — nobody constructs either by
+//! hand; the runtime is the single authority.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -30,7 +37,7 @@ use thiserror::Error;
 use crate::Subject;
 use crate::bus::{EventBus, MemoryEvent, SynonzEvent};
 
-/// A memory fragment's topic tag.
+/// A memory entry's topic tag.
 pub type Topic = String;
 
 /// The identity triple locating one memory entry.
@@ -152,7 +159,7 @@ pub struct L1Entry {
     pub topic: Topic,
     /// The canonical messages of that turn.
     pub messages: Vec<crate::Message>,
-    /// Epoch seconds at which the entry was created (recency ranking).
+    /// Epoch seconds at which the entry was created.
     pub created_at: u64,
 }
 
@@ -353,8 +360,9 @@ pub trait MemoryL2Store: Send + Sync + 'static {
     /// How many L2 blocks a conversation currently holds.
     fn len(&self, subject: &Subject, conversation_id: &str) -> Result<usize, MemoryStoreError>;
 
-    /// Removes the oldest `n` L2 blocks of a conversation and returns
-    /// them (for distillation into L3).
+    /// Removes and returns the oldest `n` L2 blocks of a conversation
+    /// (a positional storage primitive; the framework's distillation
+    /// claims its sources by id instead).
     fn pop_oldest(
         &self,
         subject: &Subject,
@@ -391,9 +399,9 @@ pub trait MemoryL3Store: Send + Sync + 'static {
     /// Upserts an L3 knowledge entry: same-identity entries are replaced
     /// **preserving the original id** (the id is the entry's stable
     /// address across updates); otherwise the entry is appended.
-    fn upsert(&self, subject: &Subject, fragment: L3Entry) -> Result<(), MemoryStoreError>;
+    fn upsert(&self, subject: &Subject, entry: L3Entry) -> Result<(), MemoryStoreError>;
 
-    /// Retrieves relevant L3 fragments for the query.
+    /// Retrieves relevant L3 entries for the query.
     fn query(
         &self,
         subject: &Subject,
@@ -402,7 +410,7 @@ pub trait MemoryL3Store: Send + Sync + 'static {
         budget: usize,
     ) -> Result<Vec<L3Entry>, MemoryStoreError>;
 
-    /// The subject's complete L3 fragment count (introspection for
+    /// The subject's complete L3 entry count (introspection for
     /// budgeting and diagnostics).
     fn len(&self, subject: &Subject) -> Result<usize, MemoryStoreError>;
 
@@ -456,7 +464,7 @@ pub struct MemorySource {
 pub struct MemoryItem {
     /// The framework-generated opaque id (stable across edits).
     pub id: String,
-    /// Which kind of memory this is.
+    /// Which type of memory entry this is.
     pub memory_type: MemoryType,
     /// The item's content (a summary text or a knowledge text).
     pub content: String,
@@ -517,8 +525,9 @@ pub struct MemoryQuery {
     pub keyword: Option<String>,
     /// Resume strictly after this position; `None` starts from the top.
     pub after: Option<MemoryListCursor>,
-    /// The maximum number of items to return (must be positive; `0`
-    /// yields an empty last page).
+    /// The maximum number of items to return (`list`) / entries to
+    /// remove (`forget_matching`); must be positive — `0` yields an empty
+    /// last page / no removals.
     pub limit: usize,
 }
 
@@ -696,12 +705,12 @@ impl MemoryLayerStore {
     pub(crate) fn l3_upsert(
         &self,
         subject: &Subject,
-        fragment: L3Entry,
+        entry: L3Entry,
     ) -> Result<(), MemoryStoreError> {
-        self.l3.upsert(subject, fragment)
+        self.l3.upsert(subject, entry)
     }
 
-    /// Retrieves relevant L3 fragments for the query.
+    /// Retrieves relevant L3 entries for the query.
     pub(crate) fn l3_query(
         &self,
         subject: &Subject,
@@ -712,7 +721,7 @@ impl MemoryLayerStore {
         self.l3.query(subject, query, topic, budget)
     }
 
-    /// The subject's complete L3 fragment count.
+    /// The subject's complete L3 entry count.
     pub(crate) fn l3_len(&self, subject: &Subject) -> Result<usize, MemoryStoreError> {
         self.l3.len(subject)
     }

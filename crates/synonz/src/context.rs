@@ -205,10 +205,10 @@ pub trait MemorySummarizer: Send + Sync + 'static {
 ///
 /// Reads across layers through the read-only view (L1 anchoring, L2
 /// subject, existing L3 normalization). Returns knowledge texts only; the
-/// engine stamps identity and time, performs the L3 upsert, and pops the
-/// processed L2 entries **after the transform succeeds** (a failed
-/// transform keeps L2 — never lose data). The framework narrates the
-/// strategy's model calls.
+/// engine stamps identity and time, performs the L3 upsert, and removes
+/// the processed L2 entries (by id) after the transform succeeds (a
+/// failed transform keeps L2 — never lose data). The framework narrates
+/// the strategy's model calls.
 pub trait MemoryDistiller: Send + Sync + 'static {
     /// Distills the given L2 entries into L3 knowledge texts.
     fn distill<'a>(
@@ -257,8 +257,9 @@ pub struct TopicDecision {
 /// compaction (L1 overflow → L2 summary, emits `Compacted`) and
 /// distillation (L2 overflow → L3, emits `Distilled`). Compaction order
 /// is summarize → append → pop, so a concurrent assembly never observes a
-/// memory hole; distillation transforms first and pops after, so a failed
-/// transform never loses L2.
+/// memory hole; distillation transforms first and claims its sources by
+/// id after — a failed transform keeps L2, and a source that vanishes
+/// during the transform discards the produced output (ADR-0020).
 pub struct Context {
     assembler: Arc<dyn ContextAssembler>,
     rewriter: Option<Arc<dyn TurnInputRewriter>>,
@@ -616,7 +617,7 @@ impl BackgroundMaintenanceTask {
     /// Distills L2 overflow into L3 knowledge through the configured
     /// strategy (the default is mechanical: each summary becomes
     /// long-term knowledge under the conversation's topic). Transform
-    /// first, pop after — a failed transform keeps L2.
+    /// first, claims its sources after — a failed transform keeps L2.
     ///
     /// Concurrency discipline (ADR-0020): sources are re-validated by id
     /// before the transform (already-forgotten ones are skipped) and

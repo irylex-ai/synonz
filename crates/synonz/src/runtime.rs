@@ -242,8 +242,9 @@ impl ConversationTaskSpawner {
 /// The runtime's shared state (one `Arc` per runtime; clones are cheap).
 struct RuntimeInner {
     conversation_store: Arc<dyn ConversationStore>,
-    /// The layered memory as one domain object (assembled from the three
-    /// storage slots at build time; the runtime is its single authority).
+    /// The application face of the layered memory; the crate-internal
+    /// mechanism (the three storage slots) lives behind it (assembled at
+    /// build time; the runtime is its single authority).
     memory: Memory,
     event_bus: EventBus,
     /// The conversation table: owned conversations and their background

@@ -258,7 +258,8 @@ mod tests {
 /// turns of each conversation, verbatim, memory-grade latency.
 #[derive(Default)]
 pub(crate) struct InProcessMemoryL1Store {
-    // subject identity string -> conversation id -> ordered L1 turns.
+    // subject identity string -> ordered L1 turns (entries carry their
+    // conversation).
     l1: Mutex<HashMap<String, Vec<L1Entry>>>,
 }
 
@@ -336,7 +337,7 @@ impl MemoryL1Store for InProcessMemoryL1Store {
 /// In-process L2 summary store (default implementation).
 #[derive(Default)]
 pub(crate) struct InProcessMemoryL2Store {
-    // subject -> conversation id -> ordered L2 blocks.
+    // subject -> ordered L2 blocks (entries carry their conversation).
     l2: Mutex<HashMap<String, Vec<L2Entry>>>,
 }
 
@@ -473,30 +474,27 @@ impl MemoryL2Store for InProcessMemoryL2Store {
 
 /// In-process L3 knowledge store (default implementation).
 ///
-/// Retrieval uses topic matching plus recency ranking — zero external
+/// Retrieval uses topic matching plus freshness ranking — zero external
 /// dependencies. Storage is process-local.
 #[derive(Default)]
 pub(crate) struct InProcessMemoryL3Store {
-    // subject -> ordered L3 fragments.
+    // subject -> ordered L3 entries.
     l3: Mutex<HashMap<String, Vec<L3Entry>>>,
 }
 
 impl MemoryL3Store for InProcessMemoryL3Store {
-    fn upsert(&self, subject: &Subject, fragment: L3Entry) -> Result<(), MemoryStoreError> {
+    fn upsert(&self, subject: &Subject, entry: L3Entry) -> Result<(), MemoryStoreError> {
         let mut l3 = self.l3.lock().unwrap_or_else(|p| p.into_inner());
-        let fragments = l3.entry(subject.to_string()).or_default();
-        // Upsert by identity: replace an existing fragment on the same
+        let entries = l3.entry(subject.to_string()).or_default();
+        // Upsert by identity: replace an existing entry on the same
         // (conversation, topic) identity, preserving its id (the id is
         // the entry's stable address across updates), otherwise append.
-        if let Some(existing) = fragments
-            .iter_mut()
-            .find(|f| f.identity == fragment.identity)
-        {
+        if let Some(existing) = entries.iter_mut().find(|e| e.identity == entry.identity) {
             let id = std::mem::take(&mut existing.id);
-            *existing = fragment;
+            *existing = entry;
             existing.id = id;
         } else {
-            fragments.push(fragment);
+            entries.push(entry);
         }
         Ok(())
     }
@@ -511,8 +509,8 @@ impl MemoryL3Store for InProcessMemoryL3Store {
         let l3 = self.l3.lock().unwrap_or_else(|p| p.into_inner());
         let mut candidates: Vec<L3Entry> = l3
             .get(&subject.to_string())
-            .map(|fragments| {
-                fragments
+            .map(|entries| {
+                entries
                     .iter()
                     .filter(|f| {
                         topic_matches(topic, &f.identity.topic) || text_matches(query, &f.content)
@@ -536,7 +534,7 @@ impl MemoryL3Store for InProcessMemoryL3Store {
         let l3 = self.l3.lock().unwrap_or_else(|p| p.into_inner());
         Ok(l3
             .get(&subject.to_string())
-            .map(|fragments| fragments.len())
+            .map(|entries| entries.len())
             .unwrap_or(0))
     }
 
@@ -544,15 +542,15 @@ impl MemoryL3Store for InProcessMemoryL3Store {
         let l3 = self.l3.lock().unwrap_or_else(|p| p.into_inner());
         Ok(l3
             .get(&subject.to_string())
-            .and_then(|fragments| fragments.iter().find(|f| f.id == id).cloned()))
+            .and_then(|entries| entries.iter().find(|f| f.id == id).cloned()))
     }
 
     fn update(&self, subject: &Subject, entry: L3Entry) -> Result<bool, MemoryStoreError> {
         let mut l3 = self.l3.lock().unwrap_or_else(|p| p.into_inner());
-        let Some(fragments) = l3.get_mut(&subject.to_string()) else {
+        let Some(entries) = l3.get_mut(&subject.to_string()) else {
             return Ok(false);
         };
-        let Some(existing) = fragments.iter_mut().find(|f| f.id == entry.id) else {
+        let Some(existing) = entries.iter_mut().find(|f| f.id == entry.id) else {
             return Ok(false);
         };
         *existing = entry;
@@ -561,12 +559,12 @@ impl MemoryL3Store for InProcessMemoryL3Store {
 
     fn remove(&self, subject: &Subject, id: &str) -> Result<bool, MemoryStoreError> {
         let mut l3 = self.l3.lock().unwrap_or_else(|p| p.into_inner());
-        let Some(fragments) = l3.get_mut(&subject.to_string()) else {
+        let Some(entries) = l3.get_mut(&subject.to_string()) else {
             return Ok(false);
         };
-        let before = fragments.len();
-        fragments.retain(|f| f.id != id);
-        Ok(fragments.len() != before)
+        let before = entries.len();
+        entries.retain(|f| f.id != id);
+        Ok(entries.len() != before)
     }
 
     fn list(
@@ -577,8 +575,8 @@ impl MemoryL3Store for InProcessMemoryL3Store {
         let l3 = self.l3.lock().unwrap_or_else(|p| p.into_inner());
         let matching: Vec<L3Entry> = l3
             .get(&subject.to_string())
-            .map(|fragments| {
-                fragments
+            .map(|entries| {
+                entries
                     .iter()
                     .filter(|f| {
                         query
@@ -646,7 +644,8 @@ fn page_entries<E: Clone>(
     MemoryPage::new(items, next)
 }
 
-/// Case-insensitive substring matching (ASCII lowercase folding).
+/// Case-insensitive substring matching (Unicode-aware lowercase
+/// folding).
 fn contains_ci(haystack: &str, needle: &str) -> bool {
     if needle.is_empty() {
         return true;
@@ -672,7 +671,7 @@ fn topic_matches(current: &str, candidate: &str) -> bool {
         .any(|t| current_tokens.contains(t))
 }
 
-/// Cheap keyword overlap between the query and fragment content.
+/// Cheap keyword overlap between the query and entry content.
 fn text_matches(query: &str, content: &str) -> bool {
     if query.is_empty() {
         return false;

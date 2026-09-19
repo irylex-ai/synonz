@@ -110,7 +110,8 @@ pub enum ConversationEvent {
 }
 
 /// Memory flow facts — the layered memory's lifecycle (archive, compaction,
-/// distillation, promotion) and its failures.
+/// distillation, promotion), its management actions (edit, removal) and its
+/// failures.
 #[non_exhaustive]
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(tag = "event", rename_all = "snake_case")]

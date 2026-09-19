@@ -196,7 +196,7 @@ async fn conversation_end_drains_and_promotes_l2_into_l3() {
 #[tokio::test]
 async fn layered_assembly_reads_memory_layers() {
     let (runtime, subject) = env();
-    // Seed L1/L2/L3 directly through the memory facade.
+    // Seed L1/L2/L3 through the test-util seeds.
     let memory = runtime.memory();
     memory
         .seed_l1(
@@ -288,7 +288,7 @@ impl ContextAssembler for PrependStrategy {
 async fn custom_assembler_slot_drives_assembly() {
     let (_first, subject) = env();
     let runtime = SynonzRuntime::builder().build();
-    // Seed L1 through the memory facade (the strategy reads memory).
+    // Seed L1 through the test-util seed (the strategy reads memory).
     runtime
         .memory()
         .seed_l1(

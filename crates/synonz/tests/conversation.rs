@@ -243,7 +243,7 @@ fn export_round_trips_the_truth_record() {
 
     // The export holds the truth record; restoration goes through a store
     // that holds the state (`of`). The memory layers do not travel with
-    // the export — that is the Memory facade's own transaction.
+    // the export — that is the memory system's own transaction.
     let state: synonz::ConversationState = serde_json::from_slice(&turns_before).unwrap();
     assert_eq!(state.id, "exported");
     assert!(state.turns.is_empty());
