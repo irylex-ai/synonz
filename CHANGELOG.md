@@ -4,13 +4,13 @@ All notable changes to Synonz are documented in this file. The format
 follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 versions follow [Semantic Versioning](https://semver.org/).
 
-## [Unreleased]
+## [0.6.0] - 2026-09-19
 
-The memory-management release (planned as 0.6.0; release decision
-pending): memory entries become addressable items with an application
-management surface, equal-power in-place updates, effective forgetting
-and a layer-agnostic application face. **Breaking** — migrate with the
-table below and `docs/design/migration-0.6.0.zh-CN.md`.
+The memory-management release: memory entries become addressable items
+with an application management surface, equal-power in-place updates,
+effective forgetting and a layer-agnostic application face.
+**Breaking** — migrate with the table below and
+`docs/design/migration-0.6.0.zh-CN.md`.
 
 ### Highlights
 
