@@ -1,6 +1,8 @@
 # ADR-0024: 分层记忆组件——单元模型、写侧契约与组件公开面
 
-- 状态: APPROVED（2026-09-20，irylex 人工评审通过）
+- 状态: SUPERSEDED（2026-09-20，由
+  `docs/adr/0026-layered-memory-rebase.zh-CN.md` 取代；模型部分按
+  《上下文记忆系统全链路技术方案》重定，边界纪律由 ADR-0026 承接）
 - 日期: 2026-09-20
 - 决策者: irylex（逐点确认；遵循 `.opencode/rules/architecture.md` §5–§9
   的渐进决策流程）
