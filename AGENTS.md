@@ -268,6 +268,12 @@ Coding agents working on Synonz must:
   (silent partial application, formatting drift, unverifiable matches) and
   must not be used for code changes.
 
+Architecture discussions are strictly governed by the architecture decision
+rules in `.opencode/rules/architecture.md`. Agents must follow those rules
+strictly while reasoning through decisions, and must self-check before every
+reply is sent that the reply complies with those rules; anything failing the
+check must be revised before sending.
+
 For substantial work, prefer **understand → design → implement → verify →
 review**. Small, obvious changes may proceed directly when no meaningful
 design uncertainty exists.
