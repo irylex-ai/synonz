@@ -19,6 +19,7 @@ serde.workspace = true
 serde_json.workspace = true
 synonz = { workspace = true, features = ["test-util"] }
 synonz-anthropic.workspace = true
+synonz-layered-memory.workspace = true
 synonz-mcp.workspace = true
 synonz-openai.workspace = true
 tokio = { workspace = true, features = ["full"] }
@@ -27,6 +28,10 @@ unicode-width.workspace = true
 [[bin]]
 name = "custom_tool"
 path = "custom_tool.rs"
+
+[[bin]]
+name = "layered_memory"
+path = "layered_memory.rs"
 
 [[bin]]
 name = "events"

@@ -2220,10 +2220,23 @@ dependencies = [
  "serde_json",
  "synonz",
  "synonz-anthropic",
+ "synonz-layered-memory",
  "synonz-mcp",
  "synonz-openai",
  "tokio",
  "unicode-width",
+]
+
+[[package]]
+name = "synonz-layered-memory"
+version = "0.6.0"
+dependencies = [
+ "futures",
+ "serde",
+ "serde_json",
+ "synonz",
+ "tokio",
+ "uuid",
 ]
 
 [[package]]

@@ -3,6 +3,7 @@ resolver = "2"
 members = [
     "crates/synonz",
     "crates/synonz-derive",
+    "crates/synonz-layered-memory",
     "crates/synonz-openai",
     "crates/synonz-anthropic",
     "crates/synonz-mcp",
@@ -43,6 +44,7 @@ synonz-derive = { path = "crates/synonz-derive", version = "0.6.0" }
 synonz-openai = { path = "crates/synonz-openai", version = "0.6.0" }
 synonz-anthropic = { path = "crates/synonz-anthropic", version = "0.6.0" }
 synonz-mcp = { path = "crates/synonz-mcp", version = "0.6.0" }
+synonz-layered-memory = { path = "crates/synonz-layered-memory", version = "0.6.0" }
 
 [workspace.lints.rust]
 unsafe_code = "deny"

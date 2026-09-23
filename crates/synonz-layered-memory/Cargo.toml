@@ -1,0 +1,24 @@
+[package]
+name = "synonz-layered-memory"
+description = "Official layered memory component for Synonz: L1 double-track messages, L2 event summaries, L3 entity graph and vectors"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+keywords.workspace = true
+categories.workspace = true
+readme = "README.md"
+
+[lints]
+workspace = true
+
+[dependencies]
+futures.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+synonz.workspace = true
+uuid.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt", "rt-multi-thread", "time"] }
+synonz = { workspace = true, features = ["test-util"] }
