@@ -4,6 +4,159 @@ All notable changes to Synonz are documented in this file. The format
 follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 versions follow [Semantic Versioning](https://semver.org/).
 
+## [0.7.0] - 2026-09-21
+
+The memory-componentization release: the framework keeps the memory
+contracts, the built-in engine and a bundled in-process default, while
+the layered memory model (L1 double-track messages, L2 event summaries,
+L3 entity graph and vectors) becomes the official component
+`synonz-layered-memory`. Topic detection returns to an independent
+Agent-level extension point, the read phase owns the model-visible
+message frame, and management gains opaque scope addressing.
+**Breaking** — migrate with the table below and
+`docs/design/migration-0.7.0.zh-CN.md`.
+
+### Highlights
+
+- **Memory contract family**: `Memory` (item management),
+  `MemoryContextAssembler` (read), `MemoryPipeline` (write: the
+  `archive_turn` / `spawn_task` / `finalize_conversation` hooks) plus
+  the factories `MemoryProvider` / `RewriterProvider` /
+  `TopicDetectorProvider`. The `Context` type is internalized (crate
+  engine), never public.
+- **Bundled default**: an in-process, non-layered provider ships in the
+  crate — zero configuration, `runtime.memory()` always available;
+  registering a provider replaces it.
+- **Complete message frame**: the assembler returns the model-visible
+  frame after the agent's system message (the current turn's user
+  message included); the core appends nothing. The contract requires a
+  usable frame, and the core substitutes the original input when the
+  frame comes back empty (never silent).
+- **Narrated model access**: implementations declare optional models on
+  their factories; the framework resolves `provider model ?? agent
+  model` at use time and hands over a narrated handle (auxiliary calls
+  are reported; no stream deltas).
+- **Opaque scope addressing**: `MemoryScope` (an opaque string value)
+  partitions memory; `MemoryItem.scope` exposes it, `MemoryQuery.scope`
+  filters it (`None` merges every partition), `forget_matching` batches
+  by it, and the management facts (`Updated` / `Removed`) carry it.
+- **Independent topic detection**: `TopicDetectorProvider` (Agent
+  level, optional model, same resolution rule as the rewriter); the
+  core writes the verdict back, emits `TopicShifted` on change, and
+  exposes the change to the pipeline hooks through their context. The
+  pipeline has three hooks (no `detect_topic`).
+- **Official layered component** (`synonz-layered-memory`): L1
+  turn-level entries (one entry per completed turn, ten turns,
+  conversation-scoped), L2 batch compaction (one summarizer call per
+  batch producing 1..N entries with content history and importance), L3
+  entity graph plus vectors distilled on topic shifts and conversation
+  ends (cross-conversation, configurable schema, alias merging with an
+  LLM judgment, anchor-first walk, cold-start gate), the four-phase
+  pipeline, four replaceable storage contracts, a replaceable embedding
+  port, semantic strategies, and its own observation face. The
+  component's model was redefined by ADR-0028.
+
+### Added
+
+- **Contracts** (`synonz`): `Memory` (trait), `MemoryContextAssembler`,
+  `MemoryContextAssembleInput` / `MemoryContextAssembleOutput`,
+  `MemoryPipeline`, `PipelineTurnContext` /
+  `PipelineConversationContext`, `MemoryFailure`, `RewriteInput`,
+  `TopicDetector` / `TopicDetectInput`, `MemoryProvider`,
+  `RewriterProvider`, `TopicDetectorProvider`, `MemoryScope`.
+- **Runtime** (`synonz`): `RuntimeBuilder::memory_provider(...)`;
+  `SynonzRuntime::memory() -> Arc<dyn Memory>`;
+  `AgentBuilder::rewriter_provider(...)` /
+  `AgentBuilder::topic_detector_provider(...)`.
+- **Events** (`synonz`): `MemoryEvent::Failed { stage: String, detail,
+  moment }`; `Updated` / `Removed` carry `scope`;
+  `MemoryFailedMoment` (renamed).
+- **Views** (`synonz`): `MemoryItem::scope`, `MemoryQuery.topic` /
+  `MemoryQuery.scope`, flat `MemoryListCursor`.
+- **Component** (`synonz-layered-memory`, new crate): the layered model
+  (`L1MemoryEntry` / `L2MemoryEntry` / `L3MemoryGraph` /
+  `L3MemoryGraphEntity` / `L3MemoryGraphEdge`), four storage contracts
+  (`L1MemoryStore` / `L2MemoryStore` / `L3MemoryGraphStore` /
+  `L3MemoryVectorStore`) with in-process defaults, `Embedding` (with the
+  deterministic `HashEmbedding`), the semantic strategies
+  (`L2MemorySummarizer` / `L3MemoryEntityExtractor` /
+  `LayeredMemoryContextRewriter` with prompt-driven defaults),
+  `LayeredMemoryObserver` / `LayeredMemoryEvent` (ADR-0028 variants),
+  `LayeredMemoryConfig`, `L3MemorySchema`, `MemoryScopeResolver`, the
+  provider (builder), the actuator (`LayeredMemoryActuator`:
+  `l2_memory_entries` / `l3_memory_entities` / `l3_memory_relations` /
+  `forget_l3_memory_relation`, every read scoped to the subject), and the
+  read-side providers (`CoreferenceInputRewriterProvider` /
+  `SimilarityTopicDetectorProvider`).
+
+### Changed
+
+- The read phase owns the model-visible input: the assembler's frame
+  goes straight to the model; the agent's system prompt precedes it.
+- `Turn.messages` records the complete frame plus the turn's subsequent
+  messages; `Turn.input` stays the original text. The system prompt is
+  agent configuration and is not archived.
+- Rewriter history comes from the truth domain (recent successful
+  turns) instead of a memory layer window.
+- The conversation-end teardown drains background tasks and then calls
+  the pipeline's `finalize_conversation` hook (the mechanical L2→L3
+  promotion is gone).
+- The component's management face is subject-isolated: conversations
+  register their owner at archive time; `list` / `get` / `edit` /
+  `forget` / `forget_matching` (explicit `scope` / `conversation_id`
+  filters included) only see the subject's own partitions, and the
+  actuator reads follow the same rule. The management face creates no
+  entries: new memory comes from conversations, and direct store writes
+  are out-of-framework imports the face does not index.
+- `L3MemoryGraphEdge` uses `from` / `to` (was `subject` / `object`); the
+  component's vocabulary is conversation, not session.
+
+### Breaking Changes
+
+- Removed from the public surface (no aliases): `Context`,
+  `ContextAssembler` / `ContextAssemblerInput` /
+  `ContextAssemblerOutput`, `AssemblyFailure`, `MemorySummarizer`,
+  `MemoryDistiller`, `ConversationTopicDetector` / `TopicDecision`,
+  `MemoryFlowError`, `MemoryFlowStage`, `MemoryType`,
+  `MemoryStoreQuery`, `L1Entry` / `L2Entry` / `L3Entry` / `L3Identity`,
+  `MemoryL1Store` / `MemoryL2Store` / `MemoryL3Store`,
+  `MemoryFlowFailedMoment`, `MemoryEvent::{Compacted, Distilled,
+  Promoted, FlowFailed}`.
+- `RuntimeBuilder::memory_l1_store` / `memory_l2_store` /
+  `memory_l3_store` are gone; use `memory_provider(...)`.
+- `Memory` is a trait; `Memory::edit` takes `&str`; `MemoryItem` gains
+  `scope` and loses `memory_type`; `MemoryQuery` loses `memory_type`.
+- `MemoryEvent::Updated` / `Removed` gain `scope`.
+- `EventSink` and `ConversationTaskSpawner` leave the public surface
+  (implementation-side hooks use the pipeline context instead).
+- 0.6.0 serialized data is not supported (no data migration).
+
+### Migration
+
+| Before (0.6.0) | After (0.7.0) |
+|---|---|
+| `AgentBuilder::context(...)` / `Context` | removed; use `rewriter_provider(...)` and the runtime's memory provider |
+| `ContextAssembler*` | `MemoryContextAssembler` / `MemoryContextAssembleInput` / `MemoryContextAssembleOutput` (the frame is the complete model-visible input) |
+| `TurnInputRewriter::rewrite(input, history)` | `rewrite(RewriteInput { input, history, model })` |
+| `ConversationTopicDetector` | `TopicDetector` + `AgentBuilder::topic_detector_provider(...)` |
+| `MemorySummarizer` / `MemoryDistiller` | the component's strategies or your own pipeline hooks |
+| `MemoryFlowStage` / `MemoryFlowError` / `AssemblyFailure` | `MemoryFailure { stage: String, detail: String }` |
+| `MemoryEvent::FlowFailed` | `MemoryEvent::Failed { stage, detail, moment }` |
+| `MemoryEvent::Compacted` / `Distilled` / `Promoted` | component observation face (`LayeredMemoryObserver`) |
+| `RuntimeBuilder::memory_l1/l2/l3_store(...)` | `RuntimeBuilder::memory_provider(...)` |
+| layered types (`L1Entry` / `L2Entry` / `L3Entry`) | component documents (`L1MemoryEntry` / `L2MemoryEntry` / `L3MemoryGraphEntity` / `L3MemoryGraphEdge`; ADR-0028) |
+| `MemoryItem.memory_type` / `MemoryQuery::with_memory_type` | the component's `LayeredMemoryActuator` documents (the Summary/Knowledge mapping is documentation, not a type) |
+| `memory.reader(&subject)` | `memory.reader()` — the read-only projection of the memory (item-level `list` / `get` with the subject per call; construction internal) |
+| rewriter history from the L1 window | truth-domain recent successful turns |
+
+### Notes
+
+- Boundaries (no current requirement): scope conversion (`move` /
+  `promote` / `demote`), scope acquisition (application layer), L1
+  retention and session cleanup, semantic search and contradiction
+  resolution (component strategy layer), real storage backends
+  (Redis / MongoDB / Neo4j / Milvus) as separate packages.
+
 ## [0.6.0] - 2026-09-19
 
 The memory-management release: memory entries become addressable items

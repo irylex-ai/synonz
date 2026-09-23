@@ -36,7 +36,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 | Crate | Purpose |
 |---|---|
-| `synonz` | Core: `Agent`, the Context state engine, the event bus and `SynonzEvent` vocabulary, the layered `Memory` (management face over the three storage slots), the time-driven scheduler, canonical messages, the reasoning loop |
+| `synonz` | Core: `Agent`, the built-in context engine, the event bus and `SynonzEvent` vocabulary, the memory contract family (`Memory` / `MemoryContextAssembler` / `MemoryPipeline` + providers) with a bundled in-process default, the time-driven scheduler, canonical messages, the reasoning loop |
+| `synonz-layered-memory` | Official layered memory component: L1 turn-level entries, L2 batch compaction, L3 entity graph with vectors (distillation), four replaceable storage contracts, a configurable schema, semantic strategies, and its own observation face |
 | `synonz-derive` | `#[derive(Tool)]` typed tool ergonomics (re-exported by `synonz`) |
 | `synonz-openai` | OpenAI-compatible `Model` adapter |
 | `synonz-anthropic` | Anthropic `Model` adapter |
@@ -49,6 +50,7 @@ Run them with `cargo run -p synonz-examples --bin <name>`:
 | Example | Notes |
 |---|---|
 | `custom_tool` | `#[derive(Tool)]` + agent loop (offline) |
+| `layered_memory` | The layered memory component end to end (offline) |
 | `events` | Observing the full event stream on the bus (offline) |
 | `cancellation` | External cancel signal / timeout / drop entries (offline) |
 | `scheduler` | Custom scheduled tasks + the system lifecycle: Monitor and `shutdown()` (offline) |
@@ -60,12 +62,13 @@ Run them with `cargo run -p synonz-examples --bin <name>`:
 ## Documentation
 
 - Architecture decisions: `docs/adr/` (ADR-0001 and onward)
-- Architecture overview: `docs/architecture/v7.zh-CN.md` (the 0.6.0
-  target-state view; the v6 / v5 / v4 / v3 / s2 / v1 documents are
-  retained as era snapshots)
-- Implementation plan: `docs/design/implementation-plan-0.6.0.zh-CN.md`
-  (the 0.5.0 / 0.4.0 / 0.3.0 / 0.2.0 plans are retained for their stage
-  records)
+- Architecture overview: `docs/architecture/v8.zh-CN.md` (the 0.7.0
+  target-state view; v7 and the earlier documents are retained as era
+  snapshots)
+- Implementation plan: `docs/design/implementation-plan-0.7.0.zh-CN.md`
+  (the 0.6.0 and earlier plans are retained for their stage records)
+- API migration: `docs/design/migration-0.7.0.zh-CN.md` (0.6.0 → 0.7.0;
+  the earlier migration guides are retained alongside their plans)
 - Changelog: `CHANGELOG.md` (migration tables inside for the breaking
   waves)
 
