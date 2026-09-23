@@ -32,7 +32,8 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use tokio::sync::{mpsc, oneshot};
 
-use crate::event::{MemoryFlowStage, TurnEvent};
+use crate::event::TurnEvent;
+use crate::memory::MemoryScope;
 
 /// The observation queue's capacity (fixed by design: no configuration
 /// family; overflow is reported, not tuned away).
@@ -64,12 +65,13 @@ pub enum ConversationEndReason {
 #[non_exhaustive]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum MemoryFlowFailedMoment {
-    /// The post-turn maintenance, synchronous segment.
+pub enum MemoryFailedMoment {
+    /// The turn's read or write phase (the synchronous segments around a
+    /// completed turn).
     AfterTurn,
     /// The conversation-end maintenance.
     AtConversationEnd,
-    /// The post-turn maintenance, background segment.
+    /// Background maintenance work.
     Background,
     /// The lifecycle entry (the conversation's initial state save).
     Creation,
@@ -109,14 +111,17 @@ pub enum ConversationEvent {
     },
 }
 
-/// Memory flow facts — the layered memory's lifecycle (archive, compaction,
-/// distillation, promotion), its management actions (edit, removal) and its
-/// failures.
+/// Memory facts — the memory lifecycle's core-known facts: archiving,
+/// management actions (edit, removal) and failures.
+///
+/// Implementation-level progress (how a memory implementation maintains
+/// its own layers) is not core vocabulary; implementations report such
+/// progress through their own observation face.
 #[non_exhaustive]
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(tag = "event", rename_all = "snake_case")]
 pub enum MemoryEvent {
-    /// A completed turn was archived into L1.
+    /// A completed turn was archived into the memory.
     TurnArchived {
         /// The conversation's identity.
         conversation_id: String,
@@ -125,34 +130,13 @@ pub enum MemoryEvent {
         /// The topic the turn was archived under.
         topic: String,
     },
-    /// L1 overflow was compacted into an L2 summary.
-    Compacted {
-        /// The conversation's identity.
-        conversation_id: String,
-        /// How many L1 entries were compacted.
-        count: usize,
-    },
-    /// L2 overflow was distilled into L3 knowledge.
-    Distilled {
-        /// The conversation's identity.
-        conversation_id: String,
-        /// How many L2 blocks were distilled.
-        count: usize,
-    },
-    /// L2 blocks were promoted into L3 at conversation end.
-    Promoted {
-        /// The conversation's identity.
-        conversation_id: String,
-        /// How many L2 blocks were promoted.
-        count: usize,
-    },
     /// One memory entry was corrected through the management face
     /// (content-free).
     Updated {
         /// The owning subject's id.
         subject_id: String,
-        /// Which kind of memory the entry is.
-        memory_type: crate::memory::MemoryType,
+        /// The partition the entry belongs to.
+        scope: MemoryScope,
         /// The entry's stable id.
         id: String,
     },
@@ -161,20 +145,21 @@ pub enum MemoryEvent {
     Removed {
         /// The owning subject's id.
         subject_id: String,
-        /// Which kind of memory the entries are.
-        memory_type: crate::memory::MemoryType,
+        /// The partition the entries belonged to.
+        scope: MemoryScope,
         /// The removed entries' stable ids.
         ids: Vec<String>,
     },
-    /// A memory-flow failure — visible, never silent; it does not abort
+    /// A memory failure — visible, never silent; it does not abort
     /// whatever emitted it.
-    FlowFailed {
-        /// Which stage of the background lifecycle failed.
-        stage: MemoryFlowStage,
+    Failed {
+        /// Which stage failed (implementation-defined; the framework does
+        /// not interpret it).
+        stage: String,
         /// Human-readable detail of the failure.
         detail: String,
         /// When in the lifecycle the failure happened.
-        moment: MemoryFlowFailedMoment,
+        moment: MemoryFailedMoment,
     },
 }
 
@@ -429,16 +414,16 @@ fn spawn_dispatcher(
 /// Clones share the same run attribution (background maintenance tasks
 /// carry the outlet with them).
 #[derive(Clone)]
-pub struct EventSink {
+pub(crate) struct EventSink {
     bus: EventBus,
     execution_id: u64,
     consumer: mpsc::Sender<TurnEvent>,
 }
 
 impl EventSink {
-    /// Assembles the outlet (framework-internal; exposed for tests and
-    /// custom orchestrators that must emit on an engine's behalf).
-    pub fn new(bus: EventBus, execution_id: u64, consumer: mpsc::Sender<TurnEvent>) -> Self {
+    /// Assembles the outlet (framework-internal: the run's spawn is the
+    /// sole construction site).
+    pub(crate) fn new(bus: EventBus, execution_id: u64, consumer: mpsc::Sender<TurnEvent>) -> Self {
         Self {
             bus,
             execution_id,
@@ -448,22 +433,73 @@ impl EventSink {
 
     /// Emits one Turn-family event: bus first, then delivery. Returns
     /// whether the consumer is still there.
-    pub async fn emit_turn(&self, event: TurnEvent) -> bool {
+    pub(crate) async fn emit_turn(&self, event: TurnEvent) -> bool {
         self.bus
             .emit_for_run(self.execution_id, SynonzEvent::Turn(event.clone()));
         self.consumer.send(event).await.is_ok()
     }
 
     /// Emits one memory fact: bus only (never on the product narrative).
-    pub fn emit_memory(&self, event: MemoryEvent) {
+    pub(crate) fn emit_memory(&self, event: MemoryEvent) {
         self.bus
             .emit_for_run(self.execution_id, SynonzEvent::Memory(event));
     }
 
-    /// Emits one conversation fact: bus only (never on the product
-    /// narrative).
-    pub fn emit_conversation(&self, event: ConversationEvent) {
-        self.bus
-            .emit_for_run(self.execution_id, SynonzEvent::Conversation(event));
+    /// The framework-internal fact outlet bound to this run.
+    pub(crate) fn outlet(&self) -> FactOutlet {
+        FactOutlet::for_run(self)
+    }
+}
+
+/// The framework's internal fact outlet: run-attributed while a run is in
+/// scope (the engine's per-turn maintenance), bus-only for run-external
+/// facts (conversation-end maintenance and the runtime's own facts).
+///
+/// The engine's contexts carry it so implementation-side hooks report
+/// facts through one centralized path; implementations never hold an
+/// event sink.
+#[derive(Clone)]
+pub(crate) struct FactOutlet {
+    bus: EventBus,
+    execution_id: Option<u64>,
+}
+
+impl FactOutlet {
+    /// The outlet bound to one run.
+    pub(crate) fn for_run(sink: &EventSink) -> Self {
+        Self {
+            bus: sink.bus.clone(),
+            execution_id: Some(sink.execution_id),
+        }
+    }
+
+    /// The run-external outlet (facts carry no execution attribution).
+    pub(crate) fn bus_only(bus: &EventBus) -> Self {
+        Self {
+            bus: bus.clone(),
+            execution_id: None,
+        }
+    }
+
+    /// Emits one Turn-family fact (bus only).
+    pub(crate) fn emit_turn(&self, event: TurnEvent) {
+        self.emit(SynonzEvent::Turn(event));
+    }
+
+    /// Emits one memory fact (bus only).
+    pub(crate) fn emit_memory(&self, event: MemoryEvent) {
+        self.emit(SynonzEvent::Memory(event));
+    }
+
+    /// Emits one conversation fact (bus only).
+    pub(crate) fn emit_conversation(&self, event: ConversationEvent) {
+        self.emit(SynonzEvent::Conversation(event));
+    }
+
+    fn emit(&self, event: SynonzEvent) {
+        match self.execution_id {
+            Some(execution_id) => self.bus.emit_for_run(execution_id, event),
+            None => self.bus.emit(event),
+        }
     }
 }

@@ -14,8 +14,8 @@ use serde::de::DeserializeOwned;
 use serde_json::json;
 use synonz::{
     AgentError, AgentInput, AgentOutput, CallId, CallPurpose, CancelReason, ContentBlock,
-    ConversationEndReason, ConversationEvent, LifecycleEvent, MemoryEvent, MemoryFlowFailedMoment,
-    MemoryFlowStage, Message, ModelDelta, ModelError, ModelEvent, Role, SynonzEvent, TokenUsage,
+    ConversationEndReason, ConversationEvent, LifecycleEvent, MemoryEvent, MemoryFailedMoment,
+    MemoryScope, Message, ModelDelta, ModelError, ModelEvent, Role, SynonzEvent, TokenUsage,
     ToolCall, ToolContent, ToolEvent, ToolResult, TurnEvent,
 };
 
@@ -130,22 +130,20 @@ fn bus_families_roundtrip() {
             subject_id: "user-1".into(),
             topic: "weather".into(),
         }),
-        SynonzEvent::Memory(MemoryEvent::Compacted {
-            conversation_id: "conv-1".into(),
-            count: 3,
+        SynonzEvent::Memory(MemoryEvent::Updated {
+            subject_id: "user-1".into(),
+            scope: MemoryScope::new("project:abc"),
+            id: "entry-1".into(),
         }),
-        SynonzEvent::Memory(MemoryEvent::Distilled {
-            conversation_id: "conv-1".into(),
-            count: 2,
+        SynonzEvent::Memory(MemoryEvent::Removed {
+            subject_id: "user-1".into(),
+            scope: MemoryScope::new("project:abc"),
+            ids: vec!["entry-1".into(), "entry-2".into()],
         }),
-        SynonzEvent::Memory(MemoryEvent::Promoted {
-            conversation_id: "conv-1".into(),
-            count: 4,
-        }),
-        SynonzEvent::Memory(MemoryEvent::FlowFailed {
-            stage: MemoryFlowStage::Summarize,
+        SynonzEvent::Memory(MemoryEvent::Failed {
+            stage: "summarize".into(),
             detail: "model call failed".into(),
-            moment: MemoryFlowFailedMoment::Background,
+            moment: MemoryFailedMoment::Background,
         }),
     ];
     for event in &events {
@@ -372,20 +370,55 @@ fn conversation_ended_event_snapshot() {
 }
 
 #[test]
-fn memory_flow_failed_event_snapshot() {
-    let event = SynonzEvent::Memory(MemoryEvent::FlowFailed {
-        stage: MemoryFlowStage::Archive,
+fn memory_failed_event_snapshot() {
+    let event = SynonzEvent::Memory(MemoryEvent::Failed {
+        stage: "archive".into(),
         detail: "l1 append failed".into(),
-        moment: MemoryFlowFailedMoment::AfterTurn,
+        moment: MemoryFailedMoment::AfterTurn,
     });
     assert_eq!(
         serde_json::to_value(&event).unwrap(),
         json!({
             "type": "memory",
-            "event": "flow_failed",
+            "event": "failed",
             "stage": "archive",
             "detail": "l1 append failed",
             "moment": "after_turn",
+        })
+    );
+}
+
+#[test]
+fn memory_management_events_carry_scope_snapshots() {
+    let updated = SynonzEvent::Memory(MemoryEvent::Updated {
+        subject_id: "user-1".into(),
+        scope: MemoryScope::new("project:abc"),
+        id: "entry-1".into(),
+    });
+    assert_eq!(
+        serde_json::to_value(&updated).unwrap(),
+        json!({
+            "type": "memory",
+            "event": "updated",
+            "subject_id": "user-1",
+            "scope": "project:abc",
+            "id": "entry-1",
+        })
+    );
+
+    let removed = SynonzEvent::Memory(MemoryEvent::Removed {
+        subject_id: "user-1".into(),
+        scope: MemoryScope::new("user:u1"),
+        ids: vec!["a".into(), "b".into()],
+    });
+    assert_eq!(
+        serde_json::to_value(&removed).unwrap(),
+        json!({
+            "type": "memory",
+            "event": "removed",
+            "subject_id": "user-1",
+            "scope": "user:u1",
+            "ids": ["a", "b"],
         })
     );
 }

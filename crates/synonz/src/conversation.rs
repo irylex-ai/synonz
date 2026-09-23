@@ -20,9 +20,8 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::bus::{
-    ConversationEndReason, ConversationEvent, MemoryEvent, MemoryFlowFailedMoment, SynonzEvent,
+    ConversationEndReason, ConversationEvent, MemoryEvent, MemoryFailedMoment, SynonzEvent,
 };
-use crate::event::MemoryFlowStage;
 use crate::io::{AgentInput, AgentOutput};
 use crate::message::Message;
 use crate::runtime::SynonzRuntime;
@@ -233,9 +232,12 @@ pub enum TurnOutcome {
 pub struct Turn {
     /// The user input that started this turn.
     pub input: AgentInput,
-    /// All canonical messages of this turn's run, including the user input
-    /// message and any tool round-trips — the context replayed into the
-    /// model on later turns.
+    /// All canonical messages of this turn's run: the complete
+    /// model-visible frame the run started from (the current turn's user
+    /// message included) followed by the turn's subsequent messages
+    /// (assistant responses and tool round-trips). The agent's system
+    /// message is configuration, not conversation truth, and is not
+    /// recorded.
     pub messages: Vec<Message>,
     /// How the turn ended (success carries the output snapshot; failures
     /// and cancellations carry their reason — the full audit trail).
@@ -385,10 +387,10 @@ impl Conversation {
         if let Err(error) = runtime.conversation_store().save(self.state()) {
             runtime
                 .event_bus()
-                .emit(SynonzEvent::Memory(MemoryEvent::FlowFailed {
-                    stage: MemoryFlowStage::Archive,
+                .emit(SynonzEvent::Memory(MemoryEvent::Failed {
+                    stage: "archive".into(),
                     detail: format!("conversation initial save failed: {error}"),
-                    moment: MemoryFlowFailedMoment::Creation,
+                    moment: MemoryFailedMoment::Creation,
                 }));
         }
         runtime
@@ -457,10 +459,10 @@ impl Conversation {
         if let Err(error) = runtime.conversation_store().save(self.state()) {
             runtime
                 .event_bus()
-                .emit(SynonzEvent::Memory(MemoryEvent::FlowFailed {
-                    stage: MemoryFlowStage::Archive,
+                .emit(SynonzEvent::Memory(MemoryEvent::Failed {
+                    stage: "archive".into(),
                     detail: format!("conversation end save failed: {error}"),
-                    moment: MemoryFlowFailedMoment::AtConversationEnd,
+                    moment: MemoryFailedMoment::AtConversationEnd,
                 }));
         }
         runtime
@@ -478,13 +480,40 @@ impl Conversation {
     }
 
     /// The full flattened message history (all turns' messages in order) —
-    /// the context replayed into the model on the next turn.
+    /// the recorded record of what the model saw, turn by turn.
     pub fn messages(&self) -> Vec<Message> {
         let turns = self.turns.lock().unwrap_or_else(|p| p.into_inner());
         turns
             .iter()
             .flat_map(|turn| turn.messages.clone())
             .collect()
+    }
+
+    /// The recent successful turns as plain conversation messages, oldest
+    /// first: each completed turn contributes its original user input and
+    /// its final assistant answer. Failed and cancelled turns are filtered
+    /// out.
+    ///
+    /// This is the truth-domain history the framework hands to read-side
+    /// preprocessing (input rewrite, topic detection).
+    pub(crate) fn recent_successful_messages(&self, turns: usize) -> Vec<Message> {
+        if turns == 0 {
+            return Vec::new();
+        }
+        let recorded = self.turns.lock().unwrap_or_else(|p| p.into_inner());
+        let successful: Vec<&Turn> = recorded
+            .iter()
+            .filter(|turn| turn.output().is_some())
+            .collect();
+        let start = successful.len().saturating_sub(turns);
+        let mut messages = Vec::with_capacity((successful.len() - start) * 2);
+        for turn in &successful[start..] {
+            messages.push(Message::user(turn.input.text.clone()));
+            if let Some(output) = turn.output() {
+                messages.push(output.message.clone());
+            }
+        }
+        messages
     }
 
     /// The recorded turns, in order.

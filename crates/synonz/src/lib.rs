@@ -17,6 +17,22 @@
 //! [`CancellationToken`] is re-exported here as the framework's cancellation
 //! currency.
 //!
+//! # Memory
+//!
+//! The memory subsystem is contract-first: the framework defines item
+//! management ([`Memory`]), context assembly ([`MemoryContextAssembler`]),
+//! the write-phase pipeline ([`MemoryPipeline`]), and the extension
+//! factories ([`MemoryProvider`] / [`RewriterProvider`] /
+//! [`TopicDetectorProvider`]).
+//!
+//! The bundled in-process provider is the zero-configuration default: it
+//! keeps a bounded per-conversation window of recent messages (multi-turn
+//! runs work with no setup), but it holds no management-grade entries —
+//! [`SynonzRuntime::memory`] lists nothing and its write verbs are no-ops —
+//! and nothing survives the process. Register a provider (the official
+//! `synonz-layered-memory` component or your own) for management,
+//! cross-conversation memory, and storage.
+//!
 //! All commonly used types are re-exported at the crate root.
 
 pub mod agent;
@@ -42,13 +58,13 @@ pub mod mock;
 
 pub use agent::{Agent, AgentBuilder, DEFAULT_MAX_ROUNDS, Execution};
 pub use bus::{
-    ConversationEndReason, ConversationEvent, EventBus, EventSink, MemoryEvent,
-    MemoryFlowFailedMoment, Observer, ObserverContext, SynonzEvent,
+    ConversationEndReason, ConversationEvent, EventBus, MemoryEvent, MemoryFailedMoment, Observer,
+    ObserverContext, SynonzEvent,
 };
 pub use context::{
-    AssemblyFailure, Context, ContextAssembler, ContextAssemblerInput, ContextAssemblerOutput,
-    ConversationTopicDetector, MemoryDistiller, MemoryFlowError, MemorySummarizer, TopicDecision,
-    TurnInputRewriter,
+    MemoryContextAssembleInput, MemoryContextAssembleOutput, MemoryContextAssembler, MemoryFailure,
+    MemoryPipeline, MemoryProvider, PipelineConversationContext, PipelineTurnContext, RewriteInput,
+    RewriterProvider, TopicDetectInput, TopicDetector, TopicDetectorProvider, TurnInputRewriter,
 };
 pub use conversation::{
     Conversation, ConversationCursor, ConversationPage, ConversationQuery, ConversationState,
@@ -56,22 +72,20 @@ pub use conversation::{
 };
 pub use error::{AgentError, ModelError};
 pub use event::{
-    CallPurpose, CancelReason, ExecutionEvent, LifecycleEvent, MemoryFlowStage, ModelDelta,
-    ModelEvent, TokenUsage, ToolEvent, TurnEvent,
+    CallPurpose, CancelReason, ExecutionEvent, LifecycleEvent, ModelDelta, ModelEvent, TokenUsage,
+    ToolEvent, TurnEvent,
 };
 pub use io::{AgentInput, AgentOutput};
 pub use memory::{
-    L1Entry, L2Entry, L3Entry, L3Identity, Memory, MemoryCursor, MemoryForgetFailure,
-    MemoryForgetResult, MemoryItem, MemoryL1Store, MemoryL2Store, MemoryL3Store, MemoryListCursor,
-    MemoryPage, MemoryQuery, MemoryReader, MemorySource, MemoryStoreError, MemoryStoreQuery,
-    MemoryType, Topic,
+    Memory, MemoryCursor, MemoryForgetFailure, MemoryForgetResult, MemoryItem, MemoryListCursor,
+    MemoryPage, MemoryQuery, MemoryReader, MemoryScope, MemorySource, MemoryStoreError, Topic,
 };
 pub use message::{
     CallId, CanonicalViolation, ContentBlock, Message, Role, ToolCall, ToolContent, ToolResult,
     validate_conversation,
 };
 pub use model::{Model, ModelParams, ModelRequest, ModelStream, ModelStreamItem, complete};
-pub use runtime::{ConversationTaskSpawner, RuntimeBuilder, SynonzRuntime};
+pub use runtime::{RuntimeBuilder, SynonzRuntime};
 pub use scheduler::{OverlapPolicy, Schedule, Scheduler, TaskHandle, TaskInfo};
 pub use subject::{Subject, SubjectType};
 pub use tokio_util::sync::CancellationToken;

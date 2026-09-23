@@ -22,6 +22,24 @@ fn env() -> (SynonzRuntime, Subject) {
     )
 }
 
+/// Records memory archive facts for assertions.
+#[derive(Default, Clone)]
+struct ArchiveRecorder {
+    archived: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+}
+
+impl synonz::Observer for ArchiveRecorder {
+    fn on_event(&self, _ctx: &synonz::ObserverContext, event: &synonz::SynonzEvent) {
+        if let synonz::SynonzEvent::Memory(synonz::MemoryEvent::TurnArchived {
+            conversation_id,
+            ..
+        }) = event
+        {
+            self.archived.lock().unwrap().push(conversation_id.clone());
+        }
+    }
+}
+
 /// A model with one scripted round per call: first round calls `weather`,
 /// later rounds answer directly.
 fn weather_model(rounds: usize) -> MockModel {
@@ -178,7 +196,11 @@ async fn failed_turns_enter_the_history_marked() {
             })
         }
     }
-    let (runtime, subject) = env();
+    let archive_recorder = ArchiveRecorder::default();
+    let runtime = SynonzRuntime::builder()
+        .observer(archive_recorder.clone())
+        .build();
+    let subject = Subject::of(SubjectType::User, "test-user");
     let agent = Agent::builder()
         .runtime(&runtime)
         .model(FailingModel)
@@ -199,14 +221,13 @@ async fn failed_turns_enter_the_history_marked() {
         turns[0].outcome,
         TurnOutcome::Failed(synonz::AgentError::Model(_))
     ));
-    // The memory layers are not fed from failed turns (only success turns
-    // write L1).
-    assert_eq!(
-        runtime
-            .memory()
-            .l1_len_for_tests(&subject, conv.id())
-            .expect("l1 len"),
-        0
+    // Failed turns never reach the memory's write phase: no archive fact is
+    // emitted for them.
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    let archived = archive_recorder.archived.lock().unwrap();
+    assert!(
+        archived.is_empty(),
+        "a failed turn must not be archived into memory: {archived:?}"
     );
 }
 

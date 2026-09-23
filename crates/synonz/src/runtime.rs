@@ -22,17 +22,18 @@ use std::time::Duration;
 use tokio::runtime::Handle;
 
 use crate::bus::{
-    ConversationEndReason, EventBus, MemoryEvent, MemoryFlowFailedMoment, SynonzEvent,
+    ConversationEndReason, EventBus, FactOutlet, MemoryEvent, MemoryFailedMoment, SynonzEvent,
+};
+use crate::context::{
+    Context, MemoryContextAssembler, MemoryPipeline, MemoryProvider, PipelineConversationContext,
+    TopicDetector, TurnInputRewriter, narrate_model,
 };
 use crate::conversation::{
     Conversation, ConversationPage, ConversationQuery, ConversationStore, ConversationStoreError,
 };
-use crate::event::MemoryFlowStage;
-use crate::inprocess::{
-    InProcessConversationStore, InProcessMemoryL1Store, InProcessMemoryL2Store,
-    InProcessMemoryL3Store,
-};
-use crate::memory::{Memory, MemoryL1Store, MemoryL2Store, MemoryL3Store, MemoryLayerStore};
+use crate::inprocess::{InProcessConversationStore, InProcessMemoryProvider};
+use crate::memory::Memory;
+use crate::model::Model;
 use crate::scheduler::{OverlapPolicy, Schedule, Scheduler, TaskInfo};
 
 /// The per-conversation drain budget: how long conversation-end teardown
@@ -60,9 +61,7 @@ fn monitor_tick(idle_timeout: Duration) -> Duration {
 #[derive(Default)]
 pub struct RuntimeBuilder {
     conversation_store: Option<Arc<dyn ConversationStore>>,
-    memory_l1_store: Option<Arc<dyn MemoryL1Store>>,
-    memory_l2_store: Option<Arc<dyn MemoryL2Store>>,
-    memory_l3_store: Option<Arc<dyn MemoryL3Store>>,
+    memory_provider: Option<Arc<dyn MemoryProvider>>,
     observers: Vec<Arc<dyn crate::bus::Observer>>,
     conversation_idle_timeout: Option<Duration>,
     executor: Option<Handle>,
@@ -80,22 +79,20 @@ impl RuntimeBuilder {
         self
     }
 
-    /// Sets the L1 working memory store (default: built-in in-process
-    /// memory — the freshness layer expects memory-grade latency).
-    pub fn memory_l1_store(mut self, store: impl MemoryL1Store) -> Self {
-        self.memory_l1_store = Some(Arc::new(store));
-        self
-    }
-
-    /// Sets the L2 summary store (default: in-process).
-    pub fn memory_l2_store(mut self, store: impl MemoryL2Store) -> Self {
-        self.memory_l2_store = Some(Arc::new(store));
-        self
-    }
-
-    /// Sets the L3 knowledge store (default: in-process).
-    pub fn memory_l3_store(mut self, store: impl MemoryL3Store) -> Self {
-        self.memory_l3_store = Some(Arc::new(store));
+    /// Sets the memory provider: the capability factory behind
+    /// `runtime.memory()` and the context engine's read and write faces.
+    ///
+    /// Default: the framework's bundled in-process provider — zero
+    /// configuration and non-layered. It keeps a **bounded in-process
+    /// window** of each conversation's recent messages (written by the
+    /// write phase on completed turns, replayed as the run's message
+    /// frame), so multi-turn runs work with no setup. It holds no
+    /// management-grade entries: `runtime.memory()` lists nothing and its
+    /// write verbs are no-ops, and nothing survives the process. Register
+    /// a provider (for example `synonz-layered-memory`) for management,
+    /// cross-conversation memory, and persistence.
+    pub fn memory_provider(mut self, provider: impl MemoryProvider) -> Self {
+        self.memory_provider = Some(Arc::new(provider));
         self
     }
 
@@ -152,21 +149,17 @@ impl RuntimeBuilder {
             );
         }
         let event_bus = EventBus::new(self.observers);
+        let provider: Arc<dyn MemoryProvider> = self
+            .memory_provider
+            .unwrap_or_else(|| Arc::new(InProcessMemoryProvider::new()));
         let inner = Arc::new(RuntimeInner {
             conversation_store: self
                 .conversation_store
                 .unwrap_or_else(|| Arc::new(InProcessConversationStore::default())),
-            memory: Memory::new(
-                MemoryLayerStore::new(
-                    self.memory_l1_store
-                        .unwrap_or_else(|| Arc::new(InProcessMemoryL1Store::default())),
-                    self.memory_l2_store
-                        .unwrap_or_else(|| Arc::new(InProcessMemoryL2Store::default())),
-                    self.memory_l3_store
-                        .unwrap_or_else(|| Arc::new(InProcessMemoryL3Store::default())),
-                ),
-                event_bus.clone(),
-            ),
+            memory: provider.memory(event_bus.clone()),
+            memory_assembler: provider.context_assembler(),
+            memory_pipeline: provider.pipeline(),
+            memory_model: provider.model(),
             event_bus,
             conversations: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
             conversation_idle_timeout: self.conversation_idle_timeout,
@@ -207,7 +200,7 @@ pub(crate) type ConversationTable =
 /// entry until the conversation-end drain. Clones share the conversation
 /// scope.
 #[derive(Clone)]
-pub struct ConversationTaskSpawner {
+pub(crate) struct ConversationTaskSpawner {
     table: ConversationTable,
     conversation_id: String,
 }
@@ -227,7 +220,7 @@ impl ConversationTaskSpawner {
     ///
     /// A conversation the runtime does not own has no table entry; the
     /// task then runs untracked.
-    pub fn spawn(&self, task: impl std::future::Future<Output = ()> + Send + 'static) {
+    pub(crate) fn spawn(&self, task: impl std::future::Future<Output = ()> + Send + 'static) {
         let handle = tokio::spawn(task);
         let mut table = self
             .table
@@ -242,10 +235,13 @@ impl ConversationTaskSpawner {
 /// The runtime's shared state (one `Arc` per runtime; clones are cheap).
 struct RuntimeInner {
     conversation_store: Arc<dyn ConversationStore>,
-    /// The application face of the layered memory; the crate-internal
-    /// mechanism (the three storage slots) lives behind it (assembled at
-    /// build time; the runtime is its single authority).
-    memory: Memory,
+    /// The memory capability: the management face (what `runtime.memory()`
+    /// exposes), the read face, the write face, and the provider's optional
+    /// context-management model — resolved once at build time.
+    memory: Arc<dyn Memory>,
+    memory_assembler: Arc<dyn MemoryContextAssembler>,
+    memory_pipeline: Arc<dyn MemoryPipeline>,
+    memory_model: Option<Arc<dyn Model>>,
     event_bus: EventBus,
     /// The conversation table: owned conversations and their background
     /// maintenance tasks (the Monitor and shutdown both consume it).
@@ -312,19 +308,40 @@ impl SynonzRuntime {
         Arc::clone(&self.inner.conversation_store)
     }
 
-    /// The application face of the layered memory: item management
-    /// (view, correct, forget).
+    /// The application face of the memory: item management (view, correct,
+    /// forget).
     ///
-    /// Clones share the same crate-internal mechanism; the framework's
-    /// own orchestration uses that mechanism directly. Nobody constructs
-    /// a `Memory` by hand — the runtime is the object's single authority.
-    pub fn memory(&self) -> Memory {
-        self.inner.memory.clone()
+    /// The face belongs to the registered memory provider. With the
+    /// bundled in-process default it holds no management-grade entries —
+    /// `list` returns empty, `get` returns `None`, `edit` reports
+    /// `EntryNotFound`, and the forgets report nothing removed (the
+    /// default keeps only a bounded conversation window for multi-turn
+    /// runs). Register a provider for a working management face; every
+    /// clone of this handle shares the same underlying implementation.
+    pub fn memory(&self) -> Arc<dyn Memory> {
+        Arc::clone(&self.inner.memory)
     }
 
-    /// The crate-internal memory mechanism (engine / maintenance access).
-    pub(crate) fn memory_layers(&self) -> &MemoryLayerStore {
-        self.inner.memory.layers()
+    /// Builds the context engine for one agent (framework-internal): the
+    /// runtime's memory capability plus the agent's optional read-side
+    /// extensions.
+    pub(crate) fn context_for(
+        &self,
+        rewriter: Option<Arc<dyn TurnInputRewriter>>,
+        rewriter_model: Option<Arc<dyn Model>>,
+        detector: Option<Arc<dyn TopicDetector>>,
+        detector_model: Option<Arc<dyn Model>>,
+    ) -> Context {
+        Context::new(
+            Arc::clone(&self.inner.memory),
+            Arc::clone(&self.inner.memory_assembler),
+            Arc::clone(&self.inner.memory_pipeline),
+            self.inner.memory_model.clone(),
+            rewriter,
+            rewriter_model,
+            detector,
+            detector_model,
+        )
     }
 
     /// The event bus (the resident dual-lane dispatch facility).
@@ -411,16 +428,15 @@ impl SynonzRuntime {
     }
 
     /// The conversation-end teardown (the system's structural behavior):
-    /// drains the conversation's background maintenance tasks, then
-    /// mechanically promotes all L2 blocks into L3 (no model call, no
-    /// strategy). Failures surface as `FlowFailed { moment:
-    /// AtConversationEnd }` memory facts; success surfaces as `Promoted`.
+    /// drains the conversation's background maintenance tasks, then calls
+    /// the pipeline's finalize hook. Failures surface as `Failed { moment:
+    /// AtConversationEnd }` memory facts.
     pub(crate) async fn finalize_conversation(&self, conversation: &Conversation) {
         // 1. Drain: the conversation's in-flight maintenance completes
-        //    before the promotion reads L2 — no unfinished blocks. The
-        //    drain is bounded per conversation: a stuck task delays
-        //    teardown by at most the configured budget; stuck tasks and
-        //    panicked tasks surface as FlowFailed facts.
+        //    before the finalize hook runs — no unfinished work. The drain
+        //    is bounded per conversation: a stuck task delays teardown by
+        //    at most the configured budget; stuck tasks and panicked tasks
+        //    surface as Failed facts.
         let entry = self
             .inner
             .conversations
@@ -443,10 +459,10 @@ impl SynonzRuntime {
                     Ok(Err(join_error)) => {
                         self.inner
                             .event_bus
-                            .emit(SynonzEvent::Memory(MemoryEvent::FlowFailed {
-                                stage: MemoryFlowStage::Drain,
+                            .emit(SynonzEvent::Memory(MemoryEvent::Failed {
+                                stage: "drain".into(),
                                 detail: format!("maintenance task failed: {join_error}"),
-                                moment: MemoryFlowFailedMoment::AtConversationEnd,
+                                moment: MemoryFailedMoment::AtConversationEnd,
                             }));
                     }
                     Err(_) => timed_out += 1,
@@ -455,83 +471,41 @@ impl SynonzRuntime {
             if timed_out > 0 {
                 self.inner
                     .event_bus
-                    .emit(SynonzEvent::Memory(MemoryEvent::FlowFailed {
-                        stage: MemoryFlowStage::Drain,
+                    .emit(SynonzEvent::Memory(MemoryEvent::Failed {
+                        stage: "drain".into(),
                         detail: format!(
                             "drain timed out: {timed_out} of {total} maintenance task(s) still running"
                         ),
-                        moment: MemoryFlowFailedMoment::AtConversationEnd,
+                        moment: MemoryFailedMoment::AtConversationEnd,
                     }));
             }
         }
 
-        // 2. Mechanical promotion: every L2 block becomes L3 knowledge
-        //    under the conversation's topic. Concurrency discipline
-        //    (ADR-0020): each source is claimed by id before promotion —
-        //    entries forgotten in the meantime are skipped, never
-        //    resurrected.
-        let subject = conversation.subject();
-        let memory = self.inner.memory.layers();
-        let blocks = match memory.l2_read(subject, conversation.id()) {
-            Ok(blocks) => blocks,
-            Err(error) => {
-                self.inner
-                    .event_bus
-                    .emit(SynonzEvent::Memory(MemoryEvent::FlowFailed {
-                        stage: MemoryFlowStage::Distill,
-                        detail: format!("promotion read: {error}"),
-                        moment: MemoryFlowFailedMoment::AtConversationEnd,
-                    }));
-                return;
-            }
-        };
-        if blocks.is_empty() {
-            return;
-        }
+        // 2. The finalize hook: the conversation's last write-phase step
+        //    (an implementation's batch flush, for example). At
+        //    conversation end no agent is in scope, so the hook's model is
+        //    the provider's configured context-management model.
         let topic = conversation.topic().unwrap_or_default();
-        let mut promoted = 0usize;
-        for block in blocks {
-            match memory.l2_remove(subject, &block.id) {
-                Ok(true) => {}
-                Ok(false) => continue,
-                Err(error) => {
-                    self.inner
-                        .event_bus
-                        .emit(SynonzEvent::Memory(MemoryEvent::FlowFailed {
-                            stage: MemoryFlowStage::Distill,
-                            detail: format!("promotion claim: {error}"),
-                            moment: MemoryFlowFailedMoment::AtConversationEnd,
-                        }));
-                    return;
-                }
-            }
-            let entry = crate::memory::L3Entry::new(
-                crate::memory::L3Identity {
-                    subject_id: subject.to_string(),
-                    conversation_id: block.conversation_id,
-                    topic: topic.clone(),
-                },
-                block.content,
-            );
-            if let Err(error) = memory.l3_upsert(subject, entry) {
-                self.inner
-                    .event_bus
-                    .emit(SynonzEvent::Memory(MemoryEvent::FlowFailed {
-                        stage: MemoryFlowStage::Distill,
-                        detail: format!("promotion upsert: {error}"),
-                        moment: MemoryFlowFailedMoment::AtConversationEnd,
-                    }));
-            } else {
-                promoted += 1;
-            }
-        }
-        if promoted > 0 {
-            self.inner
-                .event_bus
-                .emit(SynonzEvent::Memory(MemoryEvent::Promoted {
-                    conversation_id: conversation.id().to_string(),
-                    count: promoted,
-                }));
+        let outlet = FactOutlet::bus_only(self.event_bus());
+        let model = self
+            .inner
+            .memory_model
+            .clone()
+            .map(|inner| narrate_model(inner, &outlet));
+        let ctx = PipelineConversationContext::new(
+            conversation,
+            &topic,
+            self.inner.memory.reader(),
+            model,
+            ConversationTaskSpawner::new(self, conversation.id()),
+            outlet.clone(),
+        );
+        if let Err(failure) = self.inner.memory_pipeline.finalize_conversation(&ctx).await {
+            outlet.emit_memory(MemoryEvent::Failed {
+                stage: failure.stage,
+                detail: failure.detail,
+                moment: MemoryFailedMoment::AtConversationEnd,
+            });
         }
     }
 
@@ -618,7 +592,7 @@ mod tests {
 
     impl Observer for FactRecorder {
         fn on_event(&self, _ctx: &ObserverContext, event: &SynonzEvent) {
-            if let SynonzEvent::Memory(MemoryEvent::FlowFailed { detail, .. }) = event {
+            if let SynonzEvent::Memory(MemoryEvent::Failed { detail, .. }) = event {
                 self.facts.lock().unwrap().push(detail.clone());
             }
         }

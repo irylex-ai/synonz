@@ -68,7 +68,7 @@ use tokio::sync::mpsc;
 use crate::CancellationToken;
 use crate::bus::EventSink;
 use crate::cancel::{CancelCore, CancelHandle, CancelOutcome};
-use crate::context::{Context, ContextAssemblerInput};
+use crate::context::{Context, HISTORY_TURNS, RewriterProvider, TopicDetectorProvider};
 use crate::conversation::{Conversation, Turn, TurnInput};
 use crate::error::{AgentError, ModelError};
 use crate::event::{
@@ -112,7 +112,8 @@ pub struct AgentBuilder {
     tools: Vec<Arc<dyn Tool>>,
     system_prompt: Option<String>,
     max_rounds: Option<u32>,
-    context: Option<Arc<Context>>,
+    rewriter_provider: Option<Arc<dyn RewriterProvider>>,
+    topic_detector_provider: Option<Arc<dyn TopicDetectorProvider>>,
 }
 
 impl AgentBuilder {
@@ -131,13 +132,21 @@ impl AgentBuilder {
         self
     }
 
-    /// Sets the state engine (default: [`Context`] fully
-    /// defaulted). The engine is the agent's context — its materialization
-    /// (input preprocessing + assembly) and maintenance
-    /// (archive/compaction/distillation) strategy; each agent carries its
-    /// own (multi-agent strategy differences are expressed here).
-    pub fn context(mut self, context: Context) -> Self {
-        self.context = Some(Arc::new(context));
+    /// Sets the read-side preprocessing provider (optional; default: no
+    /// rewrite — the turn input reaches assembly verbatim). The provider's
+    /// optional model is resolved at use time as *provider model, falling
+    /// back to the agent model*.
+    pub fn rewriter_provider(mut self, provider: impl RewriterProvider) -> Self {
+        self.rewriter_provider = Some(Arc::new(provider));
+        self
+    }
+
+    /// Sets the topic detection provider (optional; default: no detection —
+    /// the conversation topic stays as it is). The provider's optional
+    /// model is resolved at use time as *provider model, falling back to
+    /// the agent model*.
+    pub fn topic_detector_provider(mut self, provider: impl TopicDetectorProvider) -> Self {
+        self.topic_detector_provider = Some(Arc::new(provider));
         self
     }
 
@@ -218,6 +227,26 @@ impl AgentBuilder {
             .ok_or_else(|| AgentError::InvalidConfiguration {
                 message: "a runtime is required".into(),
             })?;
+        // The context engine is crate-internal: the runtime contributes the
+        // memory capability, the agent its optional read-side extensions.
+        let rewriter = self
+            .rewriter_provider
+            .as_ref()
+            .map(|provider| provider.turn_input_rewriter());
+        let rewriter_model = self
+            .rewriter_provider
+            .as_ref()
+            .and_then(|provider| provider.model());
+        let detector = self
+            .topic_detector_provider
+            .as_ref()
+            .map(|provider| provider.topic_detector());
+        let detector_model = self
+            .topic_detector_provider
+            .as_ref()
+            .and_then(|provider| provider.model());
+        let context =
+            Arc::new(runtime.context_for(rewriter, rewriter_model, detector, detector_model));
         Ok(Agent {
             runtime,
             model,
@@ -225,9 +254,7 @@ impl AgentBuilder {
             system_prompt: self.system_prompt,
             max_rounds: self.max_rounds.unwrap_or(DEFAULT_MAX_ROUNDS),
             default_timeout: None,
-            context: self
-                .context
-                .unwrap_or_else(|| Arc::new(crate::context::Context::new())),
+            context,
         })
     }
 }
@@ -673,43 +700,51 @@ impl AgentLoopTask {
             }))
             .await;
 
-        // Moment 1: materialize the state (the engine's assembly). Memory
-        // reads that fail degrade the background visibly — the run
-        // continues with the layers that succeeded. (The failures are bus
-        // facts: the turn's frame is not built yet; a consumer gone at
-        // this point is caught below.)
-        let memory = self.runtime.memory_layers();
+        // The truth-domain history (recent successful turns): the material
+        // the read-side preprocessing and the topic detector receive. It is
+        // captured before this turn enters the archive.
+        let history = self.conversation.recent_successful_messages(HISTORY_TURNS);
+
+        // Moment 1: materialize the state (the engine's assembly). Failures
+        // degrade the frame visibly (reported as memory facts) — the run
+        // continues with what succeeded. (The turn's frame is not built
+        // yet; a consumer gone at this point is caught below.)
         let topic = self.conversation.topic().unwrap_or_default();
+        let outlet = sink.outlet();
         let assembled = self
             .context
-            .assemble(ContextAssemblerInput::new(
-                memory.reader(self.conversation.subject()),
+            .assemble(
                 self.conversation.subject(),
                 self.conversation.id(),
                 &topic,
                 &input.text,
-            ))
+                &history,
+                &self.model,
+                &outlet,
+            )
             .await;
-        for failure in &assembled.failures {
-            sink.emit_memory(crate::MemoryEvent::FlowFailed {
-                stage: failure.stage.clone(),
-                detail: failure.detail.clone(),
-                moment: crate::MemoryFlowFailedMoment::AfterTurn,
-            });
-        }
+        let frame = assembled.messages;
         let mut messages = Vec::new();
         if let Some(prompt) = &self.system_prompt {
             messages.push(Message::system(prompt.clone()));
         }
-        messages.extend(assembled.messages);
+        messages.extend(frame.iter().cloned());
         // Everything from here on belongs to this turn (all outcomes enter
-        // the truth archive, marked; only success feeds the memory layers).
+        // the truth archive, marked; only success feeds the memory).
         let base_len = messages.len();
-        messages.push(Message::user(input.text.clone()));
+
+        // The turn's archived messages: the complete model-visible frame
+        // followed by the turn's subsequent messages.
+        let archived = |responses: &[Message]| -> Vec<Message> {
+            let mut all = Vec::with_capacity(frame.len() + responses.len());
+            all.extend(frame.iter().cloned());
+            all.extend(responses.iter().cloned());
+            all
+        };
 
         // Truth-archive helper: every outcome enters the history, marked.
         // Persistence runs through the operating runtime — failures
-        // surface as memory-flow facts, never silent.
+        // surface as memory facts, never silent.
         macro_rules! record {
             ($turn:expr) => {{
                 self.conversation.push_turn($turn);
@@ -718,10 +753,10 @@ impl AgentLoopTask {
                     .conversation_store()
                     .save(self.conversation.state())
                 {
-                    sink.emit_memory(crate::MemoryEvent::FlowFailed {
-                        stage: crate::event::MemoryFlowStage::Archive,
+                    sink.emit_memory(crate::MemoryEvent::Failed {
+                        stage: "archive".into(),
                         detail: format!("conversation auto-save failed: {error}"),
-                        moment: crate::MemoryFlowFailedMoment::AfterTurn,
+                        moment: crate::MemoryFailedMoment::AfterTurn,
                     });
                 }
             }};
@@ -736,7 +771,7 @@ impl AgentLoopTask {
             let outcome = cancel_core.cancelled().await;
             record!(Turn::cancelled(
                 input.clone(),
-                messages[base_len..].to_vec(),
+                archived(&[]),
                 cancel_reason(outcome),
             ));
             let _ = sink.emit_turn(cancelled_event(outcome)).await;
@@ -750,7 +785,7 @@ impl AgentLoopTask {
                 if !sink.emit_turn($event).await {
                     record!(Turn::cancelled(
                         input.clone(),
-                        messages[base_len..].to_vec(),
+                        archived(&messages[base_len..]),
                         CancelReason::UserRequested,
                     ));
                     return; // consumer dropped; archive then stop narrating
@@ -779,7 +814,7 @@ impl AgentLoopTask {
                 outcome = cancel_core.cancelled() => {
                     record!(Turn::cancelled(
                         input.clone(),
-                        messages[base_len..].to_vec(),
+                        archived(&messages[base_len..]),
                         cancel_reason(outcome),
                     ));
                     emit!(cancelled_event(outcome));
@@ -791,7 +826,7 @@ impl AgentLoopTask {
                         let error = AgentError::Model(error);
                         record!(Turn::failed(
                             input.clone(),
-                            messages[base_len..].to_vec(),
+                            archived(&messages[base_len..]),
                             error.clone(),
                         ));
                         emit!(TurnEvent::Lifecycle(LifecycleEvent::Failed { error }));
@@ -806,7 +841,7 @@ impl AgentLoopTask {
                     outcome = cancel_core.cancelled() => {
                         record!(Turn::cancelled(
                             input.clone(),
-                            messages[base_len..].to_vec(),
+                            archived(&messages[base_len..]),
                             cancel_reason(outcome),
                         ));
                         emit!(cancelled_event(outcome));
@@ -824,7 +859,7 @@ impl AgentLoopTask {
                             let error = AgentError::Model(error);
                             record!(Turn::failed(
                                 input.clone(),
-                                messages[base_len..].to_vec(),
+                                archived(&messages[base_len..]),
                                 error.clone(),
                             ));
                             emit!(TurnEvent::Lifecycle(LifecycleEvent::Failed { error }));
@@ -837,7 +872,7 @@ impl AgentLoopTask {
                             });
                             record!(Turn::failed(
                                 input.clone(),
-                                messages[base_len..].to_vec(),
+                                archived(&messages[base_len..]),
                                 error.clone(),
                             ));
                             emit!(TurnEvent::Lifecycle(LifecycleEvent::Failed { error }));
@@ -862,41 +897,34 @@ impl AgentLoopTask {
 
             if calls.is_empty() {
                 // The final assistant message is part of the turn's record:
-                // the turn history and the engine payload (which archives
-                // L1) must replay it — a missing answer makes the model
-                // re-answer the previous question on the next turn.
+                // the turn's archived messages must replay it — a missing
+                // answer makes the model re-answer the previous question on
+                // the next turn.
                 messages.push(message.clone());
                 let output = AgentOutput::new(message, total_usage);
                 // Truth archive: the completed turn.
                 record!(Turn::completed(
                     input.clone(),
-                    messages[base_len..].to_vec(),
+                    archived(&messages[base_len..]),
                     output.clone(),
                 ));
-                // Moments 2 + 3: maintain the state on turn completion.
-                // The synchronous segment (topic + archive) runs before
-                // the terminal; the heavy curation runs in the background
-                // (tracked in the runtime's conversation table).
-                let memory = self.runtime.memory_layers();
-                let flow_errors = self
-                    .context
+                // Moment 2: maintain the state on turn completion. The
+                // synchronous segment (topic + archive + background
+                // derivation) runs before the terminal event; the derived
+                // maintenance work runs in the background (tracked in the
+                // runtime's conversation table).
+                self.context
                     .on_turn_completed(
                         &self.conversation,
                         &input.text,
-                        messages[base_len..].to_vec(),
-                        memory,
-                        Arc::clone(&self.model),
-                        sink.clone(),
+                        &frame,
+                        &messages[base_len..],
+                        &history,
+                        &self.model,
+                        &outlet,
                         ConversationTaskSpawner::new(&self.runtime, self.conversation.id()),
                     )
                     .await;
-                for error in flow_errors {
-                    sink.emit_memory(crate::MemoryEvent::FlowFailed {
-                        stage: error.stage,
-                        detail: error.detail,
-                        moment: crate::MemoryFlowFailedMoment::AfterTurn,
-                    });
-                }
                 emit!(TurnEvent::Lifecycle(LifecycleEvent::Completed {
                     response: output,
                 }));
@@ -918,7 +946,7 @@ impl AgentLoopTask {
                 Err(outcome) => {
                     record!(Turn::cancelled(
                         input.clone(),
-                        messages[base_len..].to_vec(),
+                        archived(&messages[base_len..]),
                         cancel_reason(outcome),
                     ));
                     emit!(cancelled_event(outcome));
@@ -935,7 +963,7 @@ impl AgentLoopTask {
 
         record!(Turn::failed(
             input.clone(),
-            messages[base_len..].to_vec(),
+            archived(&messages[base_len..]),
             AgentError::MaxRoundsExceeded,
         ));
         emit!(TurnEvent::Lifecycle(LifecycleEvent::Failed {

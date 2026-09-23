@@ -1,25 +1,33 @@
 //! The in-process default implementations: conversation persistence and
-//! the three memory layer stores (register nothing, get the in-process
-//! defaults).
+//! the framework's bundled memory provider.
 //!
-//! All are process-local (data does not survive restart), deterministic,
+//! Both are process-local (data does not survive restart), deterministic,
 //! and dependency-free — the bootstrap-quality defaults. Register real
-//! implementations (Redis, SQL, vector stores) on the runtime for
-//! persistence. The defaults are internal (pub(crate)): the public face
-//! is the contracts, not the bundled implementations.
+//! implementations (Redis, SQL, vector stores, the layered component) on
+//! the runtime for persistence and richer memory. The bundled types are
+//! internal: the public face is the contracts, not the bundled
+//! implementations.
 
 use std::collections::HashMap;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
+
+use futures::future::BoxFuture;
 
 use crate::Subject;
+use crate::bus::EventBus;
+use crate::context::{
+    MemoryContextAssembleInput, MemoryContextAssembleOutput, MemoryContextAssembler, MemoryFailure,
+    MemoryPipeline, MemoryProvider, PipelineConversationContext, PipelineTurnContext,
+};
 use crate::conversation::{
     ConversationCursor, ConversationPage, ConversationQuery, ConversationState, ConversationStore,
     ConversationStoreError, ConversationSummary,
 };
 use crate::memory::{
-    L1Entry, L2Entry, L3Entry, MemoryCursor, MemoryL1Store, MemoryL2Store, MemoryL3Store,
-    MemoryPage, MemoryStoreError, MemoryStoreQuery, Topic,
+    Memory, MemoryForgetResult, MemoryItem, MemoryListCursor, MemoryPage, MemoryQuery,
+    MemoryStoreError,
 };
+use crate::message::Message;
 
 // ─────────────────────── conversation persistence ───────────────────────
 
@@ -252,572 +260,216 @@ mod tests {
     }
 }
 
-// ───────────────────────── memory layer stores ──────────────────────────
+// ───────────────────────── the bundled memory provider ──────────────────
 
-/// In-process L1 working memory (default implementation): the recent
-/// turns of each conversation, verbatim, memory-grade latency.
+/// How many recent messages the bundled provider replays as the run's
+/// conversation window (a fixed floor: the bundled provider is a bootstrap
+/// default, not a tunable memory system).
+const DEFAULT_WINDOW_MESSAGES: usize = 40;
+
+/// The bundled provider's turn store: the recent messages of each
+/// conversation, process-local.
 #[derive(Default)]
-pub(crate) struct InProcessMemoryL1Store {
-    // subject identity string -> ordered L1 turns (entries carry their
-    // conversation).
-    l1: Mutex<HashMap<String, Vec<L1Entry>>>,
+struct InProcessTurnStore {
+    // (subject identity, conversation id) -> recent messages, oldest first.
+    turns: Mutex<HashMap<(String, String), Vec<Message>>>,
 }
 
-impl MemoryL1Store for InProcessMemoryL1Store {
-    fn append(
-        &self,
-        subject: &Subject,
-        conversation_id: &str,
-        topic: &Topic,
-        messages: Vec<crate::Message>,
-    ) -> Result<(), MemoryStoreError> {
-        let mut l1 = self.l1.lock().unwrap_or_else(|p| p.into_inner());
-        let entry = L1Entry::new(conversation_id, topic.to_string(), messages);
-        l1.entry(subject.to_string()).or_default().push(entry);
-        Ok(())
-    }
-
-    fn window(
-        &self,
-        subject: &Subject,
-        conversation_id: &str,
-    ) -> Result<Vec<L1Entry>, MemoryStoreError> {
-        let l1 = self.l1.lock().unwrap_or_else(|p| p.into_inner());
-        Ok(l1
-            .get(&subject.to_string())
-            .map(|entries| {
-                entries
-                    .iter()
-                    .filter(|e| e.conversation_id == conversation_id)
-                    .cloned()
-                    .collect()
-            })
-            .unwrap_or_default())
-    }
-
-    fn pop_oldest(
-        &self,
-        subject: &Subject,
-        conversation_id: &str,
-        n: usize,
-    ) -> Result<Vec<L1Entry>, MemoryStoreError> {
-        let mut l1 = self.l1.lock().unwrap_or_else(|p| p.into_inner());
-        let Some(entries) = l1.get_mut(&subject.to_string()) else {
-            return Ok(Vec::new());
-        };
-        let mut popped = Vec::new();
-        let mut kept = Vec::with_capacity(entries.len());
-        let mut remaining = n;
-        for entry in entries.drain(..) {
-            if remaining > 0 && entry.conversation_id == conversation_id {
-                popped.push(entry);
-                remaining -= 1;
-            } else {
-                kept.push(entry);
-            }
+impl InProcessTurnStore {
+    fn append(&self, subject: &Subject, conversation_id: &str, messages: Vec<Message>) {
+        if messages.is_empty() {
+            return;
         }
-        *entries = kept;
-        Ok(popped)
-    }
-
-    fn len(&self, subject: &Subject, conversation_id: &str) -> Result<usize, MemoryStoreError> {
-        let l1 = self.l1.lock().unwrap_or_else(|p| p.into_inner());
-        Ok(l1
-            .get(&subject.to_string())
-            .map(|entries| {
-                entries
-                    .iter()
-                    .filter(|e| e.conversation_id == conversation_id)
-                    .count()
-            })
-            .unwrap_or(0))
-    }
-}
-
-/// In-process L2 summary store (default implementation).
-#[derive(Default)]
-pub(crate) struct InProcessMemoryL2Store {
-    // subject -> ordered L2 blocks (entries carry their conversation).
-    l2: Mutex<HashMap<String, Vec<L2Entry>>>,
-}
-
-impl MemoryL2Store for InProcessMemoryL2Store {
-    fn append(&self, subject: &Subject, block: L2Entry) -> Result<(), MemoryStoreError> {
-        let mut l2 = self.l2.lock().unwrap_or_else(|p| p.into_inner());
-        l2.entry(subject.to_string()).or_default().push(block);
-        Ok(())
-    }
-
-    fn read(
-        &self,
-        subject: &Subject,
-        conversation_id: &str,
-    ) -> Result<Vec<L2Entry>, MemoryStoreError> {
-        let l2 = self.l2.lock().unwrap_or_else(|p| p.into_inner());
-        Ok(l2
-            .get(&subject.to_string())
-            .map(|blocks| {
-                blocks
-                    .iter()
-                    .filter(|b| b.conversation_id == conversation_id)
-                    .cloned()
-                    .collect()
-            })
-            .unwrap_or_default())
-    }
-
-    fn len(&self, subject: &Subject, conversation_id: &str) -> Result<usize, MemoryStoreError> {
-        let l2 = self.l2.lock().unwrap_or_else(|p| p.into_inner());
-        Ok(l2
-            .get(&subject.to_string())
-            .map(|blocks| {
-                blocks
-                    .iter()
-                    .filter(|b| b.conversation_id == conversation_id)
-                    .count()
-            })
-            .unwrap_or(0))
-    }
-
-    fn pop_oldest(
-        &self,
-        subject: &Subject,
-        conversation_id: &str,
-        n: usize,
-    ) -> Result<Vec<L2Entry>, MemoryStoreError> {
-        let mut l2 = self.l2.lock().unwrap_or_else(|p| p.into_inner());
-        let Some(blocks) = l2.get_mut(&subject.to_string()) else {
-            return Ok(Vec::new());
-        };
-        let mut popped = Vec::new();
-        let mut kept = Vec::with_capacity(blocks.len());
-        let mut remaining = n;
-        for block in blocks.drain(..) {
-            if remaining > 0 && block.conversation_id == conversation_id {
-                popped.push(block);
-                remaining -= 1;
-            } else {
-                kept.push(block);
-            }
+        let mut turns = self.turns.lock().unwrap_or_else(|p| p.into_inner());
+        let entry = turns
+            .entry((subject.to_string(), conversation_id.to_string()))
+            .or_default();
+        entry.extend(messages);
+        let excess = entry.len().saturating_sub(DEFAULT_WINDOW_MESSAGES);
+        if excess > 0 {
+            entry.drain(..excess);
         }
-        *blocks = kept;
-        Ok(popped)
     }
 
-    fn get(&self, subject: &Subject, id: &str) -> Result<Option<L2Entry>, MemoryStoreError> {
-        let l2 = self.l2.lock().unwrap_or_else(|p| p.into_inner());
-        Ok(l2
-            .get(&subject.to_string())
-            .and_then(|blocks| blocks.iter().find(|b| b.id == id).cloned()))
-    }
-
-    fn update(&self, subject: &Subject, entry: L2Entry) -> Result<bool, MemoryStoreError> {
-        let mut l2 = self.l2.lock().unwrap_or_else(|p| p.into_inner());
-        let Some(blocks) = l2.get_mut(&subject.to_string()) else {
-            return Ok(false);
-        };
-        let Some(existing) = blocks.iter_mut().find(|b| b.id == entry.id) else {
-            return Ok(false);
-        };
-        *existing = entry;
-        Ok(true)
-    }
-
-    fn remove(&self, subject: &Subject, id: &str) -> Result<bool, MemoryStoreError> {
-        let mut l2 = self.l2.lock().unwrap_or_else(|p| p.into_inner());
-        let Some(blocks) = l2.get_mut(&subject.to_string()) else {
-            return Ok(false);
-        };
-        let before = blocks.len();
-        blocks.retain(|b| b.id != id);
-        Ok(blocks.len() != before)
-    }
-
-    fn list(
-        &self,
-        subject: &Subject,
-        query: MemoryStoreQuery,
-    ) -> Result<MemoryPage<L2Entry>, MemoryStoreError> {
-        let l2 = self.l2.lock().unwrap_or_else(|p| p.into_inner());
-        let matching: Vec<L2Entry> = l2
-            .get(&subject.to_string())
-            .map(|blocks| {
-                blocks
-                    .iter()
-                    .filter(|b| {
-                        query
-                            .conversation_id
-                            .as_deref()
-                            .is_none_or(|c| b.conversation_id == c)
-                    })
-                    .filter(|b| query.from.is_none_or(|f| b.freshness() >= f))
-                    .filter(|b| query.to.is_none_or(|t| b.freshness() < t))
-                    .filter(|b| {
-                        query
-                            .keyword
-                            .as_deref()
-                            .is_none_or(|k| contains_ci(&b.content, k))
-                    })
-                    .cloned()
-                    .collect()
-            })
-            .unwrap_or_default();
-        Ok(page_entries(
-            matching,
-            |b| b.freshness(),
-            |b| b.id.as_str(),
-            query.after.as_ref(),
-            query.limit,
-        ))
+    fn recent(&self, subject: &Subject, conversation_id: &str) -> Vec<Message> {
+        let turns = self.turns.lock().unwrap_or_else(|p| p.into_inner());
+        turns
+            .get(&(subject.to_string(), conversation_id.to_string()))
+            .cloned()
+            .unwrap_or_default()
     }
 }
 
-/// In-process L3 knowledge store (default implementation).
+/// The framework's bundled memory provider: in-process and non-layered.
 ///
-/// Retrieval uses topic matching plus freshness ranking — zero external
-/// dependencies. Storage is process-local.
-#[derive(Default)]
-pub(crate) struct InProcessMemoryL3Store {
-    // subject -> ordered L3 entries.
-    l3: Mutex<HashMap<String, Vec<L3Entry>>>,
+/// The read face replays the conversation's recent messages; the write
+/// face appends each completed turn's new messages (the user input and the
+/// model's responses); the management face is minimal — the bundled
+/// provider keeps no management-grade entries (register a real memory
+/// provider for management).
+pub(crate) struct InProcessMemoryProvider {
+    store: Arc<InProcessTurnStore>,
 }
 
-impl MemoryL3Store for InProcessMemoryL3Store {
-    fn upsert(&self, subject: &Subject, entry: L3Entry) -> Result<(), MemoryStoreError> {
-        let mut l3 = self.l3.lock().unwrap_or_else(|p| p.into_inner());
-        let entries = l3.entry(subject.to_string()).or_default();
-        // Upsert by identity: replace an existing entry on the same
-        // (conversation, topic) identity, preserving its id (the id is
-        // the entry's stable address across updates), otherwise append.
-        if let Some(existing) = entries.iter_mut().find(|e| e.identity == entry.identity) {
-            let id = std::mem::take(&mut existing.id);
-            *existing = entry;
-            existing.id = id;
-        } else {
-            entries.push(entry);
+impl InProcessMemoryProvider {
+    /// Creates the bundled provider.
+    pub(crate) fn new() -> Self {
+        Self {
+            store: Arc::new(InProcessTurnStore::default()),
         }
-        Ok(())
+    }
+}
+
+impl MemoryProvider for InProcessMemoryProvider {
+    fn memory(&self, _bus: EventBus) -> Arc<dyn Memory> {
+        Arc::new(InProcessMemory)
     }
 
-    fn query(
-        &self,
-        subject: &Subject,
-        query: &str,
-        topic: &Topic,
-        budget: usize,
-    ) -> Result<Vec<L3Entry>, MemoryStoreError> {
-        let l3 = self.l3.lock().unwrap_or_else(|p| p.into_inner());
-        let mut candidates: Vec<L3Entry> = l3
-            .get(&subject.to_string())
-            .map(|entries| {
-                entries
-                    .iter()
-                    .filter(|f| {
-                        topic_matches(topic, &f.identity.topic) || text_matches(query, &f.content)
-                    })
-                    .cloned()
-                    .collect()
-            })
-            .unwrap_or_default();
-        // Freshness ranking: newer first (updated_at, id tiebreak), then
-        // take the budget.
-        candidates.sort_by(|a, b| {
-            b.freshness()
-                .cmp(&a.freshness())
-                .then_with(|| a.id.cmp(&b.id))
-        });
-        candidates.truncate(budget);
-        Ok(candidates)
+    fn context_assembler(&self) -> Arc<dyn MemoryContextAssembler> {
+        Arc::new(InProcessContextAssembler {
+            store: Arc::clone(&self.store),
+        })
     }
 
-    fn len(&self, subject: &Subject) -> Result<usize, MemoryStoreError> {
-        let l3 = self.l3.lock().unwrap_or_else(|p| p.into_inner());
-        Ok(l3
-            .get(&subject.to_string())
-            .map(|entries| entries.len())
-            .unwrap_or(0))
+    fn pipeline(&self) -> Arc<dyn MemoryPipeline> {
+        Arc::new(InProcessPipeline {
+            store: Arc::clone(&self.store),
+        })
     }
+}
 
-    fn get(&self, subject: &Subject, id: &str) -> Result<Option<L3Entry>, MemoryStoreError> {
-        let l3 = self.l3.lock().unwrap_or_else(|p| p.into_inner());
-        Ok(l3
-            .get(&subject.to_string())
-            .and_then(|entries| entries.iter().find(|f| f.id == id).cloned()))
-    }
+/// The bundled provider's management face: minimal by design (no entries).
+struct InProcessMemory;
 
-    fn update(&self, subject: &Subject, entry: L3Entry) -> Result<bool, MemoryStoreError> {
-        let mut l3 = self.l3.lock().unwrap_or_else(|p| p.into_inner());
-        let Some(entries) = l3.get_mut(&subject.to_string()) else {
-            return Ok(false);
-        };
-        let Some(existing) = entries.iter_mut().find(|f| f.id == entry.id) else {
-            return Ok(false);
-        };
-        *existing = entry;
-        Ok(true)
-    }
-
-    fn remove(&self, subject: &Subject, id: &str) -> Result<bool, MemoryStoreError> {
-        let mut l3 = self.l3.lock().unwrap_or_else(|p| p.into_inner());
-        let Some(entries) = l3.get_mut(&subject.to_string()) else {
-            return Ok(false);
-        };
-        let before = entries.len();
-        entries.retain(|f| f.id != id);
-        Ok(entries.len() != before)
-    }
-
+impl Memory for InProcessMemory {
     fn list(
         &self,
-        subject: &Subject,
-        query: MemoryStoreQuery,
-    ) -> Result<MemoryPage<L3Entry>, MemoryStoreError> {
-        let l3 = self.l3.lock().unwrap_or_else(|p| p.into_inner());
-        let matching: Vec<L3Entry> = l3
-            .get(&subject.to_string())
-            .map(|entries| {
-                entries
-                    .iter()
-                    .filter(|f| {
-                        query
-                            .conversation_id
-                            .as_deref()
-                            .is_none_or(|c| f.identity.conversation_id == c)
-                    })
-                    .filter(|f| query.from.is_none_or(|from| f.freshness() >= from))
-                    .filter(|f| query.to.is_none_or(|to| f.freshness() < to))
-                    .filter(|f| {
-                        query
-                            .keyword
-                            .as_deref()
-                            .is_none_or(|k| contains_ci(&f.content, k))
-                    })
-                    .cloned()
-                    .collect()
-            })
-            .unwrap_or_default();
-        Ok(page_entries(
-            matching,
-            |f| f.freshness(),
-            |f| f.id.as_str(),
-            query.after.as_ref(),
-            query.limit,
-        ))
+        _subject: &Subject,
+        _query: MemoryQuery,
+    ) -> Result<MemoryPage<MemoryItem, MemoryListCursor>, MemoryStoreError> {
+        Ok(MemoryPage::new(Vec::new(), None))
+    }
+
+    fn get(&self, _subject: &Subject, _id: &str) -> Result<Option<MemoryItem>, MemoryStoreError> {
+        Ok(None)
+    }
+
+    fn edit(
+        &self,
+        _subject: &Subject,
+        id: &str,
+        _content: &str,
+    ) -> Result<MemoryItem, MemoryStoreError> {
+        Err(MemoryStoreError::EntryNotFound(id.to_string()))
+    }
+
+    fn forget(
+        &self,
+        _subject: &Subject,
+        _id: &str,
+    ) -> Result<MemoryForgetResult, MemoryStoreError> {
+        Ok(MemoryForgetResult {
+            removed: 0,
+            failures: Vec::new(),
+        })
+    }
+
+    fn forget_matching(
+        &self,
+        _subject: &Subject,
+        _query: MemoryQuery,
+    ) -> Result<MemoryForgetResult, MemoryStoreError> {
+        Ok(MemoryForgetResult {
+            removed: 0,
+            failures: Vec::new(),
+        })
     }
 }
 
-/// Sorts matching entries (freshness descending, id ascending), applies
-/// the keyset cursor and returns one page. The cursor is a value, so
-/// deletions between pages neither skip nor duplicate entries.
-fn page_entries<E: Clone>(
-    mut matching: Vec<E>,
-    freshness: impl Fn(&E) -> u64,
-    id: impl Fn(&E) -> &str,
-    after: Option<&MemoryCursor>,
-    limit: usize,
-) -> MemoryPage<E> {
-    matching.sort_by(|a, b| {
-        freshness(b)
-            .cmp(&freshness(a))
-            .then_with(|| id(a).cmp(id(b)))
-    });
-    let start = match after {
-        Some(cursor) => matching
-            .iter()
-            .position(|entry| {
-                freshness(entry) < cursor.updated_at
-                    || (freshness(entry) == cursor.updated_at && id(entry) > cursor.id.as_str())
-            })
-            .unwrap_or(matching.len()),
-        None => 0,
-    };
-    let remaining = matching.split_off(start);
-    let take = limit.min(remaining.len());
-    let items = remaining[..take].to_vec();
-    let next = if remaining.len() > take {
-        items
-            .last()
-            .map(|entry| MemoryCursor::new(freshness(entry), id(entry).to_string()))
-    } else {
-        None
-    };
-    MemoryPage::new(items, next)
+/// The bundled provider's read face: the conversation's recent messages
+/// followed by this turn's model-visible user message.
+struct InProcessContextAssembler {
+    store: Arc<InProcessTurnStore>,
 }
 
-/// Case-insensitive substring matching (Unicode-aware lowercase
-/// folding).
-fn contains_ci(haystack: &str, needle: &str) -> bool {
-    if needle.is_empty() {
-        return true;
+impl MemoryContextAssembler for InProcessContextAssembler {
+    fn assemble<'a>(
+        &'a self,
+        input: MemoryContextAssembleInput<'a>,
+    ) -> BoxFuture<'a, MemoryContextAssembleOutput> {
+        Box::pin(async move {
+            let mut messages = self.store.recent(input.subject, input.conversation_id);
+            messages.push(Message::user(input.rewritten_input.unwrap_or(input.input)));
+            MemoryContextAssembleOutput::new(messages, Vec::new())
+        })
     }
-    haystack.to_lowercase().contains(&needle.to_lowercase())
 }
 
-/// Cheap topic matching: exact match or token overlap.
-fn topic_matches(current: &str, candidate: &str) -> bool {
-    if current.is_empty() || candidate.is_empty() {
-        return false;
-    }
-    if current == candidate {
-        return true;
-    }
-    let current_tokens: std::collections::HashSet<&str> = current
-        .split(|c: char| !c.is_alphanumeric())
-        .filter(|t| !t.is_empty())
-        .collect();
-    candidate
-        .split(|c: char| !c.is_alphanumeric())
-        .filter(|t| !t.is_empty())
-        .any(|t| current_tokens.contains(t))
+/// The bundled provider's write face: append each completed turn's new
+/// messages (the user input and the model's responses) to the window.
+struct InProcessPipeline {
+    store: Arc<InProcessTurnStore>,
 }
 
-/// Cheap keyword overlap between the query and entry content.
-fn text_matches(query: &str, content: &str) -> bool {
-    if query.is_empty() {
-        return false;
+impl MemoryPipeline for InProcessPipeline {
+    fn archive_turn<'a>(
+        &'a self,
+        ctx: &'a PipelineTurnContext<'a>,
+    ) -> BoxFuture<'a, Result<(), MemoryFailure>> {
+        Box::pin(async move {
+            let mut messages = Vec::with_capacity(ctx.responses().len() + 1);
+            messages.push(Message::user(ctx.input()));
+            messages.extend(ctx.responses().iter().cloned());
+            self.store
+                .append(ctx.subject(), ctx.conversation_id(), messages);
+            Ok(())
+        })
     }
-    let query_tokens: std::collections::HashSet<&str> = query
-        .split(|c: char| !c.is_alphanumeric())
-        .filter(|t| !t.is_empty())
-        .collect();
-    if query_tokens.is_empty() {
-        return false;
+
+    fn spawn_task<'a>(
+        &'a self,
+        _ctx: &'a PipelineTurnContext<'a>,
+    ) -> BoxFuture<'a, Result<(), MemoryFailure>> {
+        Box::pin(async { Ok(()) })
     }
-    content
-        .split(|c: char| !c.is_alphanumeric())
-        .filter(|t| !t.is_empty())
-        .any(|t| query_tokens.contains(t))
+
+    fn finalize_conversation<'a>(
+        &'a self,
+        _ctx: &'a PipelineConversationContext<'a>,
+    ) -> BoxFuture<'a, Result<(), MemoryFailure>> {
+        Box::pin(async { Ok(()) })
+    }
 }
 
 #[cfg(test)]
-mod layer_store_tests {
+mod bundled_tests {
     use super::*;
-    use crate::SubjectType;
-    use crate::memory::L3Identity;
-
-    fn subject() -> Subject {
-        Subject::of(SubjectType::User, "u-store-tests")
-    }
+    use crate::subject::SubjectType;
 
     #[test]
-    fn l2_get_update_remove_roundtrip() {
-        let store = InProcessMemoryL2Store::default();
-        let subject = subject();
-        let entry = L2Entry::new("c1", "one", 0);
-        let id = entry.id.clone();
-        store.append(&subject, entry).unwrap();
-
-        assert_eq!(store.get(&subject, &id).unwrap().unwrap().content, "one");
-        assert!(store.get(&subject, "missing").unwrap().is_none());
-
-        let mut edited = store.get(&subject, &id).unwrap().unwrap();
-        edited.content = "one-edited".into();
-        edited.updated_at = edited.created_at + 10;
-        assert!(store.update(&subject, edited).unwrap());
-        assert_eq!(
-            store.get(&subject, &id).unwrap().unwrap().content,
-            "one-edited"
-        );
-        assert!(
-            !store
-                .update(&subject, L2Entry::new("c1", "ghost", 0))
-                .unwrap()
-        );
-
-        assert!(store.remove(&subject, &id).unwrap());
-        assert!(!store.remove(&subject, &id).unwrap());
-    }
-
-    #[test]
-    fn l2_list_paginates_and_survives_deletion() {
-        let store = InProcessMemoryL2Store::default();
-        let subject = subject();
-        for i in 0..5u64 {
-            let mut entry = L2Entry::new("c1", format!("entry-{i}"), i);
-            entry.created_at = 100 + i;
-            entry.updated_at = 100 + i;
-            store.append(&subject, entry).unwrap();
+    fn the_turn_store_keeps_the_window_bounded() {
+        let store = InProcessTurnStore::default();
+        let subject = Subject::of(SubjectType::User, "u-window");
+        for index in 0..(DEFAULT_WINDOW_MESSAGES + 5) {
+            store.append(&subject, "c1", vec![Message::user(format!("m{index}"))]);
         }
-
-        let page = store.list(&subject, MemoryStoreQuery::new(2)).unwrap();
-        assert_eq!(page.items.len(), 2);
-        assert_eq!(page.items[0].content, "entry-4");
-        assert_eq!(page.items[1].content, "entry-3");
-        let cursor = page.next.unwrap();
-
-        // Delete an entry that was not returned yet; the cursor is a
-        // value, so the next page neither skips nor duplicates.
-        let victim = store
-            .list(&subject, MemoryStoreQuery::new(10))
-            .unwrap()
-            .items[2]
-            .id
-            .clone();
-        assert!(store.remove(&subject, &victim).unwrap());
-
-        let page = store
-            .list(&subject, MemoryStoreQuery::new(10).with_after(cursor))
-            .unwrap();
-        let contents: Vec<&str> = page.items.iter().map(|e| e.content.as_str()).collect();
-        assert_eq!(contents, vec!["entry-1", "entry-0"]);
-        assert!(page.next.is_none());
+        let recent = store.recent(&subject, "c1");
+        assert_eq!(recent.len(), DEFAULT_WINDOW_MESSAGES);
+        assert_eq!(
+            recent.first().unwrap().blocks[0],
+            crate::message::ContentBlock::Text {
+                text: "m5".to_string()
+            }
+        );
     }
 
     #[test]
-    fn l2_list_filters() {
-        let store = InProcessMemoryL2Store::default();
-        let subject = subject();
-        store
-            .append(&subject, L2Entry::new("c1", "alpha", 0))
-            .unwrap();
-        store
-            .append(&subject, L2Entry::new("c1", "beta", 1))
-            .unwrap();
-        store
-            .append(&subject, L2Entry::new("c2", "gamma", 0))
-            .unwrap();
-
-        let page = store
-            .list(
-                &subject,
-                MemoryStoreQuery::new(10)
-                    .with_conversation("c1")
-                    .with_keyword("BET"),
-            )
-            .unwrap();
-        assert_eq!(page.items.len(), 1);
-        assert_eq!(page.items[0].content, "beta");
-    }
-
-    #[test]
-    fn l3_upsert_preserves_the_id_and_list_roundtrips() {
-        let store = InProcessMemoryL3Store::default();
-        let subject = subject();
-        let identity = L3Identity {
-            subject_id: subject.to_string(),
-            conversation_id: "c1".into(),
-            topic: "t".into(),
-        };
-        let first = L3Entry::new(identity.clone(), "v1");
-        let id = first.id.clone();
-        store.upsert(&subject, first).unwrap();
-        store
-            .upsert(&subject, L3Entry::new(identity, "v2"))
-            .unwrap();
-
-        let page = store.list(&subject, MemoryStoreQuery::new(10)).unwrap();
-        assert_eq!(page.items.len(), 1);
-        assert_eq!(page.items[0].id, id);
-        assert_eq!(page.items[0].content, "v2");
-
-        let mut edited = store.get(&subject, &id).unwrap().unwrap();
-        edited.content = "v3".into();
-        edited.updated_at = edited.created_at + 5;
-        assert!(store.update(&subject, edited).unwrap());
-        assert_eq!(store.get(&subject, &id).unwrap().unwrap().content, "v3");
-
-        assert!(store.remove(&subject, &id).unwrap());
-        assert!(!store.remove(&subject, &id).unwrap());
-        assert!(store.get(&subject, &id).unwrap().is_none());
+    fn the_turn_store_is_conversation_scoped() {
+        let store = InProcessTurnStore::default();
+        let subject = Subject::of(SubjectType::User, "u-scope");
+        store.append(&subject, "c1", vec![Message::user("one")]);
+        store.append(&subject, "c2", vec![Message::user("two")]);
+        assert_eq!(store.recent(&subject, "c1").len(), 1);
+        assert_eq!(store.recent(&subject, "c2").len(), 1);
     }
 }

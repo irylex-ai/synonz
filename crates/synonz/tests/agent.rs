@@ -20,6 +20,24 @@ use synonz::{
     SynonzRuntime, Tool, ToolCall, ToolContent, ToolError, ToolResult,
 };
 
+/// Records memory archive facts for assertions.
+#[derive(Default, Clone)]
+struct ArchiveRecorder {
+    archived: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+}
+
+impl synonz::Observer for ArchiveRecorder {
+    fn on_event(&self, _ctx: &synonz::ObserverContext, event: &synonz::SynonzEvent) {
+        if let synonz::SynonzEvent::Memory(synonz::MemoryEvent::TurnArchived {
+            conversation_id,
+            ..
+        }) = event
+        {
+            self.archived.lock().unwrap().push(conversation_id.clone());
+        }
+    }
+}
+
 // ────────────────────────── helpers ──────────────────────────
 
 /// A runtime + subject: every execution belongs to a conversation on a
@@ -444,7 +462,9 @@ async fn unknown_tool_is_soft_failure() {
 
 #[tokio::test]
 async fn max_rounds_exceeded_fails_explicitly() {
-    let (runtime, subject) = fixture();
+    let recorder = ArchiveRecorder::default();
+    let runtime = SynonzRuntime::builder().observer(recorder.clone()).build();
+    let subject = Subject::of(SubjectType::User, "u-test");
     let mut conv = Conversation::new(&runtime, &subject);
     // The model always wants another tool call; the budget must stop it.
     let model = MockModel::new(vec![
@@ -478,13 +498,12 @@ async fn max_rounds_exceeded_fails_explicitly() {
         turns[0].outcome,
         synonz::TurnOutcome::Failed(AgentError::MaxRoundsExceeded)
     ));
-    // The memory layers were NOT fed from the failed turn.
-    let memory = runtime.memory();
-    assert_eq!(
-        memory
-            .l1_len_for_tests(&subject, conv.id())
-            .expect("l1 len"),
-        0
+    // The memory's write phase never saw the failed turn: no archive fact
+    // was emitted for it.
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    assert!(
+        recorder.archived.lock().unwrap().is_empty(),
+        "a failed turn must not be archived into memory"
     );
     let retried = agent.run(conv.turn_input("weather everywhere")).await;
     assert!(matches!(retried, Err(AgentError::MaxRoundsExceeded)));

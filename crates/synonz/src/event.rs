@@ -230,28 +230,6 @@ pub enum ToolEvent {
     },
 }
 
-/// Which stage of the background lifecycle failed.
-#[non_exhaustive]
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum MemoryFlowStage {
-    /// Preprocessing the turn input into its model view (rewrite).
-    Rewrite,
-    /// Reading a memory layer during background assembly.
-    AssembleRead,
-    /// Writing the L1 archive after a completed turn.
-    Archive,
-    /// Updating the conversation topic.
-    TopicUpdate,
-    /// Summarizing demoted L1 turns into L2.
-    Summarize,
-    /// Distilling L2 overflow into L3.
-    Distill,
-    /// Waiting for background maintenance tasks during conversation-end
-    /// teardown (the bounded drain).
-    Drain,
-}
-
 /// The product-narrative event of the execution face.
 ///
 /// A filtered projection of [`TurnEvent`]: input-side payloads
