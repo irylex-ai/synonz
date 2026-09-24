@@ -445,6 +445,40 @@ impl L2Memory {
         self.store.list(scope)
     }
 
+    /// One entry by id.
+    pub(crate) fn entry(
+        &self,
+        scope: &MemoryScope,
+        id: &str,
+    ) -> Result<Option<L2MemoryEntry>, MemoryStoreError> {
+        self.store.get(scope, id)
+    }
+
+    /// Corrects one entry in place: the old content moves into the version
+    /// history (bounded by the configured capacity), and the embedding
+    /// port's inline fast path refreshes the recall vector when available
+    /// (otherwise the vector refreshes when the entry is next written back).
+    pub(crate) fn edit_entry(
+        &self,
+        mut entry: L2MemoryEntry,
+        content: &str,
+    ) -> Result<L2MemoryEntry, MemoryStoreError> {
+        entry.versions.insert(0, entry.content.clone());
+        entry.versions.truncate(self.config.l2_versions.max(1));
+        entry.content = content.to_string();
+        entry.updated_at = now_epoch();
+        if let Some(Ok(vector)) = self.embedding.embed_inline(&entry.content) {
+            entry.embedding = vector;
+        }
+        self.store.upsert(entry.clone())?;
+        Ok(entry)
+    }
+
+    /// Removes one entry.
+    pub(crate) fn forget_entry(&self, entry: &L2MemoryEntry) -> Result<bool, MemoryStoreError> {
+        self.store.remove(&entry.scope, &entry.id)
+    }
+
     /// Compacts one batch into entries (one summarizer call, 1..N entries).
     pub(crate) async fn compact(
         &self,

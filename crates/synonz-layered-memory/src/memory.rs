@@ -12,14 +12,10 @@ use synonz::{
     MemoryPage, MemoryQuery, MemoryScope, MemorySource, MemoryStoreError, Subject, SynonzEvent,
 };
 
-use crate::config::{LayeredMemoryConfig, MemoryScopeResolver};
-use crate::embedding::Embedding;
-use crate::l2_memory::{L2Memory, L2MemoryEntry, L2MemoryStore};
-use crate::l3_memory::{
-    L3Memory, L3MemoryGraphEdge, L3MemoryGraphEntity, L3MemoryGraphStore, L3MemoryVectorStore,
-    entity_text,
-};
-use crate::utils::{conversation_id_of, conversation_scope, now_epoch};
+use crate::config::MemoryScopeResolver;
+use crate::l2_memory::{L2Memory, L2MemoryEntry};
+use crate::l3_memory::{L3Memory, L3MemoryGraphEdge, L3MemoryGraphEntity, entity_text};
+use crate::utils::{conversation_id_of, conversation_scope};
 
 /// One located management record.
 enum MemoryRecord {
@@ -130,39 +126,28 @@ impl MemoryRecord {
 }
 
 /// The component's management face (internal): the core item contract over
-/// the L2 and L3 records.
+/// the L2 and L3 records. It locates records through the layer objects and
+/// delegates the layer semantics (version history, inline re-embedding,
+/// removal cascades) to them.
 pub(crate) struct LayeredMemory {
     l2: Arc<L2Memory>,
-    l2_store: Arc<dyn L2MemoryStore>,
-    l3_graph: Arc<dyn L3MemoryGraphStore>,
-    l3_vectors: Arc<dyn L3MemoryVectorStore>,
-    embedding: Arc<dyn Embedding>,
+    l3: Arc<L3Memory>,
     scope_resolver: Arc<dyn MemoryScopeResolver>,
-    config: Arc<LayeredMemoryConfig>,
     bus: EventBus,
 }
 
 impl LayeredMemory {
     /// Builds the face over the component's state and the runtime's bus.
-    #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
         l2: Arc<L2Memory>,
-        l2_store: Arc<dyn L2MemoryStore>,
-        l3_graph: Arc<dyn L3MemoryGraphStore>,
-        l3_vectors: Arc<dyn L3MemoryVectorStore>,
-        embedding: Arc<dyn Embedding>,
+        l3: Arc<L3Memory>,
         scope_resolver: Arc<dyn MemoryScopeResolver>,
-        config: Arc<LayeredMemoryConfig>,
         bus: EventBus,
     ) -> Self {
         Self {
             l2,
-            l2_store,
-            l3_graph,
-            l3_vectors,
-            embedding,
+            l3,
             scope_resolver,
-            config,
             bus,
         }
     }
@@ -210,14 +195,14 @@ impl LayeredMemory {
         let mut records = Vec::new();
         for scope in self.target_scopes(subject, query) {
             if conversation_id_of(&scope).is_some() {
-                for entry in self.l2_store.list(&scope)? {
+                for entry in self.l2.entries(&scope)? {
                     let record = MemoryRecord::Summary(entry);
                     if record.matches(query) {
                         records.push(record);
                     }
                 }
             } else {
-                for entity in self.l3_graph.entities(&scope)? {
+                for entity in self.l3.entities(&scope)? {
                     let record = MemoryRecord::Entity(entity);
                     if record.matches(query) {
                         records.push(record);
@@ -239,11 +224,11 @@ impl LayeredMemory {
     /// conversation entries first, then its long-term entities).
     fn find(&self, subject: &Subject, id: &str) -> Result<Option<MemoryRecord>, MemoryStoreError> {
         for scope in self.l2.conversation_scopes(subject) {
-            if let Some(entry) = self.l2_store.get(&scope, id)? {
+            if let Some(entry) = self.l2.entry(&scope, id)? {
                 return Ok(Some(MemoryRecord::Summary(entry)));
             }
         }
-        if let Some(entity) = self.l3_graph.get_entity_by_id(id)?
+        if let Some(entity) = self.l3.entity_by_id(id)?
             && self.owns_scope(subject, &entity.scope)
         {
             return Ok(Some(MemoryRecord::Entity(entity)));
@@ -272,18 +257,11 @@ impl LayeredMemory {
             }));
     }
 
-    /// Removes one located record (cascading vectors and edges).
+    /// Removes one located record (the layer objects own the cascades).
     fn remove_record(&self, record: &MemoryRecord) -> Result<bool, MemoryStoreError> {
         match record {
-            MemoryRecord::Summary(entry) => {
-                self.l3_vectors.remove(&entry.scope, &entry.id)?;
-                self.l2_store.remove(&entry.scope, &entry.id)
-            }
-            MemoryRecord::Entity(entity) => {
-                self.l3_vectors
-                    .remove(&entity.scope, &entity.canonical_name)?;
-                self.l3_graph.remove_entity_by_id(&entity.id)
-            }
+            MemoryRecord::Summary(entry) => self.l2.forget_entry(entry),
+            MemoryRecord::Entity(entity) => self.l3.forget_entity(entity),
         }
     }
 }
@@ -340,29 +318,13 @@ impl Memory for LayeredMemory {
             return Err(MemoryStoreError::EntryNotFound(id.to_string()));
         };
         match record {
-            MemoryRecord::Summary(mut entry) => {
-                entry.versions.insert(0, entry.content.clone());
-                entry.versions.truncate(self.config.l2_versions.max(1));
-                entry.content = content.to_string();
-                entry.updated_at = now_epoch();
-                // The embedding port's inline fast path refreshes the recall
-                // vector synchronously; without it the vector refreshes when
-                // the entry is next written back.
-                if let Some(Ok(vector)) = self.embedding.embed_inline(&entry.content) {
-                    entry.embedding = vector;
-                }
-                self.l2_store.upsert(entry.clone())?;
+            MemoryRecord::Summary(entry) => {
+                let entry = self.l2.edit_entry(entry, content)?;
                 self.emit_updated(subject, &entry.scope, &entry.id);
                 Ok(MemoryRecord::Summary(entry).item())
             }
-            MemoryRecord::Entity(mut entity) => {
-                entity.description = content.to_string();
-                entity.updated_at = now_epoch();
-                self.l3_graph.upsert_entity(entity.clone())?;
-                if let Some(Ok(vector)) = self.embedding.embed_inline(&entity_text(&entity)) {
-                    self.l3_vectors
-                        .upsert(&entity.scope, &entity.canonical_name, vector)?;
-                }
+            MemoryRecord::Entity(entity) => {
+                let entity = self.l3.edit_entity(entity, content)?;
                 self.emit_updated(subject, &entity.scope, &entity.id);
                 Ok(MemoryRecord::Entity(entity).item())
             }

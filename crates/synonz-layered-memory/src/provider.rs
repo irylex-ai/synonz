@@ -37,9 +37,6 @@ pub struct LayeredMemoryProvider {
     pub(crate) l1: Arc<L1Memory>,
     pub(crate) l2: Arc<L2Memory>,
     pub(crate) l3: Arc<L3Memory>,
-    pub(crate) l2_store: Arc<dyn L2MemoryStore>,
-    pub(crate) l3_graph: Arc<dyn L3MemoryGraphStore>,
-    pub(crate) l3_vectors: Arc<dyn L3MemoryVectorStore>,
     pub(crate) embedding: Arc<dyn Embedding>,
     pub(crate) context_rewriter: Arc<dyn LayeredMemoryContextRewriter>,
     pub(crate) scope_resolver: Arc<dyn MemoryScopeResolver>,
@@ -83,12 +80,8 @@ impl MemoryProvider for LayeredMemoryProvider {
     fn memory(&self, bus: EventBus) -> Arc<dyn Memory> {
         Arc::new(LayeredMemory::new(
             Arc::clone(&self.l2),
-            Arc::clone(&self.l2_store),
-            Arc::clone(&self.l3_graph),
-            Arc::clone(&self.l3_vectors),
-            Arc::clone(&self.embedding),
+            Arc::clone(&self.l3),
             Arc::clone(&self.scope_resolver),
-            Arc::clone(&self.config),
             bus,
         ))
     }
@@ -271,9 +264,6 @@ impl LayeredMemoryProviderBuilder {
             l1,
             l2,
             l3,
-            l2_store,
-            l3_graph: l3_graph_store,
-            l3_vectors: l3_vector_store,
             embedding,
             context_rewriter,
             scope_resolver,

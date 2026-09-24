@@ -458,7 +458,14 @@ ADR-0028 组件实现经逐项评审后的修订（均在未发布的 0.7.0 内�
 6. **L3 去重口径**（#19）：召回候选重嵌入 `entity_text` 填向量，
    恢复 ADR-0028 §6 的"文本相同或向量相似度"去重；
 7. **直写边界**（#20）：存储契约 = 组件持久化端口；管理面无创建动词
-   （ADR-0020 §8 维持）；应用直写 = 框架外导入，管理面不索引。
+   （ADR-0020 §8 维持）；应用直写 = 框架外导入，管理面不索引；
+8. **管理面结构**（#21）：管理语义下沉层对象（`L2Memory::entry` /
+   `edit_entry` / `forget_entry`，`L3Memory::entity_by_id` /
+   `edit_entity` / `forget_entity`）；`LayeredMemory` 只持有
+   `l2` / `l3` / `scope_resolver` / `bus`（不再持有存储、`embedding`
+   或 `config`）；provider 去掉三个存储字段；顺带删除 `remove_record`
+   的 Summary 分支里一行空操作（按 `(会话分区, 条目 id)` 删 L3 向量）。
+   内部改动、行为等价，测试零改动。
 
 **验证**：全量回归 **267/267**（synonz 159 + 组件 30 + 适配层 42 +
 示例 36）；clippy / doc 零警告；fmt 干净；六个离线示例（含

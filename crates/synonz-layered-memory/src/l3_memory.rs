@@ -692,6 +692,43 @@ impl L3Memory {
         self.graph.get_entity(scope, canonical_name)
     }
 
+    /// One entity by its synthetic id.
+    pub(crate) fn entity_by_id(
+        &self,
+        id: &str,
+    ) -> Result<Option<L3MemoryGraphEntity>, MemoryStoreError> {
+        self.graph.get_entity_by_id(id)
+    }
+
+    /// Corrects one entity's description in place: the embedding port's
+    /// inline fast path refreshes the recall vector when available
+    /// (otherwise the vector refreshes when the entity is next written
+    /// back).
+    pub(crate) fn edit_entity(
+        &self,
+        mut entity: L3MemoryGraphEntity,
+        content: &str,
+    ) -> Result<L3MemoryGraphEntity, MemoryStoreError> {
+        entity.description = content.to_string();
+        entity.updated_at = now_epoch();
+        self.graph.upsert_entity(entity.clone())?;
+        if let Some(Ok(vector)) = self.embedding.embed_inline(&entity_text(&entity)) {
+            self.vectors
+                .upsert(&entity.scope, &entity.canonical_name, vector)?;
+        }
+        Ok(entity)
+    }
+
+    /// Removes one entity and its recall vector (the graph store cascades
+    /// the entity's edges).
+    pub(crate) fn forget_entity(
+        &self,
+        entity: &L3MemoryGraphEntity,
+    ) -> Result<bool, MemoryStoreError> {
+        self.vectors.remove(&entity.scope, &entity.canonical_name)?;
+        self.graph.remove_entity_by_id(&entity.id)
+    }
+
     /// Removes one edge by its identity (the relation-management path).
     pub(crate) fn forget_relation(
         &self,
