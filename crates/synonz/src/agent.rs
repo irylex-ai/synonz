@@ -152,6 +152,12 @@ impl AgentBuilder {
 
     /// Sets the model (required). Accepts a concrete model or an
     /// `Arc<dyn Model>`.
+    ///
+    /// The agent is an immutable configuration: to switch models, build a
+    /// new agent (cheap — the runtime, memory and conversations are shared)
+    /// or pass a switchable model proxy. See the context-memory extension
+    /// guide (`docs/design/extension-guide-context-memory.zh-CN.md`, "换模型")
+    /// for the recipe and the provider-level capture rules.
     pub fn model<M: Model + 'static>(mut self, model: M) -> Self {
         self.model = Some(Arc::new(model));
         self

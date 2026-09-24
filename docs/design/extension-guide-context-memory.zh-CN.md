@@ -192,11 +192,11 @@ LayeredMemoryProvider::builder()
 
 ## 6. 模型角色
 
-| 工厂 | 用途 | 解析规则 |
-|---|---|---|
-| `MemoryProvider::model` | 上下文管理（读 / 写相位的辅助调用） | Provider 模型 ?? Agent 模型 |
-| `RewriterProvider::model` | 输入改写 | 同上（不回落记忆模型） |
-| `TopicDetectorProvider::model` | 主题检测 | 同上（不回落记忆模型） |
+| 工厂 | 用途 | 解析规则 | 捕获时机 |
+|---|---|---|---|
+| `MemoryProvider::model` | 上下文管理（读 / 写相位的辅助调用） | Provider 模型 ?? Agent 模型 | runtime build 取一次 |
+| `RewriterProvider::model` | 输入改写 | 同上（不回落记忆模型） | agent build 取一次 |
+| `TopicDetectorProvider::model` | 主题检测 | 同上（不回落记忆模型） | agent build 取一次 |
 
 - 解析在**使用时**进行；交给实现者的句柄是核心的叙述包装（自动
   `Requested` / `Responded`、`round: None`、`purpose:
@@ -204,6 +204,60 @@ LayeredMemoryProvider::builder()
 - 会话终结时无 Agent 在作用域内：`PipelineConversationContext::model()`
   返回 Provider 配置的模型（未配置为 `None`）。
 - 没有独立"记忆模型"：记忆跟随上下文。
+
+### 6.1 换模型
+
+`Agent` 是**不可变配置**（不持运行状态，同一个 Agent 可驱动多会话并发
+run）：模型不变就复用同一个 Agent；**换模型 = 用 `.model(new)` 重建
+一次**。重建只做 Arc 克隆 + 新建一个 `Context`（几百字节、无 I/O），
+runtime / 存储 / 会话都不动，同一个 `Conversation` 直接换新 Agent 继续跑。
+
+各模型源的换法：
+
+| 模型源 | 换模型的方式 |
+|---|---|
+| Agent 模型 | 重建 Agent（成本见上） |
+| `MemoryProvider::model` | 重建 runtime（它在 runtime build 时取一次）；或把它设为模型代理（见下） |
+| `RewriterProvider::model` / `TopicDetectorProvider::model` | 重建 Agent 时带新 provider；或**不配置**——未配置时它们在使用时回退 Agent 模型，自动跟随重建 |
+
+**零重建的原地切换**：框架只持有 `Arc<dyn Model>` 并调用 `stream()`，
+所以应用可以实现一个可切换代理，传给 Agent（以及需要跟随的 Provider
+模型位），之后换内部模型即全局立即生效：
+
+```rust
+use std::sync::{Arc, RwLock};
+use futures::future::BoxFuture;
+use synonz::{Model, ModelError, ModelRequest, ModelStream};
+
+/// A model forwarding to a switchable inner model.
+pub struct SwitchableModel {
+    inner: RwLock<Arc<dyn Model>>,
+}
+
+impl SwitchableModel {
+    pub fn new(initial: Arc<dyn Model>) -> Self {
+        Self {
+            inner: RwLock::new(initial),
+        }
+    }
+
+    /// Switches the model used by every subsequent call.
+    pub fn switch(&self, model: Arc<dyn Model>) {
+        *self.inner.write().unwrap() = model;
+    }
+}
+
+impl Model for SwitchableModel {
+    fn stream(&self, request: ModelRequest) -> BoxFuture<'_, Result<ModelStream, ModelError>> {
+        let model = Arc::clone(&self.inner.read().unwrap());
+        Box::pin(async move { model.stream(request).await })
+    }
+}
+```
+
+会话终结维护没有 Agent 在作用域，只能用 Provider 模型（未配置 = 显式
+`Failed`，见 §5）；希望终结维护也跟随切换时，把代理作为
+`MemoryProvider` 的模型传入即可。
 
 ## 7. 边界与绕行
 
