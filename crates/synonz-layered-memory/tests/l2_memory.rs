@@ -17,9 +17,11 @@ use synonz_layered_memory::{
 fn the_store_enforces_its_capacities() {
     let store = synonz_layered_memory::InProcessL2MemoryStore::new(3, 2);
     let scope = MemoryScope::new("conversation:c1");
+    let subject = synonz::Subject::of(synonz::SubjectType::User, "u-store");
     for index in 0..5 {
         store
             .upsert(L2MemoryEntry::new(
+                subject.clone(),
                 scope.clone(),
                 "topic",
                 format!("content {index}"),
@@ -32,6 +34,18 @@ fn the_store_enforces_its_capacities() {
     let entries = store.list(&scope).unwrap();
     assert_eq!(entries.len(), 3, "the entry capacity holds");
     assert_eq!(entries[0].updated_at, 4, "the newest update is first");
+    assert_eq!(
+        store.scopes(&subject).unwrap(),
+        vec![scope.clone()],
+        "the store enumerates the subject's partitions from the entries"
+    );
+    assert!(
+        store
+            .scopes(&synonz::Subject::of(synonz::SubjectType::User, "u-other"))
+            .unwrap()
+            .is_empty(),
+        "another subject sees nothing"
+    );
 
     let mut entry = store.list(&scope).unwrap().remove(0);
     entry.versions = vec!["v1".into(), "v2".into(), "v3".into()];
@@ -115,6 +129,10 @@ async fn a_full_window_compacts_the_batch_into_an_entry() {
     assert_eq!(entries[0].content, "the user asked about invoices");
     assert_eq!(entries[0].importance, 0.9);
     assert_eq!(entries[0].topic, "billing");
+    assert_eq!(
+        entries[0].subject, fixture.subject,
+        "the compaction stamps the conversation's owner"
+    );
     assert!(
         fixture
             .progress

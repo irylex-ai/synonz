@@ -26,6 +26,10 @@ use crate::utils::{message_text, now_epoch};
 pub struct L2MemoryEntry {
     /// The entry's stable id (generated at creation).
     pub id: String,
+    /// The subject owning the entry's conversation (ownership travels with
+    /// the data: the store enumerates a subject's partitions from it, so
+    /// the component keeps no in-memory index).
+    pub subject: Subject,
     /// The conversation partition the entry belongs to.
     pub scope: MemoryScope,
     /// The topic the entry belongs to.
@@ -47,6 +51,7 @@ pub struct L2MemoryEntry {
 impl L2MemoryEntry {
     /// Creates an entry (the id is generated here; stores only persist it).
     pub fn new(
+        subject: Subject,
         scope: MemoryScope,
         topic: impl Into<String>,
         content: impl Into<String>,
@@ -56,6 +61,7 @@ impl L2MemoryEntry {
     ) -> Self {
         Self {
             id: uuid::Uuid::new_v4().to_string(),
+            subject,
             scope,
             topic: topic.into(),
             content: content.into(),
@@ -71,8 +77,8 @@ impl L2MemoryEntry {
 /// The L2 storage contract: one conversation's event entries, replaceable
 /// by a real backend (MongoDB, ...).
 ///
-/// Writes take the data (the entry carries its scope); reads take the
-/// partition. Implementations keep their own capacity (entries per
+/// Writes take the data (the entry carries its scope and subject); reads
+/// take the partition. Implementations keep their own capacity (entries per
 /// conversation, versions per entry).
 pub trait L2MemoryStore: Send + Sync + 'static {
     /// Creates or replaces an entry (same id replaces; the implementation
@@ -85,6 +91,11 @@ pub trait L2MemoryStore: Send + Sync + 'static {
 
     /// The partition's entries, most recently updated first.
     fn list(&self, scope: &MemoryScope) -> Result<Vec<L2MemoryEntry>, MemoryStoreError>;
+
+    /// The subject's conversation partitions (the entries carry their
+    /// subject), sorted by scope. The management face enumerates and
+    /// validates ownership through this.
+    fn scopes(&self, subject: &Subject) -> Result<Vec<MemoryScope>, MemoryStoreError>;
 
     /// Removes one entry by id (idempotent).
     fn remove(&self, scope: &MemoryScope, id: &str) -> Result<bool, MemoryStoreError>;
@@ -154,6 +165,17 @@ impl L2MemoryStore for InProcessL2MemoryStore {
                 .then_with(|| a.id.cmp(&b.id))
         });
         Ok(list)
+    }
+
+    fn scopes(&self, subject: &Subject) -> Result<Vec<MemoryScope>, MemoryStoreError> {
+        let entries = self.entries.lock().unwrap_or_else(|p| p.into_inner());
+        let mut scopes: Vec<MemoryScope> = entries
+            .iter()
+            .filter(|(_, list)| list.first().is_some_and(|entry| &entry.subject == subject))
+            .map(|(scope, _)| MemoryScope::new(scope))
+            .collect();
+        scopes.sort_by(|a, b| a.as_str().cmp(b.as_str()));
+        Ok(scopes)
     }
 
     fn remove(&self, scope: &MemoryScope, id: &str) -> Result<bool, MemoryStoreError> {
@@ -370,8 +392,9 @@ impl L2MemorySummarizer for L2MemoryPromptSummarizer {
 }
 
 /// The component's L2 domain object (internal): batch compaction, the
-/// per-conversation uncompacted-turn counter (compaction accounting), the
-/// conversation index (partition → owner), and entry reads.
+/// per-conversation uncompacted-turn counter (compaction accounting), and
+/// entry reads. Ownership lives on the entries themselves — the store
+/// enumerates a subject's partitions, so the layer keeps no index.
 pub(crate) struct L2Memory {
     store: Arc<dyn L2MemoryStore>,
     summarizer: Arc<dyn L2MemorySummarizer>,
@@ -379,7 +402,6 @@ pub(crate) struct L2Memory {
     config: Arc<crate::config::LayeredMemoryConfig>,
     observer: Option<Arc<dyn LayeredMemoryObserver>>,
     uncompacted: Mutex<HashMap<String, usize>>,
-    conversations: Mutex<HashMap<String, Subject>>,
 }
 
 impl L2Memory {
@@ -398,17 +420,11 @@ impl L2Memory {
             config,
             observer,
             uncompacted: Mutex::new(HashMap::new()),
-            conversations: Mutex::new(HashMap::new()),
         }
     }
 
-    /// Notes one archived turn: registers the conversation (partition →
-    /// owner) and increments its uncompacted count.
-    pub(crate) fn note_turn(&self, subject: &Subject, scope: &MemoryScope) {
-        {
-            let mut conversations = self.conversations.lock().unwrap_or_else(|p| p.into_inner());
-            conversations.insert(scope.to_string(), subject.clone());
-        }
+    /// Notes one archived turn (increments its uncompacted count).
+    pub(crate) fn note_turn(&self, scope: &MemoryScope) {
         let mut counts = self.uncompacted.lock().unwrap_or_else(|p| p.into_inner());
         *counts.entry(scope.to_string()).or_insert(0) += 1;
     }
@@ -419,22 +435,19 @@ impl L2Memory {
         counts.get(scope.as_str()).copied().unwrap_or(0)
     }
 
-    /// Resets the counter (the conversation stays registered).
+    /// Resets the counter.
     pub(crate) fn clear_counter(&self, scope: &MemoryScope) {
         let mut counts = self.uncompacted.lock().unwrap_or_else(|p| p.into_inner());
         counts.remove(scope.as_str());
     }
 
-    /// The subject's conversation partitions, sorted by scope.
-    pub(crate) fn conversation_scopes(&self, subject: &Subject) -> Vec<MemoryScope> {
-        let conversations = self.conversations.lock().unwrap_or_else(|p| p.into_inner());
-        let mut scopes: Vec<MemoryScope> = conversations
-            .iter()
-            .filter(|(_, owner)| *owner == subject)
-            .map(|(scope, _)| MemoryScope::new(scope))
-            .collect();
-        scopes.sort_by(|a, b| a.as_str().cmp(b.as_str()));
-        scopes
+    /// The subject's conversation partitions, sorted by scope (enumerated
+    /// from the store; the entries carry their subject).
+    pub(crate) fn conversation_scopes(
+        &self,
+        subject: &Subject,
+    ) -> Result<Vec<MemoryScope>, MemoryStoreError> {
+        self.store.scopes(subject)
     }
 
     /// The partition's entries, most recently updated first.
@@ -482,6 +495,7 @@ impl L2Memory {
     /// Compacts one batch into entries (one summarizer call, 1..N entries).
     pub(crate) async fn compact(
         &self,
+        subject: &Subject,
         scope: &MemoryScope,
         batch: &[L1MemoryEntry],
         model: Arc<dyn Model>,
@@ -533,6 +547,7 @@ impl L2Memory {
                 }
                 None => {
                     let entry = L2MemoryEntry::new(
+                        subject.clone(),
                         scope.clone(),
                         summary.topic,
                         summary.content,

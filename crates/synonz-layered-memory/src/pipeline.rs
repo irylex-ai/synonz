@@ -52,7 +52,7 @@ impl MemoryPipeline for LayeredMemoryPipeline {
             self.l1
                 .archive_turn(&partition, ctx.topic(), ctx.input(), &response)
                 .map_err(|error| MemoryFailure::new("archive", error.to_string()))?;
-            self.l2.note_turn(ctx.subject(), &partition);
+            self.l2.note_turn(&partition);
             Ok(())
         })
     }
@@ -122,7 +122,7 @@ impl MemoryPipeline for LayeredMemoryPipeline {
             let conversation_id = ctx.conversation_id().to_string();
             if uncompacted > 0 {
                 self.l2
-                    .compact(&partition, &batch, Arc::clone(&model))
+                    .compact(&subject, &partition, &batch, Arc::clone(&model))
                     .await?;
             }
             let entries = self
@@ -159,7 +159,12 @@ impl TurnBackgroundTask {
     async fn run(self) -> Result<(), MemoryFailure> {
         if self.compact {
             self.l2
-                .compact(&self.partition, &self.batch, Arc::clone(&self.model))
+                .compact(
+                    &self.subject,
+                    &self.partition,
+                    &self.batch,
+                    Arc::clone(&self.model),
+                )
                 .await?;
         }
         if self.distill {

@@ -396,6 +396,9 @@ impl synonz_layered_memory::L2MemoryStore for InProcessL2MemoryStoreView {
     ) -> Result<Vec<synonz_layered_memory::L2MemoryEntry>, synonz::MemoryStoreError> {
         self.0.list(scope)
     }
+    fn scopes(&self, subject: &Subject) -> Result<Vec<MemoryScope>, synonz::MemoryStoreError> {
+        self.0.scopes(subject)
+    }
     fn remove(&self, scope: &MemoryScope, id: &str) -> Result<bool, synonz::MemoryStoreError> {
         self.0.remove(scope, id)
     }

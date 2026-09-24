@@ -175,6 +175,7 @@ async fn near_duplicate_l2_and_l3_candidates_dedupe_by_vector() {
     fixture
         .l2
         .upsert(L2MemoryEntry::new(
+            fixture.subject.clone(),
             partition,
             "billing",
             "asked about invoices",

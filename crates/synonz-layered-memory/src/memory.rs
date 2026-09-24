@@ -156,33 +156,38 @@ impl LayeredMemory {
     /// the conversation's partition (when one is named) or every known
     /// partition of the subject. Explicit partitions are validated against
     /// the subject — a partition that is not the subject's yields nothing.
-    fn target_scopes(&self, subject: &Subject, query: &MemoryQuery) -> Vec<MemoryScope> {
+    fn target_scopes(
+        &self,
+        subject: &Subject,
+        query: &MemoryQuery,
+    ) -> Result<Vec<MemoryScope>, MemoryStoreError> {
         if let Some(scope) = &query.scope {
-            if self.owns_scope(subject, scope) {
-                return vec![scope.clone()];
+            if self.owns_scope(subject, scope)? {
+                return Ok(vec![scope.clone()]);
             }
-            return Vec::new();
+            return Ok(Vec::new());
         }
         if let Some(conversation_id) = &query.conversation_id {
             let scope = conversation_scope(conversation_id);
-            if self.owns_scope(subject, &scope) {
-                return vec![scope];
+            if self.owns_scope(subject, &scope)? {
+                return Ok(vec![scope]);
             }
-            return Vec::new();
+            return Ok(Vec::new());
         }
-        let mut scopes = self.l2.conversation_scopes(subject);
+        let mut scopes = self.l2.conversation_scopes(subject)?;
         scopes.extend(self.scope_resolver.resolve(subject, ""));
-        scopes
+        Ok(scopes)
     }
 
     /// Whether one partition belongs to the subject: a conversation
-    /// partition must be registered to it; a long-term partition must be one
-    /// the resolver returns for it.
-    fn owns_scope(&self, subject: &Subject, scope: &MemoryScope) -> bool {
+    /// partition must be registered to it (the entries carry their
+    /// subject); a long-term partition must be one the resolver returns
+    /// for it.
+    fn owns_scope(&self, subject: &Subject, scope: &MemoryScope) -> Result<bool, MemoryStoreError> {
         if conversation_id_of(scope).is_some() {
             return owns_conversation(&self.l2, subject, scope);
         }
-        owns_partition(&self.scope_resolver, subject, scope)
+        Ok(owns_partition(&self.scope_resolver, subject, scope))
     }
 
     /// Collects the matching records, ranked by freshness descending, id
@@ -193,7 +198,7 @@ impl LayeredMemory {
         query: &MemoryQuery,
     ) -> Result<Vec<MemoryRecord>, MemoryStoreError> {
         let mut records = Vec::new();
-        for scope in self.target_scopes(subject, query) {
+        for scope in self.target_scopes(subject, query)? {
             if conversation_id_of(&scope).is_some() {
                 for entry in self.l2.entries(&scope)? {
                     let record = MemoryRecord::Summary(entry);
@@ -223,13 +228,13 @@ impl LayeredMemory {
     /// Locates one record by id within the subject's partitions (its
     /// conversation entries first, then its long-term entities).
     fn find(&self, subject: &Subject, id: &str) -> Result<Option<MemoryRecord>, MemoryStoreError> {
-        for scope in self.l2.conversation_scopes(subject) {
+        for scope in self.l2.conversation_scopes(subject)? {
             if let Some(entry) = self.l2.entry(&scope, id)? {
                 return Ok(Some(MemoryRecord::Summary(entry)));
             }
         }
         if let Some(entity) = self.l3.entity_by_id(id)?
-            && self.owns_scope(subject, &entity.scope)
+            && self.owns_scope(subject, &entity.scope)?
         {
             return Ok(Some(MemoryRecord::Entity(entity)));
         }
@@ -415,14 +420,14 @@ impl LayeredMemoryActuator {
     ) -> Result<Vec<L2MemoryEntry>, MemoryStoreError> {
         match scope {
             Some(scope) => {
-                if !owns_conversation(&self.l2, subject, scope) {
+                if !owns_conversation(&self.l2, subject, scope)? {
                     return Ok(Vec::new());
                 }
                 self.l2.entries(scope)
             }
             None => {
                 let mut entries = Vec::new();
-                for scope in self.l2.conversation_scopes(subject) {
+                for scope in self.l2.conversation_scopes(subject)? {
                     entries.extend(self.l2.entries(&scope)?);
                 }
                 Ok(entries)
@@ -483,11 +488,17 @@ impl LayeredMemoryActuator {
     }
 }
 
-/// Whether one conversation partition is registered to the subject.
-fn owns_conversation(l2: &L2Memory, subject: &Subject, scope: &MemoryScope) -> bool {
-    l2.conversation_scopes(subject)
+/// Whether one conversation partition is registered to the subject (the
+/// entries carry their subject; the store enumerates the partitions).
+fn owns_conversation(
+    l2: &L2Memory,
+    subject: &Subject,
+    scope: &MemoryScope,
+) -> Result<bool, MemoryStoreError> {
+    Ok(l2
+        .conversation_scopes(subject)?
         .iter()
-        .any(|owned| owned == scope)
+        .any(|owned| owned == scope))
 }
 
 /// Whether one long-term partition is resolved for the subject.

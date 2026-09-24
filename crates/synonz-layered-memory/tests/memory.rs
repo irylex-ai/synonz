@@ -13,22 +13,16 @@ fn subject_scope(fixture: &common::Fixture) -> MemoryScope {
     MemoryScope::new(format!("user:{}", fixture.subject))
 }
 
-/// Registers the conversation through the component (one archived turn),
-/// then seeds the direct-write records the management tests work with.
-async fn seed(fixture: &common::Fixture) -> (MemoryScope, MemoryScope) {
-    let agent = synonz::Agent::builder()
-        .runtime(&fixture.runtime)
-        .model(common::mock(&["ok"]))
-        .build()
-        .unwrap();
-    let mut conversation =
-        synonz::Conversation::with_id(&fixture.runtime, &fixture.subject, "c-managed");
-    agent.run(conversation.turn_input("hello")).await.unwrap();
-    let partition = fixture.conversation_scope(&conversation);
+/// Seeds the records the management tests work with: an L2 entry and an L3
+/// entity of the fixture's subject. The entry carries its subject, which is
+/// what the management face enumerates and validates through.
+fn seed(fixture: &common::Fixture) -> (MemoryScope, MemoryScope) {
+    let partition = MemoryScope::new("conversation:c-managed");
     let scope = subject_scope(fixture);
     fixture
         .l2
         .upsert(L2MemoryEntry::new(
+            fixture.subject.clone(),
             partition.clone(),
             "billing",
             "asked about invoices",
@@ -56,9 +50,9 @@ async fn seed(fixture: &common::Fixture) -> (MemoryScope, MemoryScope) {
 #[tokio::test]
 async fn the_management_face_lists_edits_and_forgets() {
     let fixture = common::fixture(common::Parts::default());
-    // One archived turn registers the conversation (the id lookup covers
-    // the conversations the component has archived into).
-    let (partition, scope) = seed(&fixture).await;
+    // The entry's subject (not an archived turn) is what the face
+    // enumerates and validates through.
+    let (partition, scope) = seed(&fixture);
     let memory = fixture.runtime.memory();
 
     let entries = memory
@@ -113,10 +107,11 @@ async fn the_management_face_lists_edits_and_forgets() {
 #[tokio::test]
 async fn forget_matching_batches_by_scope() {
     let fixture = common::fixture(common::Parts::default());
-    let (partition, _) = seed(&fixture).await;
+    let (partition, _) = seed(&fixture);
     fixture
         .l2
         .upsert(L2MemoryEntry::new(
+            fixture.subject.clone(),
             partition.clone(),
             "shipping",
             "asked about parcels",
@@ -150,7 +145,7 @@ async fn forget_matching_batches_by_scope() {
 #[tokio::test]
 async fn the_actuator_exposes_documents_and_forgets_relations() {
     let fixture = common::fixture(common::Parts::default());
-    let (partition, scope) = seed(&fixture).await;
+    let (partition, scope) = seed(&fixture);
     let actuator = fixture.actuator;
 
     assert_eq!(
@@ -195,23 +190,16 @@ async fn the_actuator_exposes_documents_and_forgets_relations() {
 #[tokio::test]
 async fn the_management_face_is_isolated_by_subject() {
     let fixture = common::fixture(common::Parts::default());
-    seed(&fixture).await;
+    seed(&fixture);
     let alice = fixture.subject.clone();
     let bob = synonz::Subject::of(synonz::SubjectType::User, "u-bob");
 
-    // Bob's conversation through the component, plus one direct-write entry
-    // and one entity of his own.
-    let agent = synonz::Agent::builder()
-        .runtime(&fixture.runtime)
-        .model(common::mock(&["ok"]))
-        .build()
-        .unwrap();
-    let mut conversation = synonz::Conversation::with_id(&fixture.runtime, &bob, "c-bob");
-    agent.run(conversation.turn_input("hello")).await.unwrap();
-    let bob_partition = fixture.conversation_scope(&conversation);
+    // Bob's entry (carrying his subject) and one entity of his own.
+    let bob_partition = MemoryScope::new("conversation:c-bob");
     fixture
         .l2
         .upsert(L2MemoryEntry::new(
+            bob.clone(),
             bob_partition.clone(),
             "billing",
             "bob's invoice note",
@@ -314,6 +302,54 @@ async fn the_management_face_is_isolated_by_subject() {
             .len(),
         1
     );
+}
+
+#[tokio::test]
+async fn direct_store_writes_carry_their_owner_into_the_face() {
+    let fixture = common::fixture(common::Parts::default());
+    // A framework-external import: an entry written straight into the store
+    // with its subject (no turn archived through the component).
+    let partition = MemoryScope::new("conversation:c-imported");
+    fixture
+        .l2
+        .upsert(L2MemoryEntry::new(
+            fixture.subject.clone(),
+            partition.clone(),
+            "billing",
+            "imported invoice note",
+            Vec::new(),
+            0.5,
+            1,
+        ))
+        .unwrap();
+
+    let memory = fixture.runtime.memory();
+    let entries = memory
+        .list(
+            &fixture.subject,
+            MemoryQuery::new(10).with_conversation("c-imported"),
+        )
+        .unwrap();
+    assert_eq!(entries.items.len(), 1, "the import is visible to the face");
+    assert!(entries.items[0].content.contains("imported"));
+    assert_eq!(
+        memory
+            .get(&fixture.subject, &entries.items[0].id)
+            .unwrap()
+            .map(|item| item.content),
+        Some("imported invoice note".to_string())
+    );
+
+    // Ownership is part of the data: another subject sees nothing.
+    let other = synonz::Subject::of(synonz::SubjectType::User, "u-other");
+    assert!(
+        memory
+            .list(&other, MemoryQuery::new(10).with_conversation("c-imported"))
+            .unwrap()
+            .items
+            .is_empty()
+    );
+    assert!(memory.get(&other, &entries.items[0].id).unwrap().is_none());
 }
 
 /// The entity's vector as the recall path sees it: the similarity between
