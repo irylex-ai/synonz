@@ -4,15 +4,16 @@ All notable changes to Synonz are documented in this file. The format
 follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 versions follow [Semantic Versioning](https://semver.org/).
 
-## [0.7.0] - 2026-09-21
+## [0.7.0] - 2026-09-24
 
 The memory-componentization release: the framework keeps the memory
 contracts, the built-in engine and a bundled in-process default, while
-the layered memory model (L1 double-track messages, L2 event summaries,
-L3 entity graph and vectors) becomes the official component
-`synonz-layered-memory`. Topic detection returns to an independent
-Agent-level extension point, the read phase owns the model-visible
-message frame, and management gains opaque scope addressing.
+the layered memory model becomes the official component
+`synonz-layered-memory` (L1 turn-level entries, L2 batch compaction, L3
+configurable schema plus distillation). Topic detection returns to an
+independent Agent-level extension point, the read phase owns the
+model-visible message frame, and management gains opaque scope
+addressing with subject-isolated, store-driven ownership.
 **Breaking** — migrate with the table below and
 `docs/design/migration-0.7.0.zh-CN.md`.
 
@@ -54,7 +55,10 @@ message frame, and management gains opaque scope addressing.
   LLM judgment, anchor-first walk, cold-start gate), the four-phase
   pipeline, four replaceable storage contracts, a replaceable embedding
   port, semantic strategies, and its own observation face. The
-  component's model was redefined by ADR-0028.
+  component's model was redefined by ADR-0028. Its management face is
+  subject-isolated and store-driven: L2 entries carry their owner, the
+  store enumerates a subject's partitions (`scopes(subject)`), and
+  nothing is lost across restarts.
 
 ### Added
 
