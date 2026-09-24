@@ -48,7 +48,10 @@ memory.forget_matching(&subject, MemoryQuery::new(100).with_scope("project:abc")
 - **subject 隔离**：每次调用传入的 subject 决定可见范围——默认列出
   该 subject 的全部分区；显式 `scope` / `conversation_id` 过滤同样
   校验归属（不属于该 subject 的分区返回空），按 id 的
-  `get` / `edit` / `forget` 也只在该 subject 的分区内查找。
+  `get` / `edit` / `forget` 也只在该 subject 的分区内查找。组件的
+  会话归属**随数据走**（L2 条目携带 `subject`，存储提供
+  `scopes(subject)` 枚举分区），因此重启后管理面仍然完整，组件
+  不持有随会话数增长的内存索引。
 - 管理事实：`MemoryEvent::Updated { subject_id, scope, id }` /
   `Removed { subject_id, scope, ids }`（无内容，携带分区）。
 - 没有日常新增（`add`）：新增恒来自对话沉淀；批量导入 / 迁移由应用
@@ -168,8 +171,11 @@ LayeredMemoryProvider::builder()
   读/删带分区（数据自带 scope）。
 - 存储契约是**组件的持久化端口**：应用实现它们、组件调用它们；
   它们不是应用写记忆的 API（管理面无创建动词，记忆由会话产生）。
-  应用若直接写入（批量导入 / 迁移），属于框架外操作——用存储句柄
-  自行读回，管理面不索引这部分数据。
+  应用若直接写入（批量导入 / 迁移），属于框架外操作：条目**带上
+  正确的 `subject`** 后即被管理面覆盖（L2 的归属随条目持久化，
+  存储经 `L2MemoryStore::scopes(subject)` 枚举分区）；未带归属的
+  数据不会被管理面索引。L2 契约方法集：`upsert` / `get` / `list` /
+  `scopes(subject)` / `remove` / `count`。
 - 每个契约有进程内默认；真实后端（Redis / MongoDB / Neo4j / Milvus）
   建议独立成包，只依赖 `synonz-layered-memory`。
 - L3 的实体/关系词表由 `L3MemorySchema` 配置（默认中性集；空 =
@@ -208,11 +214,12 @@ LayeredMemoryProvider::builder()
   只支持"按 scope 读 / 批量遗忘"。
 - **应用日常新增**：不提供；导入 / 迁移走框架外（自持端口句柄）。
 - **0.6.0 数据**：不支持迁移。
-- 组件管理面按 id 查找覆盖"组件归档过的会话 + 配置的长记忆分区"；
-  应用直接写端口的数据不在索引内（属框架外导入）。组件在归档轮次时
-  记录会话的 subject 归属，管理面与组件富面（`LayeredMemoryActuator`
-  的 `l2_memory_entries` / `l3_memory_entities` / `l3_memory_relations`
-  / `forget_l3_memory_relation`）一律按 subject 收窄。
+- 组件管理面按 id 查找覆盖"存储中带该 subject 归属的会话分区 + 配置的
+  长记忆分区"；归属随 L2 条目持久化（`scopes(subject)` 枚举），所以
+  组件写入与框架外导入（带 subject）都在覆盖范围内。管理面与组件富面
+  （`LayeredMemoryActuator` 的 `l2_memory_entries` /
+  `l3_memory_entities` / `l3_memory_relations` /
+  `forget_l3_memory_relation`）一律按 subject 收窄。
 
 ## 8. 常见坑
 

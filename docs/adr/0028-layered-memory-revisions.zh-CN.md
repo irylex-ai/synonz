@@ -65,8 +65,10 @@ L1 的存储单元必须与召回单元一致；L2 的产出机制应以"滚出�
 - **产出模型改为批量压实**：触发 = 该会话未压实轮数达到 `l1_turns`
   （满窗）/ 主题切换 / 会话结束；一次摘要调用产出 **1..N 条** L2 条目
   （按事件/主题拆分）；
-- 条目 `L2MemoryEntry { id, scope, topic, content, versions, embedding,
-  importance, created_at, updated_at }`：
+- 条目 `L2MemoryEntry { id, subject, scope, topic, content, versions,
+  embedding, importance, created_at, updated_at }`：
+  - `subject` = 会话归属：随条目持久化，存储据此枚举分区
+    （`scopes(subject)`），组件不持内存索引（重启不丢）；
   - `content` 上限 `l2_content_chars`（默认 30 字，文档口径）；
   - `versions` 为历次 content（倒序、≤`l2_versions`）——更新时旧 content
     进 `versions` 头部，与文档 §3.2 的 event/content 数组一致；
@@ -77,7 +79,8 @@ L1 的存储单元必须与召回单元一致；L2 的产出机制应以"滚出�
   `origin` 区分——"主题总结"即压实产出的条目本身；L3 的原料由"本批 L1
   用户侧文本 + 会话 L2 条目"承担；
 - 存储契约 `L2MemoryStore`：`upsert(entry)` / `get(scope, id)` /
-  `list(scope)`（最近更新在前）/ `remove(scope, id)` / `count(scope)`；
+  `list(scope)`（最近更新在前）/ `scopes(subject)`（该 subject 的会话
+  分区，管理面枚举与归属校验用）/ `remove(scope, id)` / `count(scope)`；
   容量（条目上限、版本上限）由实现自持（构造时给）；
 - 轻量预判（极短/确认性输入）在批量语义下不再需要逐轮跳过：批次内由
   摘要策略决定是否产出条目（空输出 = 不落库）。
@@ -134,10 +137,12 @@ L1 的存储单元必须与召回单元一致；L2 的产出机制应以"滚出�
   `forget_l3_memory_relation`；原 `MemoryType` / `TypedItem` /
   `list_typed` **删除**（核心条目视图不带类型；Summary/Knowledge 的映射
   保留为文档描述）；
-- **subject 隔离**：会话分区在归档时记录 subject 归属；管理面与富面
-  只在该 subject 的会话分区与 `resolve(subject, "")` 的 L3 分区内查找；
-  显式 `scope` / `conversation_id` 过滤同样校验归属（不属于返回空）；
-  管理面无创建动词（新增恒来自对话沉淀）。
+- **subject 隔离**：归属随数据走——L2 条目携带 `subject`（存储经
+  `scopes(subject)` 枚举分区；重启后管理面仍完整，组件不持内存
+  索引）；管理面与富面只在该 subject 的会话分区与
+  `resolve(subject, "")` 的 L3 分区内查找；显式 `scope` /
+  `conversation_id` 过滤同样校验归属（不属于返回空）；管理面无创建
+  动词（新增恒来自对话沉淀）。
 
 ### 5. 长记忆分区：`MemoryScopeResolver`（修订 ADR-0026 §8 的"应用配置"）
 

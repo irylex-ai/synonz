@@ -74,9 +74,10 @@ let agent = synonz::Agent::builder()
 `runtime.memory()` gives the core item-level face (list / get / edit /
 forget, with scope addressing): L2 entries and L3 entities map onto the
 core item view. Every read and lookup is scoped to the subject — a
-conversation must be one the component archived into, and a long-term
-partition must be one the resolver returns for the subject. The actuator
-adds the typed view and relation-level removal:
+conversation partition is one whose entries carry the subject (the store
+enumerates them through `scopes(subject)`), and a long-term partition
+must be one the resolver returns for the subject. The actuator adds the
+typed view and relation-level removal:
 
 ```rust
 let handle = provider.actuator();
@@ -89,9 +90,11 @@ handle.forget_l3_memory_relation(&subject, &scope, "Alice", "likes", "coffee")?;
 The management face creates no entries: new memory comes from
 conversations (the pipeline), never from the application. The storage
 contracts are the component's persistence ports — applications implement
-them and the component calls them; bulk import or migration writes them
-directly outside the framework and reads them back through the store
-handles.
+them and the component calls them. Ownership travels with the data (L2
+entries carry their `subject`), so a bulk import written straight into
+the store is covered by the management face once it carries the right
+subject; the component keeps no in-memory index and nothing is lost
+across restarts.
 
 ## Model
 

@@ -101,13 +101,16 @@ message frame, and management gains opaque scope addressing.
 - The conversation-end teardown drains background tasks and then calls
   the pipeline's `finalize_conversation` hook (the mechanical L2→L3
   promotion is gone).
-- The component's management face is subject-isolated: conversations
-  register their owner at archive time; `list` / `get` / `edit` /
-  `forget` / `forget_matching` (explicit `scope` / `conversation_id`
-  filters included) only see the subject's own partitions, and the
-  actuator reads follow the same rule. The management face creates no
-  entries: new memory comes from conversations, and direct store writes
-  are out-of-framework imports the face does not index.
+- The component's management face is subject-isolated: ownership travels
+  with the data (L2 entries carry their `subject`, and the store
+  enumerates a subject's partitions through `scopes(subject)`), so
+  `list` / `get` / `edit` / `forget` / `forget_matching` (explicit
+  `scope` / `conversation_id` filters included) only see the subject's
+  own partitions, and the actuator reads follow the same rule. The
+  component keeps no in-memory conversation index: nothing is lost
+  across restarts, and direct store writes carrying the right subject
+  are covered. The management face still creates no entries: new memory
+  comes from conversations.
 - `L3MemoryGraphEdge` uses `from` / `to` (was `subject` / `object`); the
   component's vocabulary is conversation, not session.
 

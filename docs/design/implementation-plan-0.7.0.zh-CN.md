@@ -466,7 +466,14 @@ ADR-0028 组件实现经逐项评审后的修订（均在未发布的 0.7.0 内�
    或 `config`）；provider 去掉三个存储字段；顺带删除 `remove_record`
    的 Summary 分支里一行空操作（按 `(会话分区, 条目 id)` 删 L3 向量）。
    内部改动、行为等价，测试零改动。
+9. **会话归属随数据持久化**（#23）：`L2MemoryEntry` 增 `subject`（归属
+   随条目持久化，重启不丢）；`L2MemoryStore` 增 `scopes(subject)`
+   （默认实现直接枚举既有 entries map，零额外内存）；组件删除
+   `scope→subject` 内存索引与 `note_turn` 的 subject 参数，管理面 /
+   隔离 / 按 id 查找改为"向存储枚举 + 条目自带归属"；会话 scope 约定
+   `conversation:<id>` 不变；`compact` 为新建条目盖 subject；带归属的
+   框架外直写条目对管理面可见（#20 的边界措辞随之微调）。
 
-**验证**：全量回归 **267/267**（synonz 159 + 组件 30 + 适配层 42 +
+**验证**：全量回归 **268/268**（synonz 159 + 组件 31 + 适配层 42 +
 示例 36）；clippy / doc 零警告；fmt 干净；六个离线示例（含
 `layered_memory`）实跑 exit 0。
