@@ -73,6 +73,9 @@ pub enum MemoryFailedMoment {
     AtConversationEnd,
     /// Background maintenance work.
     Background,
+    /// An application-driven management operation (for example a
+    /// management edit's synchronous vector refresh).
+    OnDemand,
     /// The lifecycle entry (the conversation's initial state save).
     Creation,
 }
