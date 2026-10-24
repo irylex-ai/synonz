@@ -106,4 +106,9 @@
 
 ## 7. 发布记录
 
-（待发布）
+- **0.8.0 已发布（2026-10-24）**：crates.io 六 crate（`synonz` /
+  `synonz-derive` / `synonz-openai` / `synonz-anthropic` / `synonz-mcp` /
+  `synonz-layered-memory`）+ 轻量标签 `v0.8.0`（指向
+  `389e79b chore(release): prepare 0.8.0`）+ GitHub Release；发布后
+  核验注册表 `max_version`、README 渲染、docs.rs 构建与包内 README
+  一致。
