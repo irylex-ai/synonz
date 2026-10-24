@@ -198,16 +198,26 @@ impl ResponseAccumulator {
         if let Some(usage) = chunk.get("usage")
             && !usage.is_null()
         {
-            self.usage = Some(synonz::TokenUsage::new(
-                usage
-                    .get("prompt_tokens")
-                    .and_then(Value::as_u64)
-                    .unwrap_or(0),
-                usage
-                    .get("completion_tokens")
-                    .and_then(Value::as_u64)
-                    .unwrap_or(0),
-            ));
+            // OpenAI reports the cached input under the prompt-token
+            // details; DeepSeek-compatible backends report native hit
+            // tokens at the usage top level.
+            let cache_read = usage
+                .pointer("/prompt_tokens_details/cached_tokens")
+                .and_then(Value::as_u64)
+                .or_else(|| usage.get("prompt_cache_hit_tokens").and_then(Value::as_u64));
+            self.usage = Some(
+                synonz::TokenUsage::new(
+                    usage
+                        .get("prompt_tokens")
+                        .and_then(Value::as_u64)
+                        .unwrap_or(0),
+                    usage
+                        .get("completion_tokens")
+                        .and_then(Value::as_u64)
+                        .unwrap_or(0),
+                )
+                .cache_read_input_tokens(cache_read),
+            );
         }
         let Some(choices) = chunk.get("choices").and_then(Value::as_array) else {
             return Ok(Vec::new());
@@ -216,7 +226,12 @@ impl ResponseAccumulator {
         let mut finished = false;
         for choice in choices {
             let delta = &choice["delta"];
-            if let Some(text) = delta.get("content").and_then(Value::as_str) {
+            // Some providers emit an empty content fragment after the
+            // reasoning segment; an empty string is not a text delta (it
+            // would read as "the answer body started").
+            if let Some(text) = delta.get("content").and_then(Value::as_str)
+                && !text.is_empty()
+            {
                 self.text.push_str(text);
                 items.push(ModelStreamItem::Delta(ModelDelta::Text {
                     text: text.to_string(),
@@ -539,6 +554,64 @@ mod tests {
                 text: "pong".into()
             }],
             "reasoning must not join the canonical message"
+        );
+    }
+
+    #[test]
+    fn empty_content_after_reasoning_emits_no_text_delta() {
+        let mut accumulator = ResponseAccumulator::default();
+        let items = accumulator
+            .apply_chunk(&json!({
+                "choices": [{
+                    "delta": {"reasoning_content": "thinking", "content": ""},
+                    "finish_reason": null
+                }]
+            }))
+            .unwrap();
+        assert_eq!(items.len(), 1, "only the reasoning fragment streams");
+        assert!(matches!(
+            items[0],
+            ModelStreamItem::Delta(ModelDelta::Reasoning { .. })
+        ));
+    }
+
+    #[test]
+    fn usage_carries_prompt_cache_read_from_details() {
+        let mut accumulator = ResponseAccumulator::default();
+        accumulator
+            .apply_chunk(&json!({
+                "choices": [],
+                "usage": {
+                    "prompt_tokens": 100,
+                    "completion_tokens": 20,
+                    "prompt_tokens_details": {"cached_tokens": 80}
+                }
+            }))
+            .unwrap();
+        let usage = accumulator.usage_or_zero();
+        assert_eq!(usage.input_tokens, 100);
+        assert_eq!(usage.output_tokens, 20);
+        assert_eq!(usage.cache_read_input_tokens, Some(80));
+        assert_eq!(usage.cache_write_input_tokens, None);
+    }
+
+    #[test]
+    fn usage_falls_back_to_native_hit_tokens() {
+        let mut accumulator = ResponseAccumulator::default();
+        accumulator
+            .apply_chunk(&json!({
+                "choices": [],
+                "usage": {
+                    "prompt_tokens": 50,
+                    "completion_tokens": 5,
+                    "prompt_cache_hit_tokens": 30,
+                    "prompt_cache_miss_tokens": 20
+                }
+            }))
+            .unwrap();
+        assert_eq!(
+            accumulator.usage_or_zero(),
+            synonz::TokenUsage::new(50, 5).cache_read_input_tokens(Some(30))
         );
     }
 
