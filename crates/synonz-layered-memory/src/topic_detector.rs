@@ -34,8 +34,8 @@ impl TopicDetector for SimilarityTopicDetector {
             if is_trivial(input.input) || candidate.trim().is_empty() {
                 return Ok(None);
             }
-            let current_vector = self.embedding.embed(current).await?;
-            let candidate_vector = self.embedding.embed(&candidate).await?;
+            let current_vector = self.embedding.embed_passage(current).await?;
+            let candidate_vector = self.embedding.embed_passage(&candidate).await?;
             if cosine(&current_vector, &candidate_vector) >= self.config.topic_shift_similarity {
                 return Ok(None);
             }

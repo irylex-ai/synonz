@@ -530,8 +530,30 @@ impl synonz_layered_memory::Embedding for SharedEmbedding {
         self.0.embed(text)
     }
 
+    fn embed_query<'a>(
+        &'a self,
+        text: &'a str,
+    ) -> BoxFuture<'a, Result<Vec<f32>, synonz::MemoryFailure>> {
+        self.0.embed_query(text)
+    }
+
+    fn embed_passage<'a>(
+        &'a self,
+        text: &'a str,
+    ) -> BoxFuture<'a, Result<Vec<f32>, synonz::MemoryFailure>> {
+        self.0.embed_passage(text)
+    }
+
     fn embed_inline(&self, text: &str) -> Option<Result<Vec<f32>, synonz::MemoryFailure>> {
         self.0.embed_inline(text)
+    }
+
+    fn embed_inline_query(&self, text: &str) -> Option<Result<Vec<f32>, synonz::MemoryFailure>> {
+        self.0.embed_inline_query(text)
+    }
+
+    fn embed_inline_passage(&self, text: &str) -> Option<Result<Vec<f32>, synonz::MemoryFailure>> {
+        self.0.embed_inline_passage(text)
     }
 }
 
@@ -546,5 +568,81 @@ pub struct SharedModel(pub Arc<dyn Model>);
 impl Model for SharedModel {
     fn stream(&self, request: ModelRequest) -> BoxFuture<'_, Result<ModelStream, ModelError>> {
         self.0.stream(request)
+    }
+}
+
+/// The role one recorded embedding call carried.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CallRole {
+    Query,
+    Passage,
+    InlineQuery,
+    InlinePassage,
+    /// A direct `embed` / `embed_inline` call — the component must use the
+    /// role methods only.
+    Symmetric,
+}
+
+/// An embedding that records the role of every call and delegates to the
+/// bundled symmetric implementation.
+#[derive(Default)]
+pub struct RoleRecordingEmbedding {
+    pub calls: Arc<Mutex<Vec<(CallRole, String)>>>,
+    inner: synonz_layered_memory::HashEmbedding,
+}
+
+impl RoleRecordingEmbedding {
+    fn record(&self, role: CallRole, text: &str) {
+        self.calls.lock().unwrap().push((role, text.to_string()));
+    }
+
+    /// Whether any text recorded under one role contains `fragment`.
+    pub fn has(&self, role: CallRole, fragment: &str) -> bool {
+        self.calls
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|(recorded, text)| *recorded == role && text.contains(fragment))
+    }
+}
+
+impl synonz_layered_memory::Embedding for RoleRecordingEmbedding {
+    fn embed<'a>(
+        &'a self,
+        text: &'a str,
+    ) -> BoxFuture<'a, Result<Vec<f32>, synonz::MemoryFailure>> {
+        self.record(CallRole::Symmetric, text);
+        self.inner.embed(text)
+    }
+
+    fn embed_query<'a>(
+        &'a self,
+        text: &'a str,
+    ) -> BoxFuture<'a, Result<Vec<f32>, synonz::MemoryFailure>> {
+        self.record(CallRole::Query, text);
+        self.inner.embed_query(text)
+    }
+
+    fn embed_passage<'a>(
+        &'a self,
+        text: &'a str,
+    ) -> BoxFuture<'a, Result<Vec<f32>, synonz::MemoryFailure>> {
+        self.record(CallRole::Passage, text);
+        self.inner.embed_passage(text)
+    }
+
+    fn embed_inline(&self, text: &str) -> Option<Result<Vec<f32>, synonz::MemoryFailure>> {
+        self.record(CallRole::Symmetric, text);
+        self.inner.embed_inline(text)
+    }
+
+    fn embed_inline_query(&self, text: &str) -> Option<Result<Vec<f32>, synonz::MemoryFailure>> {
+        self.record(CallRole::InlineQuery, text);
+        self.inner.embed_inline_query(text)
+    }
+
+    fn embed_inline_passage(&self, text: &str) -> Option<Result<Vec<f32>, synonz::MemoryFailure>> {
+        self.record(CallRole::InlinePassage, text);
+        self.inner.embed_inline_passage(text)
     }
 }

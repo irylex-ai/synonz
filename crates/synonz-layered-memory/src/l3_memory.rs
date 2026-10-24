@@ -700,23 +700,29 @@ impl L3Memory {
         self.graph.get_entity_by_id(id)
     }
 
-    /// Corrects one entity's description in place: the embedding port's
-    /// inline fast path refreshes the recall vector when available
-    /// (otherwise the vector refreshes when the entity is next written
-    /// back).
+    /// Corrects one entity's description in place and refreshes its recall
+    /// vector through the embedding port's inline fast path when
+    /// available. The returned failure reports a failed inline refresh
+    /// (the edit itself applied); `None` means the refresh succeeded or
+    /// the port has no synchronous path.
     pub(crate) fn edit_entity(
         &self,
         mut entity: L3MemoryGraphEntity,
         content: &str,
-    ) -> Result<L3MemoryGraphEntity, MemoryStoreError> {
+    ) -> Result<(L3MemoryGraphEntity, Option<MemoryFailure>), MemoryStoreError> {
         entity.description = content.to_string();
         entity.updated_at = now_epoch();
         self.graph.upsert_entity(entity.clone())?;
-        if let Some(Ok(vector)) = self.embedding.embed_inline(&entity_text(&entity)) {
-            self.vectors
-                .upsert(&entity.scope, &entity.canonical_name, vector)?;
-        }
-        Ok(entity)
+        let refresh_failure = match self.embedding.embed_inline_passage(&entity_text(&entity)) {
+            Some(Ok(vector)) => {
+                self.vectors
+                    .upsert(&entity.scope, &entity.canonical_name, vector)?;
+                None
+            }
+            Some(Err(failure)) => Some(failure),
+            None => None,
+        };
+        Ok((entity, refresh_failure))
     }
 
     /// Removes one entity and its recall vector (the graph store cascades
@@ -762,7 +768,7 @@ impl L3Memory {
             .map(|turn| turn.input.as_str())
             .collect::<Vec<_>>()
             .join("\n");
-        let query_vector = self.embedding.embed(&query_text).await?;
+        let query_vector = self.embedding.embed_query(&query_text).await?;
         for scope in scopes {
             let known = self.known_entities(&scope, &query_vector)?;
             let extracted = self
@@ -796,7 +802,7 @@ impl L3Memory {
             else {
                 continue;
             };
-            let vector = self.embedding.embed(&entity_text(&entity)).await?;
+            let vector = self.embedding.embed_passage(&entity_text(&entity)).await?;
             self.vectors
                 .upsert(&scope, &name, vector)
                 .map_err(|error| MemoryFailure::new("repair", error.to_string()))?;
@@ -888,7 +894,7 @@ impl L3Memory {
             };
             // Vectors first: a partial failure leaves a harmless orphan
             // vector instead of an unrecallable entity.
-            let vector = self.embedding.embed(&entity_text(&entity)).await?;
+            let vector = self.embedding.embed_passage(&entity_text(&entity)).await?;
             self.vectors
                 .upsert(scope, &canonical, vector)
                 .map_err(|error| MemoryFailure::new("distill", error.to_string()))?;
@@ -947,7 +953,7 @@ impl L3Memory {
                 return Ok(entity.canonical_name.clone());
             }
         }
-        let vector = self.embedding.embed(name).await?;
+        let vector = self.embedding.embed_query(name).await?;
         let candidates = self
             .vectors
             .search(scope, &vector, 3)

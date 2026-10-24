@@ -7,20 +7,58 @@ use synonz::MemoryFailure;
 /// alias matching, and anchoring. Implementations are component
 /// configuration (a local model, a hosted endpoint, ...); failures surface
 /// through the framework like any other component failure.
+///
+/// The port distinguishes retrieval roles: [`Embedding::embed_query`]
+/// vectorizes text used to search (a recall query, a name looked up for
+/// alias resolution), and [`Embedding::embed_passage`] vectorizes text
+/// stored as the comparison side (turn text, summaries, entity text).
+/// Asymmetric models (for example E5-family models trained with `query: ` /
+/// `passage: ` prefixes) override the role methods and apply their own
+/// conventions; the component never prepends prefixes. Symmetric
+/// implementations override `embed` (and `embed_inline`) only — the role
+/// methods delegate by default.
 pub trait Embedding: Send + Sync + 'static {
-    /// Embeds one text (the asynchronous path used by the memory flows).
+    /// Embeds one text symmetrically (the baseline implementation point).
     fn embed<'a>(&'a self, text: &'a str) -> BoxFuture<'a, Result<Vec<f32>, MemoryFailure>>;
+
+    /// Embeds a retrieval query. Default: [`Embedding::embed`].
+    fn embed_query<'a>(&'a self, text: &'a str) -> BoxFuture<'a, Result<Vec<f32>, MemoryFailure>> {
+        self.embed(text)
+    }
+
+    /// Embeds a stored passage. Default: [`Embedding::embed`].
+    fn embed_passage<'a>(
+        &'a self,
+        text: &'a str,
+    ) -> BoxFuture<'a, Result<Vec<f32>, MemoryFailure>> {
+        self.embed(text)
+    }
 
     /// The optional synchronous fast path, used by the synchronous
     /// management verbs so an edit refreshes its recall vector
     /// immediately.
     ///
     /// Local implementations provide it; implementations whose
-    /// vectorization is inherently asynchronous keep the default (`None`),
-    /// and the component defers the refresh to its next background point
-    /// (the window filling, a topic shift, or conversation end).
+    /// vectorization is inherently asynchronous keep the default (`None`).
+    /// With `None`, the component does not queue a refresh: the stored
+    /// vector stays as it is until the record is next written by the
+    /// pipeline (a compaction update for an entry, a distillation update
+    /// for an entity). A provided fast path that fails is reported as a
+    /// framework `Failed` fact; the edit itself still applies.
     fn embed_inline(&self, _text: &str) -> Option<Result<Vec<f32>, MemoryFailure>> {
         None
+    }
+
+    /// Embeds a retrieval query on the synchronous fast path.
+    /// Default: [`Embedding::embed_inline`].
+    fn embed_inline_query(&self, text: &str) -> Option<Result<Vec<f32>, MemoryFailure>> {
+        self.embed_inline(text)
+    }
+
+    /// Embeds a stored passage on the synchronous fast path.
+    /// Default: [`Embedding::embed_inline`].
+    fn embed_inline_passage(&self, text: &str) -> Option<Result<Vec<f32>, MemoryFailure>> {
+        self.embed_inline(text)
     }
 }
 

@@ -262,6 +262,17 @@ impl LayeredMemory {
             }));
     }
 
+    /// Reports a failed inline recall-vector refresh: the edit itself
+    /// applied, and the failure is visible (never silent).
+    fn emit_refresh_failure(&self, id: &str, failure: synonz::MemoryFailure) {
+        self.bus
+            .emit(SynonzEvent::Memory(synonz::MemoryEvent::Failed {
+                stage: "embed".into(),
+                detail: format!("{id}: {}", failure.detail),
+                moment: synonz::MemoryFailedMoment::OnDemand,
+            }));
+    }
+
     /// Removes one located record (the layer objects own the cascades).
     fn remove_record(&self, record: &MemoryRecord) -> Result<bool, MemoryStoreError> {
         match record {
@@ -324,12 +335,18 @@ impl Memory for LayeredMemory {
         };
         match record {
             MemoryRecord::Summary(entry) => {
-                let entry = self.l2.edit_entry(entry, content)?;
+                let (entry, refresh_failure) = self.l2.edit_entry(entry, content)?;
+                if let Some(failure) = refresh_failure {
+                    self.emit_refresh_failure(&entry.id, failure);
+                }
                 self.emit_updated(subject, &entry.scope, &entry.id);
                 Ok(MemoryRecord::Summary(entry).item())
             }
             MemoryRecord::Entity(entity) => {
-                let entity = self.l3.edit_entity(entity, content)?;
+                let (entity, refresh_failure) = self.l3.edit_entity(entity, content)?;
+                if let Some(failure) = refresh_failure {
+                    self.emit_refresh_failure(&entity.id, failure);
+                }
                 self.emit_updated(subject, &entity.scope, &entity.id);
                 Ok(MemoryRecord::Entity(entity).item())
             }

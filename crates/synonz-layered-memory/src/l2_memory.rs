@@ -469,22 +469,29 @@ impl L2Memory {
 
     /// Corrects one entry in place: the old content moves into the version
     /// history (bounded by the configured capacity), and the embedding
-    /// port's inline fast path refreshes the recall vector when available
-    /// (otherwise the vector refreshes when the entry is next written back).
+    /// port's inline fast path refreshes the recall vector when available.
+    /// The returned failure reports a failed inline refresh (the edit
+    /// itself applied); `None` means the refresh succeeded or the port has
+    /// no synchronous path.
     pub(crate) fn edit_entry(
         &self,
         mut entry: L2MemoryEntry,
         content: &str,
-    ) -> Result<L2MemoryEntry, MemoryStoreError> {
+    ) -> Result<(L2MemoryEntry, Option<MemoryFailure>), MemoryStoreError> {
         entry.versions.insert(0, entry.content.clone());
         entry.versions.truncate(self.config.l2_versions.max(1));
         entry.content = content.to_string();
         entry.updated_at = now_epoch();
-        if let Some(Ok(vector)) = self.embedding.embed_inline(&entry.content) {
-            entry.embedding = vector;
-        }
+        let refresh_failure = match self.embedding.embed_inline_passage(&entry.content) {
+            Some(Ok(vector)) => {
+                entry.embedding = vector;
+                None
+            }
+            Some(Err(failure)) => Some(failure),
+            None => None,
+        };
         self.store.upsert(entry.clone())?;
-        Ok(entry)
+        Ok((entry, refresh_failure))
     }
 
     /// Removes one entry.
@@ -525,7 +532,7 @@ impl L2Memory {
         let mut created = 0usize;
         let mut updated = 0usize;
         for summary in output.summaries {
-            let vector = self.embedding.embed(&summary.content).await?;
+            let vector = self.embedding.embed_passage(&summary.content).await?;
             match summary
                 .update
                 .as_ref()

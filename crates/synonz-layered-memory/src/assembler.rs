@@ -150,7 +150,7 @@ impl MemoryContextAssembler for LayeredMemoryContextAssembler {
             let params = &self.config;
             let query = input.rewritten_input.unwrap_or(input.input);
             let partition = conversation_scope(input.conversation_id);
-            let query_vector = match self.embedding.embed(query).await {
+            let query_vector = match self.embedding.embed_query(query).await {
                 Ok(vector) => Some(vector),
                 Err(failure) => {
                     failures.push(failure);
@@ -227,7 +227,7 @@ impl MemoryContextAssembler for LayeredMemoryContextAssembler {
                             continue;
                         };
                         let text = entity_text(&entity);
-                        let vector = match self.embedding.embed(&text).await {
+                        let vector = match self.embedding.embed_passage(&text).await {
                             Ok(vector) => vector,
                             Err(failure) => {
                                 failures.push(failure);
@@ -267,7 +267,7 @@ impl MemoryContextAssembler for LayeredMemoryContextAssembler {
                                         continue;
                                     };
                                     let text = entity_text(&entity);
-                                    let vector = match self.embedding.embed(&text).await {
+                                    let vector = match self.embedding.embed_passage(&text).await {
                                         Ok(vector) => vector,
                                         Err(failure) => {
                                             failures.push(failure);
@@ -334,11 +334,11 @@ impl LayeredMemoryContextAssembler {
         topic: &str,
     ) -> Result<(), MemoryFailure> {
         let params = &self.config;
-        let input_vector = self.embedding.embed(&turn.input).await?;
+        let input_vector = self.embedding.embed_passage(&turn.input).await?;
         let response_vector = if turn.response.is_empty() {
             Vec::new()
         } else {
-            self.embedding.embed(&turn.response).await?
+            self.embedding.embed_passage(&turn.response).await?
         };
         let (semantic, track_weight, vector) = match query_vector {
             None => (0.0, params.recall_user_weight, input_vector),
