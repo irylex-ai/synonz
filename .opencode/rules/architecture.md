@@ -248,6 +248,23 @@ ADR is not required for:
 - local refactoring
 - obvious bug fixes
 
+### Implementation Gate
+
+Implementation may begin only after both gates have passed:
+
+1. every governing ADR is explicitly approved by the human (`APPROVED`);
+2. the implementation plan is explicitly approved by the human.
+
+A general instruction to proceed (for example "execute") does not substitute
+for the per-artifact approval above, and an ADR or plan draft must not be
+recorded as approved before the human has approved it. While a draft is under
+review it carries `PROPOSED` / "pending approval"; no code, test, or
+implementation-document changes for that scope may be made.
+
+Scope: any change governed by an ADR and any work item described by an
+implementation plan. Small, obvious changes without an ADR or plan (see §4
+"Implementation Choices") are not covered.
+
 ADRs are append-only. Superseding a previous decision creates a new ADR that
 references the superseded one; the old ADR is not rewritten. ADR content,
 lifecycle, and naming follow `.opencode/rules/documentation.md`.
@@ -286,6 +303,12 @@ Responsible for:
 - implementing approved decisions;
 - identifying conflicts between implementation and architecture;
 - flagging architecture drift discovered during implementation.
+
+Not responsible for:
+
+- starting or continuing implementation while a governing ADR or the
+  implementation plan is still pending human approval (see §9
+  "Implementation Gate").
 
 ### Review Agent
 
