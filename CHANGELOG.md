@@ -4,6 +4,71 @@ All notable changes to Synonz are documented in this file. The format
 follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 versions follow [Semantic Versioning](https://semver.org/).
 
+## [0.8.0] - 2026-10-24
+
+The consumer-feedback release: the layered memory component gains
+role-aware embedding (`query` / `passage`, so asymmetric retrieval
+models work correctly), model usage now carries prompt-cache metrics
+with a normalized total input, and two consumer-reported defects are
+fixed (empty streamed content deltas; silently swallowed inline
+embedding refreshes). No breaking API changes — the Anthropic
+`input_tokens` value grows to the total input when prompt caching is
+used (a behavior fix).
+
+### Added
+
+- **Role-aware embedding** (`synonz-layered-memory`): `Embedding`
+  gains `embed_query` / `embed_passage` and the synchronous
+  `embed_inline_query` / `embed_inline_passage` variants, all
+  delegating to the symmetric `embed` / `embed_inline` by default.
+  Asymmetric models (E5-family and friends) override the role methods
+  and apply their own prefixes; the component never prepends any. The
+  call sites are mapped: recall, the distillation entity lookup, and
+  the alias candidate lookup use `query`; turn text, summaries, entity
+  text, anchor re-embedding, vector repair, and management edits use
+  `passage`; topic detection uses `passage` on both sides.
+- **Usage cache metrics** (`synonz`): `TokenUsage` gains
+  `cache_read_input_tokens` / `cache_write_input_tokens`
+  (`Option<u64>`; `None` = not reported, `Some(0)` = explicit zero),
+  serialized with defaults so older payloads stay compatible. The
+  adapters parse them — OpenAI-compatible `prompt_tokens_details.cached_tokens`
+  (falling back to DeepSeek-native `prompt_cache_hit_tokens`) and
+  Anthropic `cache_read_input_tokens` / `cache_creation_input_tokens`.
+  `input_tokens` is now the total input on every provider.
+- **`MemoryFailedMoment::OnDemand`**: a failed synchronous
+  recall-vector refresh during a management edit is reported as a
+  `Failed` fact (`stage: "embed"`) instead of being swallowed; the
+  edit still applies and the stored vector stays as it was.
+
+### Changed
+
+- **Anthropic input accounting**: `input_tokens` now includes the cache
+  read and cache creation portions (previously only the uncached part
+  was reported). OpenAI and DeepSeek numbers are unchanged. Round
+  accumulation sums the cache fields; a metric stays `None` only while
+  every round leaves it unreported.
+
+### Fixed
+
+- **`synonz-openai` empty content deltas**: a provider sending
+  `content: ""` after a reasoning fragment no longer produces an empty
+  `ModelDelta::Text` (which consumers read as "the answer body
+  started"). Reasoning fragments still stream as reasoning.
+
+### Notes
+
+- The adapters are stream-only (`Model::stream`; `complete` folds the
+  stream), so usage is parsed from the streaming usage chunk and the
+  Anthropic `message_start` / `message_delta` events.
+- Existing `Embedding` implementations compile unchanged; symmetric
+  models keep their behavior.
+- `synonz-layered-memory` completeness audit against the consumer's
+  check-list: storage contracts, strategies, observation events,
+  management verbs, scope isolation, and configuration are all
+  present; the inline-refresh fix above closes the only silent-failure
+  gap. L2 capacity eviction remains unobserved (recorded as an open
+  item).
+
 ## [0.7.0] - 2026-09-24
 
 The memory-componentization release: the framework keeps the memory

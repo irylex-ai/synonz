@@ -51,8 +51,11 @@ let agent = synonz::Agent::builder()
   `L3MemoryGraphStore` / `L3MemoryVectorStore`) — each ships an
   in-process default; real backends (Redis, MongoDB, Neo4j, Milvus) can
   live in their own packages.
-- **Embedding**: the `Embedding` port (the bundled `HashEmbedding` is a
-  deterministic development default).
+- **Embedding**: the `Embedding` port with retrieval roles
+  (`embed_query` / `embed_passage` plus the inline variants) — symmetric
+  models override `embed` only; asymmetric models (for example E5-family
+  models) map the roles to their own prefixes. The bundled
+  `HashEmbedding` is a deterministic development default.
 - **Semantic strategies**: `L2MemorySummarizer` (batch compaction),
   `L3MemoryEntityExtractor` (distillation), and
   `LayeredMemoryContextRewriter` (the enhanced input) — the

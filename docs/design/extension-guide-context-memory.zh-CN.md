@@ -1,4 +1,4 @@
-# Synonz 上下文记忆扩展指南（0.7.0）
+# Synonz 上下文记忆扩展指南（0.8.0）
 
 面向"要替换或接入记忆能力"的下游开发者。0.6.0 的旧扩展面（公开
 `Context`、`ContextAssembler`、策略槽、三存储契约位）已移除；本指南
@@ -185,10 +185,57 @@ LayeredMemoryProvider::builder()
   注册解析器；未配置 = 按 subject 推导 `user:<subject>`；返回空 =
   该会话不写/不查 L3）。
 - embedding 是组件侧端口（`Embedding`）：默认 `HashEmbedding` 是确定性
-  开发实现；生产接入替换为本地模型或托管端点。
+  开发实现；生产接入替换为本地模型或托管端点。端口按检索角色区分
+  （见 §5.1）。
 - 组件观察面（`LayeredMemoryObserver`）上报分层进展
   （`Compacted` / `Distilled` / `Normalized` / `Skipped`）；可与
   runtime observer 同对象双注册（两个 trait，事件类型不同）。
+
+### 5.1 Embedding 角色与非对称检索模型
+
+`Embedding` 端口区分两种检索角色（ADR-0029）：
+
+- `embed_query`：检索查询（召回查询、蒸馏时检索已知实体、别名归一的
+  候选检索）——作为查询去和已存向量比较；
+- `embed_passage`：存储文本（L1 轮次、L2 摘要、L3 实体文本、向量修复）
+  ——向量化后存为对照物；
+- 同步快路径对应 `embed_inline_query` / `embed_inline_passage`（管理
+  编辑走 passage）。
+
+对称实现只覆写 `embed`（及可选的 `embed_inline`）——角色方法默认
+委托，`HashEmbedding` 即由此保持对称。非对称实现（E5 / BGE 等）覆写
+角色方法，在**实现内部**按模型约定加前缀；组件绝不拼接前缀：
+
+```rust
+struct E5Embedding {
+    // 本地模型或托管端点句柄
+}
+
+impl Embedding for E5Embedding {
+    fn embed<'a>(&'a self, text: &'a str) -> BoxFuture<'a, Result<Vec<f32>, MemoryFailure>> {
+        // 对称兜底；角色方法覆写后组件不再走这里。
+        self.embed_passage(text)
+    }
+
+    fn embed_query<'a>(&'a self, text: &'a str) -> BoxFuture<'a, Result<Vec<f32>, MemoryFailure>> {
+        Box::pin(async move { self.encode(&format!("query: {text}")).await })
+    }
+
+    fn embed_passage<'a>(&'a self, text: &'a str) -> BoxFuture<'a, Result<Vec<f32>, MemoryFailure>> {
+        Box::pin(async move { self.encode(&format!("passage: {text}")).await })
+    }
+}
+```
+
+组件调用点映射（锁死）：召回查询、蒸馏的已知实体检索、别名候选检索
+= **query**；L1 两侧、L3 锚点与走图实体重嵌入、L2 摘要、实体写入、
+向量修复 = **passage**；主题检测两侧同为 **passage**（同域比较，不构成
+检索方向）。
+
+管理编辑的内联刷新：`embed_inline_passage` 返回 `Some(Err)` 时编辑仍
+生效、向量保持旧值，失败以框架 `Failed` 事实（`stage: "embed"`、
+`moment: OnDemand`）暴露；返回 `None`（纯异步实现）时不排队刷新，
+向量保持到该记录下次被管线写入（L2 压实更新 / L3 蒸馏更新）。
 
 ## 6. 模型角色
 
@@ -258,6 +305,22 @@ impl Model for SwitchableModel {
 会话终结维护没有 Agent 在作用域，只能用 Provider 模型（未配置 = 显式
 `Failed`，见 §5）；希望终结维护也跟随切换时，把代理作为
 `MemoryProvider` 的模型传入即可。
+
+### 6.2 用量与缓存指标
+
+模型调用的用量统一经 `TokenUsage` 暴露（`ModelEvent::Responded` 与
+`AgentOutput.usage`；见 ADR-0030）：
+
+- `input_tokens` = **总输入**（含缓存读写）；`output_tokens` 为产出；
+- `cache_read_input_tokens` / `cache_write_input_tokens`：provider 上报
+  的缓存命中 / 写入量；`None` = 未上报，`Some(0)` = 显式为 0；
+- per-provider：OpenAI 兼容取 `prompt_tokens_details.cached_tokens`
+  （缺失回退 DeepSeek 原生 `prompt_cache_hit_tokens`）；Anthropic 取
+  `cache_read_input_tokens` / `cache_creation_input_tokens`，并把
+  `input_tokens` 归一为三者之和；无缓存体系两项保持 `None`；
+- 适配器只有流式路径（`Model` 只有 `stream`），用量在流式 usage
+  chunk / `message_start` / `message_delta` 解析；
+- agent 逐轮累加：逐字段求和，两侧均未上报时保持 `None`。
 
 ## 7. 边界与绕行
 
