@@ -125,22 +125,74 @@ pub enum CallPurpose {
 }
 
 /// Token accounting for one model call.
+///
+/// `input_tokens` is the total input consumed by the request: adapters
+/// normalize it so the cache read and cache write portions are included.
+/// The cache fields break that input down; `None` means the provider did
+/// not report the metric, while `Some(0)` is an explicit zero.
 #[non_exhaustive]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TokenUsage {
-    /// Tokens consumed by the request.
+    /// Total input tokens consumed by the request (cache read and cache
+    /// write included).
     pub input_tokens: u64,
     /// Tokens produced by the response.
     pub output_tokens: u64,
+    /// Input tokens served from the provider's prompt cache (`None` when
+    /// the provider reports no cache metric).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_read_input_tokens: Option<u64>,
+    /// Input tokens written into the provider's prompt cache (`None` when
+    /// the provider reports no cache metric).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_write_input_tokens: Option<u64>,
 }
 
 impl TokenUsage {
-    /// Creates a usage record.
+    /// Creates a usage record without cache accounting.
     pub fn new(input_tokens: u64, output_tokens: u64) -> Self {
         Self {
             input_tokens,
             output_tokens,
+            cache_read_input_tokens: None,
+            cache_write_input_tokens: None,
         }
+    }
+
+    /// Sets the input tokens served from the prompt cache.
+    pub fn cache_read_input_tokens(mut self, tokens: Option<u64>) -> Self {
+        self.cache_read_input_tokens = tokens;
+        self
+    }
+
+    /// Sets the input tokens written into the prompt cache.
+    pub fn cache_write_input_tokens(mut self, tokens: Option<u64>) -> Self {
+        self.cache_write_input_tokens = tokens;
+        self
+    }
+
+    /// Adds one call's usage into this total (per-round accumulation):
+    /// counts sum, and a cache metric stays `None` only while both sides
+    /// are unreported.
+    pub(crate) fn accumulate(&mut self, other: TokenUsage) {
+        self.input_tokens += other.input_tokens;
+        self.output_tokens += other.output_tokens;
+        self.cache_read_input_tokens =
+            add_reported(self.cache_read_input_tokens, other.cache_read_input_tokens);
+        self.cache_write_input_tokens = add_reported(
+            self.cache_write_input_tokens,
+            other.cache_write_input_tokens,
+        );
+    }
+}
+
+/// Adds two optional reported counts: `None` means "not reported" and
+/// contributes zero; the sum stays `None` only when both sides are
+/// unreported.
+fn add_reported(total: Option<u64>, increment: Option<u64>) -> Option<u64> {
+    match (total, increment) {
+        (None, None) => None,
+        (total, increment) => Some(total.unwrap_or(0) + increment.unwrap_or(0)),
     }
 }
 
@@ -292,5 +344,55 @@ mod tests {
         assert_eq!(json["kind"], "model");
         assert_eq!(json["event"], "requested");
         assert_eq!(json["round"], 2);
+    }
+
+    #[test]
+    fn token_usage_cache_fields_round_trip() {
+        let usage = TokenUsage::new(100, 20)
+            .cache_read_input_tokens(Some(80))
+            .cache_write_input_tokens(Some(10));
+        let json = serde_json::to_value(usage).unwrap();
+        assert_eq!(json["input_tokens"], 100);
+        assert_eq!(json["cache_read_input_tokens"], 80);
+        assert_eq!(json["cache_write_input_tokens"], 10);
+        let back: TokenUsage = serde_json::from_value(json).unwrap();
+        assert_eq!(back, usage);
+    }
+
+    #[test]
+    fn token_usage_omits_unreported_cache_fields() {
+        let usage = TokenUsage::new(10, 5);
+        let json = serde_json::to_value(usage).unwrap();
+        assert!(json.get("cache_read_input_tokens").is_none());
+        assert!(json.get("cache_write_input_tokens").is_none());
+        // A payload from before the fields existed restores as unreported.
+        let legacy: TokenUsage =
+            serde_json::from_value(serde_json::json!({"input_tokens": 10, "output_tokens": 5}))
+                .unwrap();
+        assert_eq!(legacy, TokenUsage::new(10, 5));
+        assert_eq!(legacy.cache_read_input_tokens, None);
+        assert_eq!(legacy.cache_write_input_tokens, None);
+    }
+
+    #[test]
+    fn token_usage_accumulates_counts_and_reported_cache() {
+        let mut total = TokenUsage::new(0, 0);
+        total.accumulate(TokenUsage::new(10, 2));
+        // Unreported on both sides stays unreported.
+        assert_eq!(total.cache_read_input_tokens, None);
+        // An explicit zero counts as reported.
+        total.accumulate(TokenUsage::new(5, 1).cache_read_input_tokens(Some(0)));
+        assert_eq!(total.cache_read_input_tokens, Some(0));
+        total.accumulate(
+            TokenUsage::new(7, 3)
+                .cache_read_input_tokens(Some(4))
+                .cache_write_input_tokens(Some(2)),
+        );
+        assert_eq!(
+            total,
+            TokenUsage::new(22, 6)
+                .cache_read_input_tokens(Some(4))
+                .cache_write_input_tokens(Some(2))
+        );
     }
 }

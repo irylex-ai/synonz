@@ -889,10 +889,7 @@ impl AgentLoopTask {
                 break item;
             };
 
-            total_usage = TokenUsage::new(
-                total_usage.input_tokens + usage.input_tokens,
-                total_usage.output_tokens + usage.output_tokens,
-            );
+            total_usage.accumulate(usage);
 
             let calls = tool_calls_of(&message);
             emit!(TurnEvent::Model(ModelEvent::Responded {
