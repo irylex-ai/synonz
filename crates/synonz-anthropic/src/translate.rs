@@ -183,6 +183,8 @@ pub(crate) struct ResponseAccumulator {
     blocks: BTreeMap<u64, AccumBlock>,
     input_tokens: u64,
     output_tokens: u64,
+    cache_read_input_tokens: Option<u64>,
+    cache_creation_input_tokens: Option<u64>,
 }
 
 impl ResponseAccumulator {
@@ -195,10 +197,13 @@ impl ResponseAccumulator {
         match event.get("type").and_then(Value::as_str) {
             Some("message_start") => {
                 if let Some(usage) = event
-                    .pointer("/message/usage/input_tokens")
-                    .and_then(Value::as_u64)
+                    .get("message")
+                    .and_then(|message| message.get("usage"))
                 {
-                    self.input_tokens = usage;
+                    if let Some(input) = usage.get("input_tokens").and_then(Value::as_u64) {
+                        self.input_tokens = input;
+                    }
+                    self.read_cache_usage(usage);
                 }
                 Ok(None)
             }
@@ -267,11 +272,11 @@ impl ResponseAccumulator {
                 }
             }
             Some("message_delta") => {
-                if let Some(usage) = event
-                    .pointer("/usage/output_tokens")
-                    .and_then(Value::as_u64)
-                {
-                    self.output_tokens = usage;
+                if let Some(usage) = event.get("usage") {
+                    if let Some(output) = usage.get("output_tokens").and_then(Value::as_u64) {
+                        self.output_tokens = output;
+                    }
+                    self.read_cache_usage(usage);
                 }
                 // The stop_reason arrives here, ahead of message_stop.
                 if event
@@ -293,6 +298,20 @@ impl ResponseAccumulator {
                     .to_string(),
             }))),
             _ => Ok(None), // ping and unknown event types
+        }
+    }
+
+    /// Captures the prompt-cache accounting when the event reports it
+    /// (absent fields leave the current values untouched).
+    fn read_cache_usage(&mut self, usage: &Value) {
+        if let Some(read) = usage.get("cache_read_input_tokens").and_then(Value::as_u64) {
+            self.cache_read_input_tokens = Some(read);
+        }
+        if let Some(creation) = usage
+            .get("cache_creation_input_tokens")
+            .and_then(Value::as_u64)
+        {
+            self.cache_creation_input_tokens = Some(creation);
         }
     }
 
@@ -324,9 +343,17 @@ impl ResponseAccumulator {
         if blocks.is_empty() {
             return Ok(None);
         }
+        // Anthropic's `input_tokens` counts only the uncached portion; the
+        // framework's input count is the total consumed input.
+        let cache_read = self.cache_read_input_tokens;
+        let cache_creation = self.cache_creation_input_tokens;
+        let input_tokens =
+            self.input_tokens + cache_read.unwrap_or(0) + cache_creation.unwrap_or(0);
         Ok(Some(ModelStreamItem::Finish {
             message: Message::new(Role::Assistant, blocks),
-            usage: TokenUsage::new(self.input_tokens, self.output_tokens),
+            usage: TokenUsage::new(input_tokens, self.output_tokens)
+                .cache_read_input_tokens(cache_read)
+                .cache_write_input_tokens(cache_creation),
         }))
     }
 }
@@ -470,6 +497,64 @@ mod tests {
         assert_eq!(reasoning, "hmm ");
         assert_eq!(deltas, vec!["pong".to_string()]);
         assert!(finish.is_some(), "the stream must still terminate");
+    }
+
+    #[test]
+    fn usage_normalizes_total_input_with_prompt_cache() {
+        let mut accumulator = ResponseAccumulator::default();
+        let events: Vec<Value> = vec![
+            json!({"type":"message_start","message":{"usage":{
+                "input_tokens": 10,
+                "cache_read_input_tokens": 100,
+                "cache_creation_input_tokens": 20
+            }}}),
+            json!({"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}),
+            json!({"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"ok"}}),
+            json!({"type":"content_block_stop","index":0}),
+            json!({"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":5}}),
+            json!({"type":"message_stop"}),
+        ];
+        let mut finish = None;
+        for event in &events {
+            if let Some(item) = accumulator.apply_event(event).unwrap() {
+                finish = Some(item);
+            }
+        }
+        let Some(ModelStreamItem::Finish { usage, .. }) = finish else {
+            panic!("expected a finish item");
+        };
+        assert_eq!(
+            usage,
+            TokenUsage::new(130, 5)
+                .cache_read_input_tokens(Some(100))
+                .cache_write_input_tokens(Some(20)),
+            "input_tokens is the total input: 10 uncached + 100 read + 20 written"
+        );
+    }
+
+    #[test]
+    fn usage_without_cache_fields_reports_none() {
+        let mut accumulator = ResponseAccumulator::default();
+        let events: Vec<Value> = vec![
+            json!({"type":"message_start","message":{"usage":{"input_tokens":7}}}),
+            json!({"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}),
+            json!({"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"ok"}}),
+            json!({"type":"content_block_stop","index":0}),
+            json!({"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":2}}),
+            json!({"type":"message_stop"}),
+        ];
+        let mut finish = None;
+        for event in &events {
+            if let Some(item) = accumulator.apply_event(event).unwrap() {
+                finish = Some(item);
+            }
+        }
+        let Some(ModelStreamItem::Finish { usage, .. }) = finish else {
+            panic!("expected a finish item");
+        };
+        assert_eq!(usage, TokenUsage::new(7, 2));
+        assert_eq!(usage.cache_read_input_tokens, None);
+        assert_eq!(usage.cache_write_input_tokens, None);
     }
 
     #[test]
