@@ -176,6 +176,17 @@ LayeredMemoryProvider::builder()
   存储经 `L2MemoryStore::scopes(subject)` 枚举分区）；未带归属的
   数据不会被管理面索引。L2 契约方法集：`upsert` / `get` / `list` /
   `scopes(subject)` / `remove` / `count`。
+- **L1 契约同时承载压实游标**：`uncompacted(scope)`（未压实轮次，
+  旧→新）与 `mark_compacted(scope, through)`（成功后推进、幂等）。
+  持久化实现必须把游标与轮次一起持久化（快照字段或追加日志位置），
+  并保证沉淀窗口内的轮次可读——容量小于压实窗口会静默丢弃待压实
+  轮次。维护因此可跨进程重启恢复：每进程每会话首次归档时与存储对账，
+  积压达阈值立即补做；批次不再退化为"最近 N 轮"。
+- **蒸馏带沉淀窗口**：压实批次仅当最早轮次达到
+  `l3_distill_min_age_seconds`（默认 1 天；0 = 压实即蒸馏）才蒸馏；
+  未达龄内容留在 L2，后续蒸馏以 "Conversation entries" 承接；主题
+  切换与会话终结不受窗口约束。维护按会话串行，压缩成功后才推进游标
+  ——崩溃 / 部分写入窗口为"至少一次"（重试可能重复该批次）。
 - 每个契约有进程内默认；真实后端（Redis / MongoDB / Neo4j / Milvus）
   建议独立成包，只依赖 `synonz-layered-memory`。
 - L3 的实体/关系词表由 `L3MemorySchema` 配置（默认中性集；空 =

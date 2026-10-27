@@ -4,6 +4,82 @@ All notable changes to Synonz are documented in this file. The format
 follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 versions follow [Semantic Versioning](https://semver.org/).
 
+## [0.9.0] - 2026-10-24
+
+The durable-maintenance release: the layered memory component's
+maintenance boundary (which turns await compaction) becomes a persisted
+compaction cursor owned by the L1 storage contract, so compaction and
+distillation resume correctly across process restarts with persistent
+stores. Distillation gains a settle window (one day by default) on the
+compaction path, maintenance serializes per conversation, and crash
+windows are documented as at-least-once. **Breaking** — the L1 storage
+contract gains two required methods.
+
+### Added
+
+- **Durable compaction cursor** (`synonz-layered-memory`): the
+  `L1MemoryStore` contract gains `uncompacted(scope)` (the turns not yet
+  marked compacted, oldest first) and `mark_compacted(scope, through)`
+  (idempotent and monotonic). The component derives every maintenance
+  batch from the store instead of a process-local counter; the trigger
+  hint is initialized once per process per conversation and re-synced
+  from the store after every run. Restart catch-up: a process's first
+  turn counts the persisted backlog, and a backlog already at the window
+  compacts immediately.
+- **Distillation settle window**:
+  `LayeredMemoryConfig::l3_distill_min_age_seconds` (default 86 400 s —
+  one day; `0` = distill on every compaction). The window gates only the
+  compaction path and is judged by the batch's oldest turn; younger
+  content stays in L2 and is re-exposed to later extractions as
+  conversation entries. Topic-shift and conversation-end distillation
+  are unchanged.
+- **Per-conversation serialization**: a maintenance run in flight skips
+  overlapping triggers (the next turn retries), and conversation end
+  drains the pending backlog in bounded windows.
+
+### Changed
+
+- Maintenance batches are the durable pending set — never "the last N
+  turns" — and each run processes at most one window, draining larger
+  backlogs progressively.
+- The cursor advances only after the compaction writes succeed; a failed
+  distillation reports a `Failed` fact without blocking the advance.
+  Crash/partial-write windows are at-least-once: the retried batch may
+  duplicate entries.
+- Conversation end no longer stops at one batch: it drains the backlog
+  window by window (no later turn will trigger the rest).
+
+### Breaking Changes
+
+- `L1MemoryStore` gains the two required methods. Persistent
+  implementations must persist the cursor alongside the turns (a
+  snapshot field or an append-log position) and keep the uncompacted
+  turns readable; a capacity smaller than the compaction window silently
+  drops pending turns. The bundled in-process implementation keeps its
+  memory-only behavior.
+
+### Migration (0.8 → 0.9)
+
+1. Implement `uncompacted` and `mark_compacted` on your `L1MemoryStore`:
+   persist one cursor per conversation (for example the last compacted
+   turn's id or its position in the append log) and answer
+   `uncompacted` with the turns after it. Tolerate unknown or evicted
+   ids (a no-op mark).
+2. Keep the cursor in the same durable write path as the turns (the
+   append's fsync batch); the component advances it only after the L2
+   writes succeed.
+3. Review `l3_distill_min_age_seconds` (default one day): set `0` to
+   distill on every compaction, or a larger window to distill only
+   settled material.
+
+### Notes
+
+- The framework is unchanged: no new core API or lifecycle hook.
+- `touched` remains process-local and best-effort (the conversation-end
+  vector repair does not resume after a restart; normally written vectors
+  are unaffected). Management-edit vs in-flight compaction remains a
+  known separate issue.
+
 ## [0.8.0] - 2026-10-24
 
 The consumer-feedback release: the layered memory component gains

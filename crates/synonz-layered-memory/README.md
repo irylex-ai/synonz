@@ -50,7 +50,10 @@ let agent = synonz::Agent::builder()
 - **Storage contracts** (`L1MemoryStore` / `L2MemoryStore` /
   `L3MemoryGraphStore` / `L3MemoryVectorStore`) — each ships an
   in-process default; real backends (Redis, MongoDB, Neo4j, Milvus) can
-  live in their own packages.
+  live in their own packages. `L1MemoryStore` also owns the durable
+  compaction cursor (`uncompacted` / `mark_compacted`): maintenance
+  resumes across process restarts, and persistent stores must persist
+  the cursor alongside the turns.
 - **Embedding**: the `Embedding` port with retrieval roles
   (`embed_query` / `embed_passage` plus the inline variants) — symmetric
   models override `embed` only; asymmetric models (for example E5-family
@@ -69,8 +72,8 @@ let agent = synonz::Agent::builder()
   touching the core event bus; failures keep flowing through the
   framework as `Failed` facts.
 - **Tunables**: `LayeredMemoryConfig` (capacities, recall weights,
-  thresholds, hop decay, the schema) and `L3MemorySchema` (the
-  entity/relation vocabulary and its fallbacks).
+  thresholds, hop decay, the distillation settle window, the schema) and
+  `L3MemorySchema` (the entity/relation vocabulary and its fallbacks).
 
 ## Management
 
