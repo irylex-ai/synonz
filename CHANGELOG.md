@@ -4,7 +4,7 @@ All notable changes to Synonz are documented in this file. The format
 follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 versions follow [Semantic Versioning](https://semver.org/).
 
-## [0.9.0] - 2026-10-24
+## [0.9.0] - 2026-10-27
 
 The durable-maintenance release: the layered memory component's
 maintenance boundary (which turns await compaction) becomes a persisted
