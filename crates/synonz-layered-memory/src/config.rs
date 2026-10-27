@@ -51,6 +51,11 @@ pub struct LayeredMemoryConfig {
     pub l3_max_hops: usize,
     /// The score decay per graph hop.
     pub l3_hop_decay: f32,
+    /// The minimum age (seconds) of the oldest turn in a compaction batch
+    /// before the compaction path distills it. `0` distills on every
+    /// compaction; topic-shift and conversation-end distillation ignore
+    /// this window.
+    pub l3_distill_min_age_seconds: u64,
     /// How many recalled items the assembled context keeps.
     pub recall_top_n: usize,
     /// The semantic-similarity weight.
@@ -91,6 +96,7 @@ impl Default for LayeredMemoryConfig {
             l3_anchor_similarity: 0.5,
             l3_max_hops: 2,
             l3_hop_decay: 0.7,
+            l3_distill_min_age_seconds: 86_400,
             recall_top_n: 5,
             recall_semantic_weight: 0.5,
             recall_time_weight: 0.3,

@@ -95,3 +95,72 @@ async fn failed_turns_never_reach_working_memory() {
     assert_eq!(fixture.l1.count(&scope).unwrap(), 0);
     assert_eq!(conversation.turns().len(), 1, "the truth archive keeps it");
 }
+
+#[test]
+fn the_compaction_cursor_tracks_the_pending_turns() {
+    let store = InProcessL1MemoryStore::new(10);
+    let scope = MemoryScope::new("conversation:cursor");
+    let first = L1MemoryEntry::new(scope.clone(), "t", "one", "1", 1);
+    let second = L1MemoryEntry::new(scope.clone(), "t", "two", "2", 2);
+    let third = L1MemoryEntry::new(scope.clone(), "t", "three", "3", 3);
+    store.append(first.clone()).unwrap();
+    store.append(second.clone()).unwrap();
+    store.append(third.clone()).unwrap();
+
+    assert_eq!(store.uncompacted(&scope).unwrap().len(), 3);
+
+    store.mark_compacted(&scope, &first.id).unwrap();
+    assert_eq!(
+        store.uncompacted(&scope).unwrap(),
+        vec![second.clone(), third.clone()]
+    );
+
+    // Idempotent and monotonic: repeating the mark or naming an unknown
+    // turn is a no-op.
+    store.mark_compacted(&scope, &first.id).unwrap();
+    assert_eq!(store.uncompacted(&scope).unwrap().len(), 2);
+    store.mark_compacted(&scope, "missing").unwrap();
+    assert_eq!(store.uncompacted(&scope).unwrap().len(), 2);
+
+    store.mark_compacted(&scope, &third.id).unwrap();
+    assert!(store.uncompacted(&scope).unwrap().is_empty());
+    assert_eq!(
+        store.recent(&scope, 10).unwrap().len(),
+        3,
+        "compaction never removes turns"
+    );
+}
+
+#[test]
+fn an_evicted_cursor_reports_the_retained_turns() {
+    let store = InProcessL1MemoryStore::new(2);
+    let scope = MemoryScope::new("conversation:cursor");
+    let first = L1MemoryEntry::new(scope.clone(), "t", "one", "1", 1);
+    store.append(first.clone()).unwrap();
+    store.mark_compacted(&scope, &first.id).unwrap();
+
+    let second = L1MemoryEntry::new(scope.clone(), "t", "two", "2", 2);
+    let third = L1MemoryEntry::new(scope.clone(), "t", "three", "3", 3);
+    store.append(second.clone()).unwrap();
+    store.append(third.clone()).unwrap();
+
+    assert_eq!(
+        store.uncompacted(&scope).unwrap(),
+        vec![second, third],
+        "everything retained is newer than the evicted cursor"
+    );
+}
+
+#[test]
+fn clearing_the_partition_resets_the_cursor() {
+    let store = InProcessL1MemoryStore::new(10);
+    let scope = MemoryScope::new("conversation:cursor");
+    let first = L1MemoryEntry::new(scope.clone(), "t", "one", "1", 1);
+    store.append(first.clone()).unwrap();
+    store.mark_compacted(&scope, &first.id).unwrap();
+    store.clear(&scope).unwrap();
+
+    let again = L1MemoryEntry::new(scope.clone(), "t", "again", "2", 2);
+    store.append(again.clone()).unwrap();
+    assert_eq!(store.uncompacted(&scope).unwrap(), vec![again]);
+}

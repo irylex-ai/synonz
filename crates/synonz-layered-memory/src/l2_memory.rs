@@ -391,17 +391,15 @@ impl L2MemorySummarizer for L2MemoryPromptSummarizer {
     }
 }
 
-/// The component's L2 domain object (internal): batch compaction, the
-/// per-conversation uncompacted-turn counter (compaction accounting), and
-/// entry reads. Ownership lives on the entries themselves — the store
-/// enumerates a subject's partitions, so the layer keeps no index.
+/// The component's L2 domain object (internal): batch compaction and entry
+/// reads. Ownership lives on the entries themselves — the store enumerates
+/// a subject's partitions, so the layer keeps no index.
 pub(crate) struct L2Memory {
     store: Arc<dyn L2MemoryStore>,
     summarizer: Arc<dyn L2MemorySummarizer>,
     embedding: Arc<dyn Embedding>,
     config: Arc<crate::config::LayeredMemoryConfig>,
     observer: Option<Arc<dyn LayeredMemoryObserver>>,
-    uncompacted: Mutex<HashMap<String, usize>>,
 }
 
 impl L2Memory {
@@ -419,26 +417,7 @@ impl L2Memory {
             embedding,
             config,
             observer,
-            uncompacted: Mutex::new(HashMap::new()),
         }
-    }
-
-    /// Notes one archived turn (increments its uncompacted count).
-    pub(crate) fn note_turn(&self, scope: &MemoryScope) {
-        let mut counts = self.uncompacted.lock().unwrap_or_else(|p| p.into_inner());
-        *counts.entry(scope.to_string()).or_insert(0) += 1;
-    }
-
-    /// How many turns await compaction in one conversation.
-    pub(crate) fn uncompacted_turns(&self, scope: &MemoryScope) -> usize {
-        let counts = self.uncompacted.lock().unwrap_or_else(|p| p.into_inner());
-        counts.get(scope.as_str()).copied().unwrap_or(0)
-    }
-
-    /// Resets the counter.
-    pub(crate) fn clear_counter(&self, scope: &MemoryScope) {
-        let mut counts = self.uncompacted.lock().unwrap_or_else(|p| p.into_inner());
-        counts.remove(scope.as_str());
     }
 
     /// The subject's conversation partitions, sorted by scope (enumerated
@@ -525,7 +504,6 @@ impl L2Memory {
                 scope: scope.clone(),
                 reason: "the batch produced no entries".to_string(),
             });
-            self.clear_counter(scope);
             return Ok(());
         }
         let now = now_epoch();
@@ -574,7 +552,6 @@ impl L2Memory {
             created,
             updated,
         });
-        self.clear_counter(scope);
         Ok(())
     }
 

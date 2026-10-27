@@ -101,12 +101,15 @@ pub fn mock(replies: &[&str]) -> synonz::MockModel {
 /// A summarizer playing queued outputs (empty queue = no entries).
 pub struct StubSummarizer {
     outputs: Mutex<VecDeque<L2MemorySummaryOutput>>,
+    /// The batch inputs of every call, one entry per call.
+    pub seen: Arc<Mutex<Vec<Vec<String>>>>,
 }
 
 impl StubSummarizer {
     pub fn new(outputs: Vec<L2MemorySummaryOutput>) -> Self {
         Self {
             outputs: Mutex::new(outputs.into_iter().collect()),
+            seen: Arc::new(Mutex::new(Vec::new())),
         }
     }
 }
@@ -114,8 +117,12 @@ impl StubSummarizer {
 impl L2MemorySummarizer for StubSummarizer {
     fn summarize<'a>(
         &'a self,
-        _input: synonz_layered_memory::L2MemorySummaryInput<'a>,
+        input: synonz_layered_memory::L2MemorySummaryInput<'a>,
     ) -> BoxFuture<'a, Result<L2MemorySummaryOutput, synonz::MemoryFailure>> {
+        self.seen
+            .lock()
+            .unwrap()
+            .push(input.batch.iter().map(|turn| turn.input.clone()).collect());
         let output = self.outputs.lock().unwrap().pop_front().unwrap_or_default();
         Box::pin(async move { Ok(output) })
     }
@@ -252,7 +259,7 @@ impl Observer for FactLog {
 // ────────────────────────── fixture ──────────────────────────
 
 /// The fixture's injectable parts.
-#[derive(Default)]
+#[derive(Default, Clone)]
 pub struct Parts {
     pub summarizer: Option<Arc<dyn L2MemorySummarizer>>,
     pub extractor: Option<Arc<dyn L3MemoryEntityExtractor>>,
@@ -281,7 +288,7 @@ pub struct Fixture {
 }
 
 pub fn fixture(parts: Parts) -> Fixture {
-    let config = parts.config.unwrap_or_default();
+    let config = parts.config.clone().unwrap_or_default();
     let l1 = Arc::new(InProcessL1MemoryStore::new(config.l1_turns));
     let l2 = Arc::new(InProcessL2MemoryStore::new(
         config.l2_entries,
@@ -289,6 +296,19 @@ pub fn fixture(parts: Parts) -> Fixture {
     ));
     let graph = Arc::new(InProcessL3MemoryGraphStore::default());
     let vectors = Arc::new(InProcessL3MemoryVectorStore::default());
+    fixture_over(parts, l1, l2, graph, vectors)
+}
+
+/// Wires a fixture over already-created stores — the persistent-store test
+/// path, where a rebuilt provider must resume from the same data.
+pub fn fixture_over(
+    parts: Parts,
+    l1: Arc<InProcessL1MemoryStore>,
+    l2: Arc<InProcessL2MemoryStore>,
+    graph: Arc<InProcessL3MemoryGraphStore>,
+    vectors: Arc<InProcessL3MemoryVectorStore>,
+) -> Fixture {
+    let config = parts.config.unwrap_or_default();
     let progress = ProgressLog::default();
     let facts = FactLog::default();
     let mut builder = LayeredMemoryProvider::builder()
@@ -366,6 +386,19 @@ impl synonz_layered_memory::L1MemoryStore for InProcessL1MemoryStoreView {
     }
     fn count(&self, scope: &MemoryScope) -> Result<usize, synonz::MemoryStoreError> {
         self.0.count(scope)
+    }
+    fn uncompacted(
+        &self,
+        scope: &MemoryScope,
+    ) -> Result<Vec<synonz_layered_memory::L1MemoryEntry>, synonz::MemoryStoreError> {
+        self.0.uncompacted(scope)
+    }
+    fn mark_compacted(
+        &self,
+        scope: &MemoryScope,
+        through: &str,
+    ) -> Result<(), synonz::MemoryStoreError> {
+        self.0.mark_compacted(scope, through)
     }
     fn remove(&self, scope: &MemoryScope, id: &str) -> Result<bool, synonz::MemoryStoreError> {
         self.0.remove(scope, id)

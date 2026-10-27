@@ -58,6 +58,12 @@ impl L1MemoryEntry {
 ///
 /// Writes take the data (the entry carries its scope); reads and removals
 /// take the partition. Implementations enforce their own turn capacity.
+///
+/// The contract also owns the **compaction cursor**: which turns the memory
+/// pipeline has already compacted. Persistent implementations must persist
+/// the cursor alongside the turns (for example as a snapshot field or a
+/// position in the append log) and keep the uncompacted turns readable — a
+/// capacity smaller than the compaction window silently drops pending turns.
 pub trait L1MemoryStore: Send + Sync + 'static {
     /// Appends one turn (the implementation evicts the oldest turns beyond
     /// its capacity).
@@ -73,10 +79,23 @@ pub trait L1MemoryStore: Send + Sync + 'static {
     /// How many entries the partition holds.
     fn count(&self, scope: &MemoryScope) -> Result<usize, MemoryStoreError>;
 
+    /// The turns not yet marked compacted, oldest first — the durable
+    /// pending set the maintenance batches derive from.
+    ///
+    /// Returns every retained turn while the cursor is unset, or while the
+    /// cursor points at a turn the store no longer holds.
+    fn uncompacted(&self, scope: &MemoryScope) -> Result<Vec<L1MemoryEntry>, MemoryStoreError>;
+
+    /// Marks every turn up to and including `through` as compacted.
+    ///
+    /// Idempotent and monotonic: a turn the store no longer holds, or one
+    /// already behind the cursor, is a no-op.
+    fn mark_compacted(&self, scope: &MemoryScope, through: &str) -> Result<(), MemoryStoreError>;
+
     /// Removes one entry by id (idempotent).
     fn remove(&self, scope: &MemoryScope, id: &str) -> Result<bool, MemoryStoreError>;
 
-    /// Clears the partition.
+    /// Clears the partition (including its compaction cursor).
     fn clear(&self, scope: &MemoryScope) -> Result<(), MemoryStoreError>;
 }
 
@@ -85,6 +104,7 @@ pub trait L1MemoryStore: Send + Sync + 'static {
 pub struct InProcessL1MemoryStore {
     retained_turns: usize,
     entries: Mutex<HashMap<String, VecDeque<L1MemoryEntry>>>,
+    cursors: Mutex<HashMap<String, String>>,
 }
 
 impl InProcessL1MemoryStore {
@@ -93,6 +113,7 @@ impl InProcessL1MemoryStore {
         Self {
             retained_turns,
             entries: Mutex::new(HashMap::new()),
+            cursors: Mutex::new(HashMap::new()),
         }
     }
 }
@@ -126,6 +147,39 @@ impl L1MemoryStore for InProcessL1MemoryStore {
         Ok(entries.get(scope.as_str()).map(VecDeque::len).unwrap_or(0))
     }
 
+    fn uncompacted(&self, scope: &MemoryScope) -> Result<Vec<L1MemoryEntry>, MemoryStoreError> {
+        let entries = self.entries.lock().unwrap_or_else(|p| p.into_inner());
+        let Some(queue) = entries.get(scope.as_str()) else {
+            return Ok(Vec::new());
+        };
+        let cursors = self.cursors.lock().unwrap_or_else(|p| p.into_inner());
+        let start = cursors
+            .get(scope.as_str())
+            .and_then(|through| queue.iter().position(|entry| entry.id == *through))
+            .map(|index| index + 1)
+            .unwrap_or(0);
+        Ok(queue.iter().skip(start).cloned().collect())
+    }
+
+    fn mark_compacted(&self, scope: &MemoryScope, through: &str) -> Result<(), MemoryStoreError> {
+        let entries = self.entries.lock().unwrap_or_else(|p| p.into_inner());
+        let Some(queue) = entries.get(scope.as_str()) else {
+            return Ok(());
+        };
+        let Some(index) = queue.iter().position(|entry| entry.id == through) else {
+            return Ok(());
+        };
+        let mut cursors = self.cursors.lock().unwrap_or_else(|p| p.into_inner());
+        let current = cursors
+            .get(scope.as_str())
+            .and_then(|id| queue.iter().position(|entry| entry.id == *id));
+        if current.is_some_and(|current| current >= index) {
+            return Ok(());
+        }
+        cursors.insert(scope.to_string(), through.to_string());
+        Ok(())
+    }
+
     fn remove(&self, scope: &MemoryScope, id: &str) -> Result<bool, MemoryStoreError> {
         let mut entries = self.entries.lock().unwrap_or_else(|p| p.into_inner());
         let Some(queue) = entries.get_mut(scope.as_str()) else {
@@ -133,12 +187,24 @@ impl L1MemoryStore for InProcessL1MemoryStore {
         };
         let before = queue.len();
         queue.retain(|entry| entry.id != id);
-        Ok(queue.len() != before)
+        let removed = queue.len() != before;
+        if removed {
+            let mut cursors = self.cursors.lock().unwrap_or_else(|p| p.into_inner());
+            if cursors
+                .get(scope.as_str())
+                .is_some_and(|through| through == id)
+            {
+                cursors.remove(scope.as_str());
+            }
+        }
+        Ok(removed)
     }
 
     fn clear(&self, scope: &MemoryScope) -> Result<(), MemoryStoreError> {
         let mut entries = self.entries.lock().unwrap_or_else(|p| p.into_inner());
         entries.remove(scope.as_str());
+        let mut cursors = self.cursors.lock().unwrap_or_else(|p| p.into_inner());
+        cursors.remove(scope.as_str());
         Ok(())
     }
 }
@@ -179,5 +245,22 @@ impl L1Memory {
         turns: usize,
     ) -> Result<Vec<L1MemoryEntry>, MemoryStoreError> {
         self.store.recent(scope, turns)
+    }
+
+    /// The turns not yet marked compacted (the durable pending set).
+    pub(crate) fn uncompacted(
+        &self,
+        scope: &MemoryScope,
+    ) -> Result<Vec<L1MemoryEntry>, MemoryStoreError> {
+        self.store.uncompacted(scope)
+    }
+
+    /// Marks every turn up to and including `through` as compacted.
+    pub(crate) fn mark_compacted(
+        &self,
+        scope: &MemoryScope,
+        through: &str,
+    ) -> Result<(), MemoryStoreError> {
+        self.store.mark_compacted(scope, through)
     }
 }
