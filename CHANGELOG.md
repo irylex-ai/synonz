@@ -4,7 +4,7 @@ All notable changes to Synonz are documented in this file. The format
 follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 versions follow [Semantic Versioning](https://semver.org/).
 
-## [0.10.0] - 2026-10-27
+## [0.10.0] - 2026-11-05
 
 The recent-continuity release: the layered memory read phase can replay
 the most recent turns **verbatim** ahead of the recall-based supplement,
