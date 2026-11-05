@@ -54,4 +54,20 @@ pub enum LayeredMemoryEvent {
         /// Why the work was skipped.
         reason: String,
     },
+    /// One context frame was assembled: what the frame carried and whether
+    /// the rewrite ran.
+    Assembled {
+        /// The conversation partition.
+        scope: MemoryScope,
+        /// How many recent turns were replayed verbatim.
+        verbatim_turns: usize,
+        /// How many recalled items came from working memory.
+        recalled_l1: usize,
+        /// How many recalled items came from event summaries.
+        recalled_l2: usize,
+        /// How many recalled items came from long-term memory.
+        recalled_l3: usize,
+        /// Whether the rewrite produced the final user message.
+        rewritten: bool,
+    },
 }

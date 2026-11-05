@@ -42,6 +42,7 @@ pub struct LayeredMemoryProvider {
     pub(crate) scope_resolver: Arc<dyn MemoryScopeResolver>,
     pub(crate) config: Arc<LayeredMemoryConfig>,
     pub(crate) model: Option<Arc<dyn Model>>,
+    pub(crate) observer: Option<Arc<dyn LayeredMemoryObserver>>,
 }
 
 impl LayeredMemoryProvider {
@@ -95,6 +96,7 @@ impl MemoryProvider for LayeredMemoryProvider {
             Arc::clone(&self.context_rewriter),
             Arc::clone(&self.scope_resolver),
             Arc::clone(&self.config),
+            self.observer.clone(),
         ))
     }
 
@@ -109,6 +111,12 @@ impl MemoryProvider for LayeredMemoryProvider {
 
     fn model(&self) -> Option<Arc<dyn Model>> {
         self.model.clone()
+    }
+
+    /// The recent-turn material window the component's read phase needs:
+    /// the configured verbatim window, capped by the working-memory window.
+    fn context_recent_turns(&self) -> usize {
+        self.config.context_recent_turns.min(self.config.l1_turns)
     }
 }
 
@@ -269,6 +277,7 @@ impl LayeredMemoryProviderBuilder {
             scope_resolver,
             config,
             model: self.model,
+            observer: self.observer,
         }
     }
 }

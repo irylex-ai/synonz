@@ -25,7 +25,7 @@ impl MemoryScopeResolver for SubjectScopeResolver {
 }
 
 /// The component's tunables (flat, domain-prefixed: `l1_` / `l2_` / `l3_` /
-/// `recall_` / `topic_`).
+/// `recall_` / `topic_` / `context_`).
 #[derive(Debug, Clone, PartialEq)]
 pub struct LayeredMemoryConfig {
     /// How many turns of working memory stay verbatim.
@@ -80,6 +80,12 @@ pub struct LayeredMemoryConfig {
     /// The embedding similarity at or above which a new segment keeps the
     /// current topic.
     pub topic_shift_similarity: f32,
+    /// How many recent turns enter the context frame verbatim (application
+    /// level, applies to every conversation).
+    ///
+    /// `0` keeps the recall-only frame. The effective window is
+    /// `min(this, l1_turns, provided material)`.
+    pub context_recent_turns: usize,
 }
 
 impl Default for LayeredMemoryConfig {
@@ -108,6 +114,7 @@ impl Default for LayeredMemoryConfig {
             recall_time_half_life: 7 * 24 * 3600,
             recall_default_importance: 0.65,
             topic_shift_similarity: 0.5,
+            context_recent_turns: 0,
         }
     }
 }

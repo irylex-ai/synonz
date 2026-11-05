@@ -14,13 +14,23 @@ use crate::embedding::Embedding;
 use crate::l1_memory::{L1Memory, L1MemoryEntry};
 use crate::l2_memory::L2Memory;
 use crate::l3_memory::{L3Memory, entity_text};
+use crate::observation::{LayeredMemoryEvent, LayeredMemoryObserver};
 use crate::utils::{conversation_scope, cosine, now_epoch};
+
+/// Where one recall candidate came from (reported by the `Assembled` fact).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CandidateSource {
+    L1,
+    L2,
+    L3,
+}
 
 /// One recall candidate (private carrier for scoring, dedupe and ranking).
 struct Candidate {
     text: String,
     vector: Vec<f32>,
     score: f32,
+    source: CandidateSource,
 }
 
 /// The context rewrite strategy: composes the model-visible enhanced input
@@ -115,10 +125,12 @@ pub(crate) struct LayeredMemoryContextAssembler {
     rewriter: Arc<dyn LayeredMemoryContextRewriter>,
     scope_resolver: Arc<dyn MemoryScopeResolver>,
     config: Arc<LayeredMemoryConfig>,
+    observer: Option<Arc<dyn LayeredMemoryObserver>>,
 }
 
 impl LayeredMemoryContextAssembler {
     /// Builds the assembler over its collaborators.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
         l1: Arc<L1Memory>,
         l2: Arc<L2Memory>,
@@ -127,6 +139,7 @@ impl LayeredMemoryContextAssembler {
         rewriter: Arc<dyn LayeredMemoryContextRewriter>,
         scope_resolver: Arc<dyn MemoryScopeResolver>,
         config: Arc<LayeredMemoryConfig>,
+        observer: Option<Arc<dyn LayeredMemoryObserver>>,
     ) -> Self {
         Self {
             l1,
@@ -136,6 +149,7 @@ impl LayeredMemoryContextAssembler {
             rewriter,
             scope_resolver,
             config,
+            observer,
         }
     }
 }
@@ -160,7 +174,17 @@ impl MemoryContextAssembler for LayeredMemoryContextAssembler {
 
             let mut candidates: Vec<Candidate> = Vec::new();
 
-            // L1: the conversation's turns.
+            // The read-phase window: the recent turns replayed verbatim.
+            // They are excluded from the recall pool so the frame never
+            // repeats a turn; the effective window is bounded by the
+            // configured size, the working-memory window, and the material
+            // the framework provided.
+            let window = params
+                .context_recent_turns
+                .min(params.l1_turns)
+                .min(input.recent.len());
+
+            // L1: the conversation's turns (the replayed window excluded).
             let l1_entries = match self.l1.entries(&partition, params.l1_turns) {
                 Ok(entries) => entries,
                 Err(error) => {
@@ -168,7 +192,8 @@ impl MemoryContextAssembler for LayeredMemoryContextAssembler {
                     Vec::new()
                 }
             };
-            for turn in &l1_entries {
+            let excluded = window.min(l1_entries.len());
+            for turn in &l1_entries[..l1_entries.len() - excluded] {
                 self.push_l1_candidate(&mut candidates, turn, query_vector.as_deref(), input.topic)
                     .await
                     .unwrap_or_else(|failure| failures.push(failure));
@@ -197,6 +222,7 @@ impl MemoryContextAssembler for LayeredMemoryContextAssembler {
                     text: entry.content.clone(),
                     vector: entry.embedding.clone(),
                     score,
+                    source: CandidateSource::L2,
                 });
             }
 
@@ -243,6 +269,7 @@ impl MemoryContextAssembler for LayeredMemoryContextAssembler {
                                 params.recall_default_importance,
                                 params,
                             ),
+                            source: CandidateSource::L3,
                         });
                         let mut frontier = vec![name.clone()];
                         let mut visited = vec![name.clone()];
@@ -283,6 +310,7 @@ impl MemoryContextAssembler for LayeredMemoryContextAssembler {
                                             params.recall_default_importance,
                                             params,
                                         ),
+                                        source: CandidateSource::L3,
                                     });
                                 }
                             }
@@ -299,8 +327,20 @@ impl MemoryContextAssembler for LayeredMemoryContextAssembler {
             let mut ranked = dedupe(candidates, params);
             ranked.truncate(params.recall_top_n);
 
-            let messages = if ranked.is_empty() {
-                vec![Message::user(query)]
+            // The frame: the verbatim recent window (when enabled), then
+            // the current input with the folded recall supplement.
+            let mut messages = Vec::new();
+            if window > 0 {
+                for turn in &input.recent[input.recent.len() - window..] {
+                    messages.push(Message::user(turn.input.text.clone()));
+                    if let Some(output) = turn.output() {
+                        messages.push(output.message.clone());
+                    }
+                }
+            }
+            let mut rewritten = false;
+            if ranked.is_empty() {
+                messages.push(Message::user(query));
             } else {
                 let recalled: Vec<String> = ranked.iter().map(|item| item.text.clone()).collect();
                 let rewrite = self
@@ -312,13 +352,30 @@ impl MemoryContextAssembler for LayeredMemoryContextAssembler {
                     ))
                     .await;
                 match rewrite {
-                    Ok(enhanced) => vec![Message::user(enhanced)],
+                    Ok(enhanced) => {
+                        messages.push(Message::user(enhanced));
+                        rewritten = true;
+                    }
                     Err(failure) => {
                         failures.push(failure);
-                        vec![Message::user(query)]
+                        messages.push(Message::user(query));
                     }
                 }
-            };
+            }
+
+            if let Some(observer) = &self.observer {
+                let count = |source: CandidateSource| {
+                    ranked.iter().filter(|item| item.source == source).count()
+                };
+                observer.on_progress(&LayeredMemoryEvent::Assembled {
+                    scope: partition.clone(),
+                    verbatim_turns: window,
+                    recalled_l1: count(CandidateSource::L1),
+                    recalled_l2: count(CandidateSource::L2),
+                    recalled_l3: count(CandidateSource::L3),
+                    rewritten,
+                });
+            }
 
             MemoryContextAssembleOutput::new(messages, failures)
         })
@@ -377,6 +434,7 @@ impl LayeredMemoryContextAssembler {
             text,
             vector,
             score,
+            source: CandidateSource::L1,
         });
         Ok(())
     }

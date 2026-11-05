@@ -6,11 +6,11 @@ mod common;
 
 use std::sync::Arc;
 
-use synonz::{Agent, MemoryScope};
+use synonz::{Agent, MemoryScope, Message};
 use synonz_layered_memory::{
     Embedding, HashEmbedding, L1MemoryEntry, L1MemoryStore, L2MemoryEntry, L2MemoryStore,
     L3MemoryGraphEntity, L3MemoryGraphStore, L3MemoryVectorStore, LayeredMemoryConfig,
-    LayeredMemoryContextRewriter,
+    LayeredMemoryContextRewriter, LayeredMemoryEvent,
 };
 
 #[tokio::test]
@@ -212,4 +212,180 @@ async fn near_duplicate_l2_and_l3_candidates_dedupe_by_vector() {
         1,
         "the near-duplicates deduped by vector: {recalled:?}"
     );
+}
+
+#[tokio::test]
+async fn the_frame_replays_the_recent_turns_verbatim() {
+    let mut parts = common::Parts::default();
+    parts.context_rewriter = Some(Arc::new(common::EchoRewriter::default()));
+    parts.config = Some(LayeredMemoryConfig {
+        context_recent_turns: 2,
+        ..Default::default()
+    });
+    let fixture = common::fixture(parts);
+    let mut conversation = fixture.conversation();
+    let model = common::RecordingModel::new("ok");
+    let agent = Agent::builder()
+        .runtime(&fixture.runtime)
+        .model(model.clone())
+        .build()
+        .unwrap();
+
+    agent.run(conversation.turn_input("one")).await.unwrap();
+    agent.run(conversation.turn_input("two")).await.unwrap();
+    agent.run(conversation.turn_input("three")).await.unwrap();
+
+    let requests = model.requests();
+    let frame = &requests.last().unwrap().messages;
+    assert_eq!(
+        frame,
+        &vec![
+            Message::user("one"),
+            Message::assistant_text("ok"),
+            Message::user("two"),
+            Message::assistant_text("ok"),
+            Message::user("three"),
+        ],
+        "the last two turns are replayed verbatim; the replayed turns are not recalled"
+    );
+}
+
+#[tokio::test]
+async fn the_replayed_turns_are_excluded_from_the_recall() {
+    let mut parts = common::Parts::default();
+    parts.context_rewriter = Some(Arc::new(common::EchoRewriter::default()));
+    parts.config = Some(LayeredMemoryConfig {
+        context_recent_turns: 1,
+        ..Default::default()
+    });
+    let fixture = common::fixture(parts);
+    let mut conversation = fixture.conversation();
+    let model = common::RecordingModel::new("ok");
+    let agent = Agent::builder()
+        .runtime(&fixture.runtime)
+        .model(model.clone())
+        .build()
+        .unwrap();
+
+    agent.run(conversation.turn_input("one")).await.unwrap();
+    agent.run(conversation.turn_input("two")).await.unwrap();
+    agent.run(conversation.turn_input("three")).await.unwrap();
+
+    let requests = model.requests();
+    let frame = &requests.last().unwrap().messages;
+    assert_eq!(frame.len(), 3, "one replayed pair plus the current input");
+    assert_eq!(frame[0], Message::user("two"));
+    assert_eq!(frame[1], Message::assistant_text("ok"));
+    let supplement = frame[2]
+        .blocks
+        .iter()
+        .filter_map(|block| match block {
+            synonz::ContentBlock::Text { text } => Some(text.as_str()),
+            _ => None,
+        })
+        .collect::<String>();
+    assert!(supplement.starts_with("three [recalled: "));
+    assert!(
+        supplement.contains("one"),
+        "the older turn is recalled: {supplement}"
+    );
+    assert!(
+        !supplement.contains("two"),
+        "the replayed turn is not recalled: {supplement}"
+    );
+}
+
+#[tokio::test]
+async fn the_assembled_event_reports_the_frame_composition() {
+    let mut parts = common::Parts::default();
+    parts.context_rewriter = Some(Arc::new(common::EchoRewriter::default()));
+    parts.config = Some(LayeredMemoryConfig {
+        context_recent_turns: 1,
+        ..Default::default()
+    });
+    let fixture = common::fixture(parts);
+    let mut conversation = fixture.conversation();
+    let agent = Agent::builder()
+        .runtime(&fixture.runtime)
+        .model(common::mock(&["ok", "ok", "ok"]))
+        .build()
+        .unwrap();
+
+    agent.run(conversation.turn_input("one")).await.unwrap();
+    agent.run(conversation.turn_input("two")).await.unwrap();
+    agent.run(conversation.turn_input("three")).await.unwrap();
+
+    let events = fixture.progress.events.lock().unwrap();
+    let assembled: Vec<(usize, usize, bool)> = events
+        .iter()
+        .filter_map(|event| match event {
+            LayeredMemoryEvent::Assembled {
+                verbatim_turns,
+                recalled_l1,
+                rewritten,
+                ..
+            } => Some((*verbatim_turns, *recalled_l1, *rewritten)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        assembled,
+        vec![(0, 0, false), (1, 0, false), (1, 1, true)],
+        "window growth, recall of the non-replayed turn, and the rewrite"
+    );
+}
+
+#[tokio::test]
+async fn the_window_is_bounded_by_the_material_and_the_working_memory() {
+    // More configured turns than the material provides: clamped.
+    let mut parts = common::Parts::default();
+    parts.config = Some(LayeredMemoryConfig {
+        context_recent_turns: 5,
+        ..Default::default()
+    });
+    let fixture = common::fixture(parts);
+    let mut conversation = fixture.conversation();
+    let model = common::RecordingModel::new("ok");
+    let agent = Agent::builder()
+        .runtime(&fixture.runtime)
+        .model(model.clone())
+        .build()
+        .unwrap();
+    agent.run(conversation.turn_input("one")).await.unwrap();
+    agent.run(conversation.turn_input("two")).await.unwrap();
+    let requests = model.requests();
+    let frame = &requests.last().unwrap().messages;
+    assert_eq!(
+        frame,
+        &vec![
+            Message::user("one"),
+            Message::assistant_text("ok"),
+            Message::user("two"),
+        ],
+        "only one turn exists in the material"
+    );
+
+    // The working-memory window caps the replication even when the
+    // material is larger.
+    let mut parts = common::Parts::default();
+    parts.config = Some(LayeredMemoryConfig {
+        l1_turns: 1,
+        context_recent_turns: 5,
+        ..Default::default()
+    });
+    let fixture = common::fixture(parts);
+    let mut conversation = fixture.conversation();
+    let model = common::RecordingModel::new("ok");
+    let agent = Agent::builder()
+        .runtime(&fixture.runtime)
+        .model(model.clone())
+        .build()
+        .unwrap();
+    agent.run(conversation.turn_input("one")).await.unwrap();
+    agent.run(conversation.turn_input("two")).await.unwrap();
+    agent.run(conversation.turn_input("three")).await.unwrap();
+    let requests = model.requests();
+    let frame = &requests.last().unwrap().messages;
+    assert_eq!(frame.len(), 3, "one pair plus the current input");
+    assert_eq!(frame[0], Message::user("two"));
 }
