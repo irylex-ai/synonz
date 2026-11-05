@@ -336,6 +336,12 @@ impl MemoryProvider for InProcessMemoryProvider {
             store: Arc::clone(&self.store),
         })
     }
+
+    /// The bundled assembler replays its own stored window; it does not
+    /// use the recent-turn material.
+    fn context_recent_turns(&self) -> usize {
+        0
+    }
 }
 
 /// The bundled provider's management face: minimal by design (no entries).

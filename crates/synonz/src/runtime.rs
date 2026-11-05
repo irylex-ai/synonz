@@ -160,6 +160,7 @@ impl RuntimeBuilder {
             memory_assembler: provider.context_assembler(),
             memory_pipeline: provider.pipeline(),
             memory_model: provider.model(),
+            context_recent_turns: provider.context_recent_turns(),
             event_bus,
             conversations: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
             conversation_idle_timeout: self.conversation_idle_timeout,
@@ -242,6 +243,9 @@ struct RuntimeInner {
     memory_assembler: Arc<dyn MemoryContextAssembler>,
     memory_pipeline: Arc<dyn MemoryPipeline>,
     memory_model: Option<Arc<dyn Model>>,
+    /// How many recent successful turns the read phase receives as
+    /// material, declared by the memory provider at build time.
+    context_recent_turns: usize,
     event_bus: EventBus,
     /// The conversation table: owned conversations and their background
     /// maintenance tasks (the Monitor and shutdown both consume it).
@@ -320,6 +324,12 @@ impl SynonzRuntime {
     /// clone of this handle shares the same underlying implementation.
     pub fn memory(&self) -> Arc<dyn Memory> {
         Arc::clone(&self.inner.memory)
+    }
+
+    /// The read-phase material window declared by the memory provider at
+    /// build time (framework-internal).
+    pub(crate) fn context_recent_turns(&self) -> usize {
+        self.inner.context_recent_turns
     }
 
     /// Builds the context engine for one agent (framework-internal): the
@@ -893,6 +903,56 @@ mod tests {
         assert!(
             ends.iter().any(|end| end == "flush-1:Shutdown"),
             "shutdown must flush observation: {ends:?}"
+        );
+    }
+
+    #[test]
+    fn the_context_material_window_comes_from_the_provider() {
+        /// A provider that inherits the trait's default material window.
+        struct Delegating;
+        impl MemoryProvider for Delegating {
+            fn memory(&self, bus: EventBus) -> Arc<dyn Memory> {
+                InProcessMemoryProvider::new().memory(bus)
+            }
+            fn context_assembler(&self) -> Arc<dyn MemoryContextAssembler> {
+                InProcessMemoryProvider::new().context_assembler()
+            }
+            fn pipeline(&self) -> Arc<dyn MemoryPipeline> {
+                InProcessMemoryProvider::new().pipeline()
+            }
+        }
+        /// A provider that declares its own material window.
+        struct Declaring(usize);
+        impl MemoryProvider for Declaring {
+            fn memory(&self, bus: EventBus) -> Arc<dyn Memory> {
+                InProcessMemoryProvider::new().memory(bus)
+            }
+            fn context_assembler(&self) -> Arc<dyn MemoryContextAssembler> {
+                InProcessMemoryProvider::new().context_assembler()
+            }
+            fn pipeline(&self) -> Arc<dyn MemoryPipeline> {
+                InProcessMemoryProvider::new().pipeline()
+            }
+            fn context_recent_turns(&self) -> usize {
+                self.0
+            }
+        }
+
+        let runtime = SynonzRuntime::builder().memory_provider(Delegating).build();
+        assert_eq!(runtime.context_recent_turns(), 20, "the trait default");
+        let runtime = SynonzRuntime::builder()
+            .memory_provider(Declaring(5))
+            .build();
+        assert_eq!(
+            runtime.context_recent_turns(),
+            5,
+            "the override is captured"
+        );
+        let runtime = SynonzRuntime::builder().build();
+        assert_eq!(
+            runtime.context_recent_turns(),
+            0,
+            "the bundled provider does not use the material"
         );
     }
 }

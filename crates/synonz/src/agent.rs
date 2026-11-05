@@ -710,6 +710,11 @@ impl AgentLoopTask {
         // the read-side preprocessing and the topic detector receive. It is
         // captured before this turn enters the archive.
         let history = self.conversation.recent_successful_messages(HISTORY_TURNS);
+        // The read-phase material: recent truth records shared as `Arc`s,
+        // bounded by the provider's declared window.
+        let recent = self
+            .conversation
+            .recent_turns(self.runtime.context_recent_turns());
 
         // Moment 1: materialize the state (the engine's assembly). Failures
         // degrade the frame visibly (reported as memory facts) — the run
@@ -725,6 +730,7 @@ impl AgentLoopTask {
                 &topic,
                 &input.text,
                 &history,
+                &recent,
                 &self.model,
                 &outlet,
             )

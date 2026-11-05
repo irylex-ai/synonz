@@ -29,7 +29,7 @@ use futures::StreamExt;
 use futures::future::BoxFuture;
 
 use crate::bus::{ConversationEvent, EventBus, FactOutlet, MemoryEvent, MemoryFailedMoment};
-use crate::conversation::Conversation;
+use crate::conversation::{Conversation, Turn};
 use crate::error::ModelError;
 use crate::event::TurnEvent;
 use crate::event::{CallPurpose, ModelEvent};
@@ -120,6 +120,10 @@ pub struct MemoryContextAssembleInput<'a> {
     /// The model-view input the read-side preprocessing produced; `None` =
     /// no rewrite (use the original input).
     pub rewritten_input: Option<&'a str>,
+    /// The recent successful turns (oldest first, up to the provider's
+    /// `context_recent_turns`) — the truth records the framework hands to
+    /// the assembler as read-phase material.
+    pub recent: &'a [Arc<Turn>],
     /// The narrated model handle for the assembler's own model calls (the
     /// context-management model, resolved by the framework).
     pub model: Arc<dyn Model>,
@@ -128,6 +132,7 @@ pub struct MemoryContextAssembleInput<'a> {
 impl<'a> MemoryContextAssembleInput<'a> {
     /// Assembles the payload (the struct-literal route stays closed for
     /// field growth; the framework and tests construct through here).
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         reader: MemoryReader<'a>,
         subject: &'a Subject,
@@ -135,6 +140,7 @@ impl<'a> MemoryContextAssembleInput<'a> {
         topic: &'a str,
         input: &'a str,
         rewritten_input: Option<&'a str>,
+        recent: &'a [Arc<Turn>],
         model: Arc<dyn Model>,
     ) -> Self {
         Self {
@@ -144,6 +150,7 @@ impl<'a> MemoryContextAssembleInput<'a> {
             topic,
             input,
             rewritten_input,
+            recent,
             model,
         }
     }
@@ -544,6 +551,15 @@ pub trait MemoryProvider: Send + Sync + 'static {
     fn model(&self) -> Option<Arc<dyn Model>> {
         None
     }
+
+    /// The recent-turn material window the read phase wants from the
+    /// framework: how many recent successful turns the context assembler
+    /// receives in [`MemoryContextAssembleInput::recent`].
+    ///
+    /// Default: 20. The value is captured once, when the runtime is built.
+    fn context_recent_turns(&self) -> usize {
+        20
+    }
 }
 
 /// The read-side preprocessing factory (Agent level).
@@ -634,6 +650,7 @@ impl Context {
         topic: &'a str,
         input: &'a str,
         history: &'a [Message],
+        recent: &'a [Arc<Turn>],
         agent_model: &Arc<dyn Model>,
         outlet: &FactOutlet,
     ) -> MemoryContextAssembleOutput {
@@ -678,6 +695,7 @@ impl Context {
                 topic,
                 input,
                 rewritten.as_deref(),
+                recent,
                 model,
             ))
             .await;
@@ -1061,7 +1079,7 @@ mod tests {
         let engine = engine(StubAssembler { frame: vec![] }, Arc::default(), None);
         let subject = subject();
         let output = engine
-            .assemble(&subject, "c1", "", "hello", &[], &model(), &outlet)
+            .assemble(&subject, "c1", "", "hello", &[], &[], &model(), &outlet)
             .await;
         assert_eq!(output.messages.len(), 1);
         assert_eq!(output.messages[0].role, Role::User);
@@ -1092,7 +1110,7 @@ mod tests {
         );
         let subject = subject();
         let output = engine
-            .assemble(&subject, "c1", "", "hello", &[], &model(), &outlet)
+            .assemble(&subject, "c1", "", "hello", &[], &[], &model(), &outlet)
             .await;
         assert_eq!(output.messages, vec![Message::user("rewritten")]);
         assert!(output.failures.is_empty());

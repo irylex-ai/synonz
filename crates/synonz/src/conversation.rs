@@ -300,7 +300,7 @@ impl Turn {
 pub struct Conversation {
     id: String,
     subject: Subject,
-    turns: Arc<Mutex<Vec<Turn>>>,
+    turns: Arc<Mutex<Vec<Arc<Turn>>>>,
     topic: Arc<Mutex<Option<String>>>,
     ended: Arc<Mutex<bool>>,
 }
@@ -370,7 +370,7 @@ impl Conversation {
         let conversation = Self {
             id: state.id,
             subject: subject.clone(),
-            turns: Arc::new(Mutex::new(state.turns)),
+            turns: Arc::new(Mutex::new(state.turns.into_iter().map(Arc::new).collect())),
             topic: Arc::new(Mutex::new(state.topic)),
             ended: Arc::new(Mutex::new(state.ended)),
         };
@@ -501,7 +501,7 @@ impl Conversation {
             return Vec::new();
         }
         let recorded = self.turns.lock().unwrap_or_else(|p| p.into_inner());
-        let successful: Vec<&Turn> = recorded
+        let successful: Vec<&Arc<Turn>> = recorded
             .iter()
             .filter(|turn| turn.output().is_some())
             .collect();
@@ -516,9 +516,33 @@ impl Conversation {
         messages
     }
 
+    /// The recent successful turns as shared truth records, oldest first —
+    /// the material the framework hands to the context assembler.
+    ///
+    /// Returns `Arc` handles (no message copies); the lock is held only
+    /// while collecting them.
+    pub(crate) fn recent_turns(&self, turns: usize) -> Vec<Arc<Turn>> {
+        if turns == 0 {
+            return Vec::new();
+        }
+        let recorded = self.turns.lock().unwrap_or_else(|p| p.into_inner());
+        let successful: Vec<Arc<Turn>> = recorded
+            .iter()
+            .filter(|turn| turn.output().is_some())
+            .cloned()
+            .collect();
+        let start = successful.len().saturating_sub(turns);
+        successful[start..].to_vec()
+    }
+
     /// The recorded turns, in order.
     pub fn turns(&self) -> Vec<Turn> {
-        self.turns.lock().unwrap_or_else(|p| p.into_inner()).clone()
+        self.turns
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .iter()
+            .map(|turn| (**turn).clone())
+            .collect()
     }
 
     /// How many turns have completed.
@@ -550,7 +574,7 @@ impl Conversation {
         self.turns
             .lock()
             .unwrap_or_else(|p| p.into_inner())
-            .push(turn);
+            .push(Arc::new(turn));
     }
 
     /// The current state snapshot (identity + turns + topic + lifecycle
@@ -560,7 +584,7 @@ impl Conversation {
         ConversationState {
             subject_id: self.subject.to_string(),
             id: self.id.clone(),
-            turns: turns.clone(),
+            turns: turns.iter().map(|turn| (**turn).clone()).collect(),
             topic: self.topic(),
             last_active: now_epoch(),
             ended: self.is_ended(),
