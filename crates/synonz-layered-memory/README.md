@@ -20,6 +20,12 @@ three-layer model:
   and relation types are constrained by the configured
   [`L3MemorySchema`] — the component hardcodes no domain vocabulary.
 
+The read phase recalls over the three layers and folds the result into
+the model-visible frame. With `context_recent_turns` enabled
+(application-level, default `0` = recall-only), the most recent turns
+are replayed **verbatim** ahead of the folded recall, and those turns
+are excluded from the recall pool.
+
 ## Registration
 
 ```rust
@@ -68,12 +74,13 @@ let agent = synonz::Agent::builder()
   conversation's partitions at use time; an empty result means no
   long-term memory for that conversation.
 - **Observation**: `LayeredMemoryObserver` reports layered progress
-  (`Compacted` / `Distilled` / `Normalized` / `Skipped`) without
-  touching the core event bus; failures keep flowing through the
+  (`Compacted` / `Distilled` / `Normalized` / `Skipped` / `Assembled`)
+  without touching the core event bus; failures keep flowing through the
   framework as `Failed` facts.
 - **Tunables**: `LayeredMemoryConfig` (capacities, recall weights,
-  thresholds, hop decay, the distillation settle window, the schema) and
-  `L3MemorySchema` (the entity/relation vocabulary and its fallbacks).
+  thresholds, hop decay, the distillation settle window, the recent-turn
+  verbatim window, the schema) and `L3MemorySchema` (the entity/relation
+  vocabulary and its fallbacks).
 
 ## Management
 

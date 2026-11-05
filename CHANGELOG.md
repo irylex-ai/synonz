@@ -4,6 +4,62 @@ All notable changes to Synonz are documented in this file. The format
 follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 versions follow [Semantic Versioning](https://semver.org/).
 
+## [0.10.0] - 2026-10-27
+
+The recent-continuity release: the layered memory read phase can replay
+the most recent turns **verbatim** ahead of the recall-based supplement,
+so long sessions keep a stable recent context while recall still covers
+history. The feature is application-level configuration, off by default
+— without it the frame is unchanged. The conversation's truth records
+are shared as `Arc<Turn>` (no message copies), and the read-phase
+contracts are additive.
+
+### Added
+
+- **Verbatim recent window** (`synonz-layered-memory`):
+  `LayeredMemoryConfig::context_recent_turns` (application level,
+  default `0` = recall-only) replays the most recent turns verbatim as
+  the frame prefix — `user(original input)` / `assistant(final answer)`
+  pairs, followed by the current input with the folded recall
+  supplement. The replayed turns are excluded from the recall pool (by
+  order); the effective window is `min(config, l1_turns, material)`.
+  With no supplement the rewrite is skipped. Topic-shift and
+  conversation-end behavior are unchanged. The window is a suffix, so a
+  future per-conversation compression marker extends it without changing
+  the frame layout.
+- **Recent-turn material** (`synonz`): `MemoryContextAssembleInput`
+  gains `recent` — the recent successful turns as shared truth records
+  (`Arc<Turn>`, oldest first), provided by the framework. The amount is
+  declared by the memory provider's new defaulted method
+  `context_recent_turns()` (default 20; the bundled in-process provider
+  declares 0 because it does not use the material). `Conversation`
+  stores its turns as `Arc<Turn>` internally — the public API
+  (`turns()`, `state()`, serialization) is unchanged, and reading the
+  recent turns copies no message content.
+- **`LayeredMemoryEvent::Assembled`**: the component's observation face
+  reports each frame composition (`verbatim_turns`, per-layer recalled
+  counts, whether the rewrite ran). Failures keep flowing through the
+  framework as `Failed` facts.
+
+### Changed
+
+- The component's read phase excludes verbatim-replayed turns from the
+  recall candidates; the recall supplement keeps the existing scoring,
+  dedupe, top-N, and rewrite pipeline.
+- Prompt caching: the verbatim history is an append-only prefix (more
+  cache-friendly than the single folded message); the tail message
+  still changes per turn.
+
+### Notes
+
+- No migration: the feature is opt-in, the core input addition is a
+  designed `#[non_exhaustive]` growth point, and read-phase trait
+  implementations are unaffected.
+- Tool messages are not part of the material or the frame this release;
+  a tool-inclusive transcript is a future, data-driven extension.
+- Known boundary: compacted L1 entries and their L2 summaries can still
+  both be recall candidates (pre-existing, independent of the window).
+
 ## [0.9.0] - 2026-10-27
 
 The durable-maintenance release: the layered memory component's

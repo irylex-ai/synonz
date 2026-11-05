@@ -68,7 +68,9 @@ impl MemoryContextAssembler for MyAssembler {
     {
         Box::pin(async move {
             // 读状态：input.reader（条目级只读投影）、input.subject /
-            // conversation_id / topic / input / rewritten_input
+            // conversation_id / topic / input / rewritten_input、
+            // input.recent（框架提供的最近成功轮材料，Arc<Turn> 共享；
+            // 数量由 provider 的 context_recent_turns() 声明）
             // 调模型：input.model（核心已叙述：Requested/Responded，无 StreamDelta）
             MemoryContextAssembleOutput::new(
                 vec![Message::user("...")],   // system(Agent) 之后的完整帧
@@ -82,7 +84,8 @@ impl MemoryContextAssembler for MyAssembler {
 契约义务：**必须**返回含本轮用户消息的可用帧；失败时自行降级（把
 原始 input 放进帧 + `failures` 上报）。空帧时核心兜底（原始 input +
 `Failed` 事实）。角色约定：system 只放 Agent 指令，记忆上下文与增强
-输入进 user 侧。
+输入进 user 侧。`input.recent` 是框架材料——实现可以原样回放为帧
+前缀（逐字近期窗口），也可以只做召回；框架不解释其用途。
 
 ### 3.2 输入改写（`TurnInputRewriter`，Agent 级）
 
@@ -162,7 +165,17 @@ LayeredMemoryProvider::builder()
 
 策略收到核心叙述的模型句柄；提示词随策略；确定性流程（召回评分 /
 去重 / 归一化）固定，参数经 `LayeredMemoryConfig` 配置（扁平、带
-`l1_` / `l2_` / `l3_` / `recall_` / `topic_` 前缀）。
+`l1_` / `l2_` / `l3_` / `recall_` / `topic_` / `context_` 前缀）。
+
+**逐字近期窗口**（`context_recent_turns`，默认 0 = 纯召回）：大于 0
+时，读相位把最近 K 轮**原样**放进帧前缀（`user(原始输入)` /
+`assistant(最终回答)`），召回继续负责其余 L1/L2/L3 并折叠进末尾的
+`user(本轮输入 + 补充)`；这 K 轮从召回候选中按序排除。生效窗口 =
+`min(配置值, l1_turns, 框架提供的材料)`——材料数量由组件 provider
+的 `context_recent_turns()` 声明（= `min(配置值, l1_turns)`）。它是
+**应用级全局**配置（该应用的记忆形态），不提供按会话开关；未启用时
+帧与 0.9.0 逐字节一致。组件观察面的 `Assembled` 事件上报每次组帧的
+逐字轮数与各层入选计数。
 
 ## 5. 存储接入与 embedding
 
