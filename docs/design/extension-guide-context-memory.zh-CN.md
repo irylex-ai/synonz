@@ -177,6 +177,20 @@ LayeredMemoryProvider::builder()
 帧与 0.9.0 逐字节一致。组件观察面的 `Assembled` 事件上报每次组帧的
 逐字轮数与各层入选计数。
 
+**显式上下文压缩**（`context_compact_keep_turns`，默认 1；ADR-0033）：
+应用在轮次之间调用
+`provider.actuator().compact_context(&subject, conversation_id)`
+（异步），组件把会话当前可见上下文压缩到边界——保留配置的最近 R 轮
+逐字，被压缩轮次先整合进 L2，随后退出逐字窗口与 L1 召回（L2/L3
+召回不变）。边界 = 可见 L1 轮次（`l1.entries(.., l1_turns)`）倒数
+第 R+1 条；R 按可见轮数截断，R ≥ 轮数或 `context_recent_turns = 0`
+时命令无操作；R > K 时逐字只有 `min(R, K)`，多出的保留轮仍在 L1
+可召回。边界持久化在 L1 契约（`context_boundary` /
+`mark_context_boundary`，与压实游标同一持久化路径），重启不回退；
+命令与同会话后台维护串行（命令等待、后台跳过），压实失败返回 `Err`
+且不推进边界（至少一次）。压缩是组件行为，幅度是应用级全局配置，
+不提供按次参数。
+
 ## 5. 存储接入与 embedding
 
 - 四个存储契约按数据对象划分：`L1MemoryStore` / `L2MemoryStore` /
@@ -195,6 +209,12 @@ LayeredMemoryProvider::builder()
   并保证沉淀窗口内的轮次可读——容量小于压实窗口会静默丢弃待压实
   轮次。维护因此可跨进程重启恢复：每进程每会话首次归档时与存储对账，
   积压达阈值立即补做；批次不再退化为"最近 N 轮"。
+- **L1 契约同时承载压缩边界**（ADR-0033）：`context_boundary(scope)`
+  （显式压缩的最后一轮，`None` = 未压缩）与
+  `mark_context_boundary(scope, through)`（幂等、单调；未知 id
+  no-op）。持久化实现把边界与轮次、游标一起持久化（同一写入路径）；
+  `clear` 同时清除两个位置；删除边界所指条目**不清**边界（剩余轮次
+  都在其后）。
 - **蒸馏带沉淀窗口**：压实批次仅当最早轮次达到
   `l3_distill_min_age_seconds`（默认 1 天；0 = 压实即蒸馏）才蒸馏；
   未达龄内容留在 L2，后续蒸馏以 "Conversation entries" 承接；主题

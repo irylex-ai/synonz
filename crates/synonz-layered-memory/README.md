@@ -26,6 +26,18 @@ the model-visible frame. With `context_recent_turns` enabled
 are replayed **verbatim** ahead of the folded recall, and those turns
 are excluded from the recall pool.
 
+The application can also compress the visible context explicitly:
+`actuator.compact_context(&subject, conversation_id)` consolidates the
+turns up to a boundary into L2 first, then closes the read-phase window
+on it — the configured number of recent turns
+(`context_compact_keep_turns`, default `1`) stays verbatim, the
+compressed turns leave both the verbatim window and the working-memory
+recall (L2/L3 recall is unchanged). The boundary is persisted in the L1
+contract, so a restart does not restore the compressed turns; the
+command waits for an in-flight background maintenance run of the same
+conversation. Compression is a component behavior with an
+application-level keep, not a per-call knob.
+
 ## Registration
 
 ```rust
@@ -57,9 +69,11 @@ let agent = synonz::Agent::builder()
   `L3MemoryGraphStore` / `L3MemoryVectorStore`) — each ships an
   in-process default; real backends (Redis, MongoDB, Neo4j, Milvus) can
   live in their own packages. `L1MemoryStore` also owns the durable
-  compaction cursor (`uncompacted` / `mark_compacted`): maintenance
-  resumes across process restarts, and persistent stores must persist
-  the cursor alongside the turns.
+  compaction cursor (`uncompacted` / `mark_compacted`) and the
+  read-phase compression boundary (`context_boundary` /
+  `mark_context_boundary`): maintenance and explicit compression resume
+  across process restarts, and persistent stores must persist both
+  positions alongside the turns (same durability path).
 - **Embedding**: the `Embedding` port with retrieval roles
   (`embed_query` / `embed_passage` plus the inline variants) — symmetric
   models override `embed` only; asymmetric models (for example E5-family
@@ -79,8 +93,8 @@ let agent = synonz::Agent::builder()
   framework as `Failed` facts.
 - **Tunables**: `LayeredMemoryConfig` (capacities, recall weights,
   thresholds, hop decay, the distillation settle window, the recent-turn
-  verbatim window, the schema) and `L3MemorySchema` (the entity/relation
-  vocabulary and its fallbacks).
+  verbatim window, the compression keep, the schema) and
+  `L3MemorySchema` (the entity/relation vocabulary and its fallbacks).
 
 ## Management
 
@@ -90,7 +104,8 @@ core item view. Every read and lookup is scoped to the subject — a
 conversation partition is one whose entries carry the subject (the store
 enumerates them through `scopes(subject)`), and a long-term partition
 must be one the resolver returns for the subject. The actuator adds the
-typed view and relation-level removal:
+typed view, relation-level removal, and the explicit compression
+command:
 
 ```rust
 let handle = provider.actuator();
@@ -98,6 +113,7 @@ let entries = handle.l2_memory_entries(&subject, None)?;        // L2 documents
 let entities = handle.l3_memory_entities(&subject, None)?;      // L3 documents
 let relations = handle.l3_memory_relations(&subject, &scope, "Alice")?;
 handle.forget_l3_memory_relation(&subject, &scope, "Alice", "likes", "coffee")?;
+handle.compact_context(&subject, conversation_id).await?;       // explicit compression
 ```
 
 The management face creates no entries: new memory comes from

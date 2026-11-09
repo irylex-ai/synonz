@@ -4,6 +4,74 @@ All notable changes to Synonz are documented in this file. The format
 follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 versions follow [Semantic Versioning](https://semver.org/).
 
+## [0.11.0] - 2026-11-06
+
+The explicit-compression release: the layered memory component gains a
+context-compression command, so an application can close the read-phase
+window on a durable boundary at any point between turns — the
+compressed material is consolidated into L2 first, then leaves both the
+verbatim recent window and the working-memory recall. The keep is
+application-level configuration (default: the most recent turn). The
+compression boundary is a second L1 watermark (a breaking contract
+change for L1 store implementations); the framework is unchanged
+(ADR-0033, maintaining decision #24).
+
+### Added
+
+- **Context-compression command** (`synonz-layered-memory`):
+  `LayeredMemoryActuator::compact_context(subject, conversation_id)` —
+  async, called between turns. Resolves the boundary from the visible
+  working-memory turns (the configured `context_compact_keep_turns`
+  newest turns stay verbatim; `0` clears the window), compacts the
+  pending turns through it in bounded chunks (the normal batch path,
+  advancing the durable cursor per chunk), then marks the read-phase
+  boundary. No-op when the visible window is disabled or the keep
+  covers every visible turn. The command waits for an in-flight
+  background maintenance run of the same conversation; a failure
+  returns `Err` and leaves the boundary unadvanced (at-least-once). A
+  missing context-management model fails explicitly when there is
+  pending material to consolidate.
+- **Read-phase boundary** (`synonz-layered-memory`): the verbatim
+  window is the turns after the boundary (up to the configured size),
+  and the boundary's turns are excluded from the L1 recall; L2/L3
+  recall is unchanged. The boundary is read-through cached (refreshed
+  by the command; one store read per conversation after a restart).
+- **`LayeredMemoryConfig::context_compact_keep_turns`**: application
+  level, default `1`; `0` clears the window; the instant window is
+  `min(keep, context_recent_turns)` and grows back to
+  `context_recent_turns` with new turns.
+
+### Breaking Changes
+
+- **`L1MemoryStore` gains two required methods**:
+  `context_boundary(scope)` (the last compressed turn, `None` = never
+  compressed) and `mark_context_boundary(scope, through)` (idempotent,
+  monotonic; a turn the store no longer holds, or one already behind
+  the boundary, is a no-op). Persistent implementations persist the
+  boundary alongside the turns and the compaction cursor (same
+  durability path); `clear` resets both positions; removing the
+  boundary's turn does not reset the boundary. The bundled in-process
+  store implements both.
+
+### Migration
+
+- L1 store implementations: add the two methods. A snapshot-backed
+  store keeps a second per-partition field next to the compaction
+  cursor; an append-log store keeps a position resolved by turn id.
+  `remove` must not touch the boundary; `clear` must remove it.
+- Applications using the component unchanged: no action — the config is
+  additive and the command is opt-in.
+- Applications exposing a `/compact`-style action: call
+  `provider.actuator().compact_context(&subject, conversation_id)`
+  between turns; set `context_compact_keep_turns` to the desired keep.
+
+### Notes
+
+- The framework is unchanged: compression stays a memory-implementation
+  behavior (decision #24).
+- The command builds on the 0.10.0 verbatim window and the 0.9.0
+  durable maintenance cursor.
+
 ## [0.10.0] - 2026-11-05
 
 The recent-continuity release: the layered memory read phase can replay

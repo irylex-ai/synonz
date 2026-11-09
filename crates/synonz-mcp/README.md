@@ -37,7 +37,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 | Crate | Purpose |
 |---|---|
 | `synonz` | Core: `Agent`, the built-in context engine, the event bus and `SynonzEvent` vocabulary, the memory contract family (`Memory` / `MemoryContextAssembler` / `MemoryPipeline` + providers) with a bundled in-process default, the time-driven scheduler, canonical messages, the reasoning loop |
-| `synonz-layered-memory` | Official layered memory component: L1 turn-level entries with a durable compaction cursor, L2 batch compaction, L3 entity graph with vectors (distillation), four replaceable storage contracts, a configurable schema and verbatim recent-turn window, semantic strategies, and its own observation face |
+| `synonz-layered-memory` | Official layered memory component: L1 turn-level entries with a durable compaction cursor, L2 batch compaction, L3 entity graph with vectors (distillation), four replaceable storage contracts, a configurable schema, a verbatim recent-turn window and an explicit context-compression command, semantic strategies, and its own observation face |
 | `synonz-derive` | `#[derive(Tool)]` typed tool ergonomics (re-exported by `synonz`) |
 | `synonz-openai` | OpenAI-compatible `Model` adapter |
 | `synonz-anthropic` | Anthropic `Model` adapter |
