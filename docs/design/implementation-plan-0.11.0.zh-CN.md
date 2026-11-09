@@ -156,4 +156,11 @@
 
 ## 8. 发布记录
 
-（待发布）
+- **RELEASED（2026-11-09）**：`cargo publish --workspace` 六 crate 全部
+  上传 crates.io（max_version = 0.11.0）；轻量 tag `v0.11.0` →
+  `134155f`（`chore(release): prepare 0.11.0`），`main` 与
+  `origin/main` 同步；GitHub Release "Synonz 0.11.0 — the
+  explicit-compression release"（正文 = CHANGELOG 0.11.0 段）；
+  发布后核验：crates.io 六包 max_version 0.11.0、组件 README 渲染含
+  `compact_context` / `context_compact_keep_turns`、docs.rs 0.11.0
+  构建通过（组件页含 `compact_context`）。
