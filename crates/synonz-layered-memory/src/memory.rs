@@ -8,13 +8,17 @@
 use std::sync::Arc;
 
 use synonz::{
-    EventBus, Memory, MemoryForgetFailure, MemoryForgetResult, MemoryItem, MemoryListCursor,
-    MemoryPage, MemoryQuery, MemoryScope, MemorySource, MemoryStoreError, Subject, SynonzEvent,
+    EventBus, Memory, MemoryFailure, MemoryForgetFailure, MemoryForgetResult, MemoryItem,
+    MemoryListCursor, MemoryPage, MemoryQuery, MemoryScope, MemorySource, MemoryStoreError, Model,
+    Subject, SynonzEvent,
 };
 
-use crate::config::MemoryScopeResolver;
+use crate::compaction;
+use crate::config::{LayeredMemoryConfig, MemoryScopeResolver};
+use crate::l1_memory::L1Memory;
 use crate::l2_memory::{L2Memory, L2MemoryEntry};
 use crate::l3_memory::{L3Memory, L3MemoryGraphEdge, L3MemoryGraphEntity, entity_text};
+use crate::pipeline::MaintenanceState;
 use crate::utils::{conversation_id_of, conversation_scope};
 
 /// One located management record.
@@ -404,27 +408,41 @@ impl Memory for LayeredMemory {
     }
 }
 
-/// The component's actuator (public): typed reads plus relation-level
-/// removal. Every read is scoped to the subject: an explicit partition must
-/// belong to it (a conversation registered to the subject, or a long-term
-/// partition its resolver returns), otherwise the read yields nothing.
+/// The component's actuator (public): typed reads, relation-level removal,
+/// and the explicit context-compression command. Every read is scoped to
+/// the subject: an explicit partition must belong to it (a conversation
+/// registered to the subject, or a long-term partition its resolver
+/// returns), otherwise the read yields nothing.
 pub struct LayeredMemoryActuator {
+    l1: Arc<L1Memory>,
     l2: Arc<L2Memory>,
     l3: Arc<L3Memory>,
     scope_resolver: Arc<dyn MemoryScopeResolver>,
+    config: Arc<LayeredMemoryConfig>,
+    state: Arc<MaintenanceState>,
+    model: Option<Arc<dyn Model>>,
 }
 
 impl LayeredMemoryActuator {
     /// Builds the actuator over the component's state.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
+        l1: Arc<L1Memory>,
         l2: Arc<L2Memory>,
         l3: Arc<L3Memory>,
         scope_resolver: Arc<dyn MemoryScopeResolver>,
+        config: Arc<LayeredMemoryConfig>,
+        state: Arc<MaintenanceState>,
+        model: Option<Arc<dyn Model>>,
     ) -> Self {
         Self {
+            l1,
             l2,
             l3,
             scope_resolver,
+            config,
+            state,
+            model,
         }
     }
 
@@ -502,6 +520,33 @@ impl LayeredMemoryActuator {
             return Ok(false);
         }
         self.l3.forget_relation(scope, from, relation_type, to)
+    }
+
+    /// Compresses the conversation's visible context, keeping the configured
+    /// number of recent turns verbatim (`context_compact_keep_turns`).
+    ///
+    /// The compressed turns are consolidated into L2 first, then leave both
+    /// the verbatim recent window and the working-memory recall; the
+    /// compression boundary is persisted, so a restart does not restore
+    /// them. The command waits for an in-flight background maintenance run
+    /// of the same conversation. A failure leaves the boundary unadvanced
+    /// (the command is safe to retry; consolidation is at-least-once).
+    pub async fn compact_context(
+        &self,
+        subject: &Subject,
+        conversation_id: &str,
+    ) -> Result<(), MemoryFailure> {
+        compaction::compact_context(
+            &self.l1,
+            &self.l2,
+            &self.l3,
+            &self.config,
+            &self.state,
+            self.model.clone(),
+            subject,
+            conversation_id,
+        )
+        .await
     }
 }
 

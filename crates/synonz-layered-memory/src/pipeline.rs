@@ -11,6 +11,7 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 
+use futures::channel::oneshot;
 use futures::future::BoxFuture;
 use synonz::{
     MemoryFailure, MemoryPipeline, MemoryScope, Model, PipelineConversationContext,
@@ -40,25 +41,36 @@ impl LayeredMemoryPipeline {
         l2: Arc<L2Memory>,
         l3: Arc<L3Memory>,
         config: Arc<LayeredMemoryConfig>,
+        state: Arc<MaintenanceState>,
     ) -> Self {
         Self {
             l1,
             l2,
             l3,
             config,
-            state: Arc::new(MaintenanceState::default()),
+            state,
         }
     }
 }
 
 /// Per-process maintenance hints. The store's compaction cursor is
 /// authoritative; the pending count is only a trigger hint, refreshed from
-/// the store whenever a maintenance run finishes. The busy set serializes
-/// maintenance per conversation.
+/// the store whenever a maintenance run finishes. The busy gate serializes
+/// maintenance per conversation: background runs claim it opportunistically
+/// (skipping when a run is in flight), the explicit context-compression
+/// command waits for it.
 #[derive(Default)]
-struct MaintenanceState {
+pub(crate) struct MaintenanceState {
     pending: Mutex<HashMap<String, usize>>,
-    busy: Mutex<HashSet<String>>,
+    busy: Mutex<Busy>,
+}
+
+/// The per-conversation busy gate: held keys plus the waiters to wake when
+/// a key is released.
+#[derive(Default)]
+struct Busy {
+    held: HashSet<String>,
+    waiters: HashMap<String, Vec<oneshot::Sender<()>>>,
 }
 
 impl MaintenanceState {
@@ -104,35 +116,60 @@ impl MaintenanceState {
     /// Claims the per-partition maintenance slot, or `None` when a run is
     /// already in flight.
     fn claim(state: &Arc<Self>, key: &str) -> Option<BusyGuard> {
-        if !state
-            .busy
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
-            .insert(key.to_string())
-        {
+        let mut busy = state.busy.lock().unwrap_or_else(|p| p.into_inner());
+        if !busy.held.insert(key.to_string()) {
             return None;
         }
+        drop(busy);
         Some(BusyGuard {
             state: Arc::clone(state),
             key: key.to_string(),
         })
     }
+
+    /// Claims the per-partition maintenance slot, waiting for an in-flight
+    /// run to finish.
+    pub(crate) async fn claim_wait(state: &Arc<Self>, key: &str) -> BusyGuard {
+        loop {
+            let waiter = {
+                let mut busy = state.busy.lock().unwrap_or_else(|p| p.into_inner());
+                if busy.held.insert(key.to_string()) {
+                    return BusyGuard {
+                        state: Arc::clone(state),
+                        key: key.to_string(),
+                    };
+                }
+                let (sender, receiver) = oneshot::channel();
+                busy.waiters
+                    .entry(key.to_string())
+                    .or_default()
+                    .push(sender);
+                receiver
+            };
+            let _ = waiter.await;
+        }
+    }
 }
 
 /// Releases the per-partition maintenance slot on drop (task completion or
-/// cancellation).
-struct BusyGuard {
+/// cancellation) and wakes the waiting claimants.
+pub(crate) struct BusyGuard {
     state: Arc<MaintenanceState>,
     key: String,
 }
 
 impl Drop for BusyGuard {
     fn drop(&mut self) {
-        self.state
-            .busy
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
-            .remove(&self.key);
+        let waiters = {
+            let mut busy = self.state.busy.lock().unwrap_or_else(|p| p.into_inner());
+            busy.held.remove(&self.key);
+            busy.waiters.remove(&self.key)
+        };
+        if let Some(waiters) = waiters {
+            for waiter in waiters {
+                let _ = waiter.send(());
+            }
+        }
     }
 }
 

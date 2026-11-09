@@ -20,7 +20,7 @@ use crate::l3_memory::{
 };
 use crate::memory::{LayeredMemory, LayeredMemoryActuator};
 use crate::observation::LayeredMemoryObserver;
-use crate::pipeline::LayeredMemoryPipeline;
+use crate::pipeline::{LayeredMemoryPipeline, MaintenanceState};
 use crate::rewriter::CoreferenceInputRewriterProvider;
 use crate::topic_detector::SimilarityTopicDetectorProvider;
 
@@ -43,6 +43,7 @@ pub struct LayeredMemoryProvider {
     pub(crate) config: Arc<LayeredMemoryConfig>,
     pub(crate) model: Option<Arc<dyn Model>>,
     pub(crate) observer: Option<Arc<dyn LayeredMemoryObserver>>,
+    pub(crate) state: Arc<MaintenanceState>,
 }
 
 impl LayeredMemoryProvider {
@@ -51,13 +52,18 @@ impl LayeredMemoryProvider {
         LayeredMemoryProviderBuilder::default()
     }
 
-    /// The actuator: typed reads (L2 entries, L3 entities, L3 relations)
-    /// plus relation-level removal.
+    /// The actuator: typed reads (L2 entries, L3 entities, L3 relations),
+    /// relation-level removal, and the explicit context-compression
+    /// command.
     pub fn actuator(&self) -> LayeredMemoryActuator {
         LayeredMemoryActuator::new(
+            Arc::clone(&self.l1),
             Arc::clone(&self.l2),
             Arc::clone(&self.l3),
             Arc::clone(&self.scope_resolver),
+            Arc::clone(&self.config),
+            Arc::clone(&self.state),
+            self.model.clone(),
         )
     }
 
@@ -106,6 +112,7 @@ impl MemoryProvider for LayeredMemoryProvider {
             Arc::clone(&self.l2),
             Arc::clone(&self.l3),
             Arc::clone(&self.config),
+            Arc::clone(&self.state),
         ))
     }
 
@@ -278,6 +285,7 @@ impl LayeredMemoryProviderBuilder {
             config,
             model: self.model,
             observer: self.observer,
+            state: Arc::new(MaintenanceState::default()),
         }
     }
 }

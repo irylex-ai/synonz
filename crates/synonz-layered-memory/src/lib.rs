@@ -22,6 +22,14 @@
 //! replaceable; every piece ships a bundled default, so the component works
 //! out of the box and scales by swapping pieces.
 //!
+//! The application can also compress the conversation's visible context
+//! explicitly ([`LayeredMemoryActuator::compact_context`]): the turns up to
+//! a durable boundary are consolidated into L2, then leave both the
+//! verbatim recent window and the working-memory recall. The keep is
+//! application-level configuration
+//! ([`LayeredMemoryConfig::context_compact_keep_turns`], default the most
+//! recent turn).
+//!
 //! # Registration
 //!
 //! ```no_run
@@ -49,6 +57,7 @@
 //! framework as `Failed` facts.
 
 mod assembler;
+mod compaction;
 mod config;
 mod embedding;
 mod l1_memory;

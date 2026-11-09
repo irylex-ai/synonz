@@ -164,3 +164,75 @@ fn clearing_the_partition_resets_the_cursor() {
     store.append(again.clone()).unwrap();
     assert_eq!(store.uncompacted(&scope).unwrap(), vec![again]);
 }
+
+#[test]
+fn the_context_boundary_is_idempotent_and_monotonic() {
+    let store = InProcessL1MemoryStore::new(10);
+    let scope = MemoryScope::new("conversation:compact");
+    let first = L1MemoryEntry::new(scope.clone(), "t", "one", "1", 1);
+    let second = L1MemoryEntry::new(scope.clone(), "t", "two", "2", 2);
+    let third = L1MemoryEntry::new(scope.clone(), "t", "three", "3", 3);
+    store.append(first.clone()).unwrap();
+    store.append(second.clone()).unwrap();
+    store.append(third.clone()).unwrap();
+
+    assert_eq!(store.context_boundary(&scope).unwrap(), None);
+
+    store.mark_context_boundary(&scope, &second.id).unwrap();
+    assert_eq!(
+        store.context_boundary(&scope).unwrap(),
+        Some(second.id.clone())
+    );
+
+    // Repeating the same mark or naming an older turn never regresses.
+    store.mark_context_boundary(&scope, &second.id).unwrap();
+    store.mark_context_boundary(&scope, &first.id).unwrap();
+    assert_eq!(
+        store.context_boundary(&scope).unwrap(),
+        Some(second.id.clone())
+    );
+
+    // An unknown turn is a no-op.
+    store.mark_context_boundary(&scope, "missing").unwrap();
+    assert_eq!(
+        store.context_boundary(&scope).unwrap(),
+        Some(second.id.clone())
+    );
+
+    store.mark_context_boundary(&scope, &third.id).unwrap();
+    assert_eq!(store.context_boundary(&scope).unwrap(), Some(third.id));
+    assert_eq!(
+        store.recent(&scope, 10).unwrap().len(),
+        3,
+        "the boundary never removes turns"
+    );
+}
+
+#[test]
+fn the_context_boundary_survives_the_removal_of_its_turn() {
+    let store = InProcessL1MemoryStore::new(10);
+    let scope = MemoryScope::new("conversation:compact");
+    let first = L1MemoryEntry::new(scope.clone(), "t", "one", "1", 1);
+    let second = L1MemoryEntry::new(scope.clone(), "t", "two", "2", 2);
+    store.append(first.clone()).unwrap();
+    store.append(second.clone()).unwrap();
+    store.mark_context_boundary(&scope, &first.id).unwrap();
+
+    assert!(store.remove(&scope, &first.id).unwrap());
+    assert_eq!(
+        store.context_boundary(&scope).unwrap(),
+        Some(first.id),
+        "removing the turn the boundary names does not reset the boundary"
+    );
+}
+
+#[test]
+fn clearing_the_partition_resets_the_context_boundary() {
+    let store = InProcessL1MemoryStore::new(10);
+    let scope = MemoryScope::new("conversation:compact");
+    let first = L1MemoryEntry::new(scope.clone(), "t", "one", "1", 1);
+    store.append(first.clone()).unwrap();
+    store.mark_context_boundary(&scope, &first.id).unwrap();
+    store.clear(&scope).unwrap();
+    assert_eq!(store.context_boundary(&scope).unwrap(), None);
+}

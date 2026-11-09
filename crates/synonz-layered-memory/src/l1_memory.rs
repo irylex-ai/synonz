@@ -64,6 +64,11 @@ impl L1MemoryEntry {
 /// the cursor alongside the turns (for example as a snapshot field or a
 /// position in the append log) and keep the uncompacted turns readable — a
 /// capacity smaller than the compaction window silently drops pending turns.
+///
+/// It also owns the **compression boundary**: the last turn an explicit
+/// context compression (`LayeredMemoryActuator::compact_context`) has
+/// compressed out of the read phase. Persistent implementations persist it
+/// alongside the turns and the compaction cursor (same durability path).
 pub trait L1MemoryStore: Send + Sync + 'static {
     /// Appends one turn (the implementation evicts the oldest turns beyond
     /// its capacity).
@@ -92,10 +97,31 @@ pub trait L1MemoryStore: Send + Sync + 'static {
     /// already behind the cursor, is a no-op.
     fn mark_compacted(&self, scope: &MemoryScope, through: &str) -> Result<(), MemoryStoreError>;
 
+    /// The read-phase compression boundary: the id of the last turn an
+    /// explicit context compression has compressed out of the read phase
+    /// (`None` = never compressed).
+    ///
+    /// The boundary stays set when the turn it names is removed: the
+    /// read-phase exclusion resolves the boundary against the retained
+    /// turns, and every remaining turn is newer.
+    fn context_boundary(&self, scope: &MemoryScope) -> Result<Option<String>, MemoryStoreError>;
+
+    /// Marks every turn up to and including `through` as compressed out of
+    /// the read phase.
+    ///
+    /// Idempotent and monotonic: a turn the store no longer holds, or one
+    /// already behind the boundary, is a no-op.
+    fn mark_context_boundary(
+        &self,
+        scope: &MemoryScope,
+        through: &str,
+    ) -> Result<(), MemoryStoreError>;
+
     /// Removes one entry by id (idempotent).
     fn remove(&self, scope: &MemoryScope, id: &str) -> Result<bool, MemoryStoreError>;
 
-    /// Clears the partition (including its compaction cursor).
+    /// Clears the partition (including its compaction cursor and its
+    /// compression boundary).
     fn clear(&self, scope: &MemoryScope) -> Result<(), MemoryStoreError>;
 }
 
@@ -105,6 +131,7 @@ pub struct InProcessL1MemoryStore {
     retained_turns: usize,
     entries: Mutex<HashMap<String, VecDeque<L1MemoryEntry>>>,
     cursors: Mutex<HashMap<String, String>>,
+    boundaries: Mutex<HashMap<String, String>>,
 }
 
 impl InProcessL1MemoryStore {
@@ -114,6 +141,7 @@ impl InProcessL1MemoryStore {
             retained_turns,
             entries: Mutex::new(HashMap::new()),
             cursors: Mutex::new(HashMap::new()),
+            boundaries: Mutex::new(HashMap::new()),
         }
     }
 }
@@ -180,6 +208,38 @@ impl L1MemoryStore for InProcessL1MemoryStore {
         Ok(())
     }
 
+    fn context_boundary(&self, scope: &MemoryScope) -> Result<Option<String>, MemoryStoreError> {
+        Ok(self
+            .boundaries
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .get(scope.as_str())
+            .cloned())
+    }
+
+    fn mark_context_boundary(
+        &self,
+        scope: &MemoryScope,
+        through: &str,
+    ) -> Result<(), MemoryStoreError> {
+        let entries = self.entries.lock().unwrap_or_else(|p| p.into_inner());
+        let Some(queue) = entries.get(scope.as_str()) else {
+            return Ok(());
+        };
+        let Some(index) = queue.iter().position(|entry| entry.id == through) else {
+            return Ok(());
+        };
+        let mut boundaries = self.boundaries.lock().unwrap_or_else(|p| p.into_inner());
+        let current = boundaries
+            .get(scope.as_str())
+            .and_then(|id| queue.iter().position(|entry| entry.id == *id));
+        if current.is_some_and(|current| current >= index) {
+            return Ok(());
+        }
+        boundaries.insert(scope.to_string(), through.to_string());
+        Ok(())
+    }
+
     fn remove(&self, scope: &MemoryScope, id: &str) -> Result<bool, MemoryStoreError> {
         let mut entries = self.entries.lock().unwrap_or_else(|p| p.into_inner());
         let Some(queue) = entries.get_mut(scope.as_str()) else {
@@ -205,20 +265,29 @@ impl L1MemoryStore for InProcessL1MemoryStore {
         entries.remove(scope.as_str());
         let mut cursors = self.cursors.lock().unwrap_or_else(|p| p.into_inner());
         cursors.remove(scope.as_str());
+        let mut boundaries = self.boundaries.lock().unwrap_or_else(|p| p.into_inner());
+        boundaries.remove(scope.as_str());
         Ok(())
     }
 }
 
-/// The component's L1 domain object (internal): archiving completed turns
-/// and reading the working-memory window.
+/// The component's L1 domain object (internal): archiving completed turns,
+/// reading the working-memory window, and the read-phase compression
+/// boundary (read-through cached: the component is the boundary's only
+/// writer, so the cache is refreshed on marking and never goes stale; a new
+/// process reads the store once per conversation).
 pub(crate) struct L1Memory {
     store: Arc<dyn L1MemoryStore>,
+    boundary_cache: Mutex<HashMap<String, Option<String>>>,
 }
 
 impl L1Memory {
     /// Builds the layer over its store.
     pub(crate) fn new(store: Arc<dyn L1MemoryStore>) -> Self {
-        Self { store }
+        Self {
+            store,
+            boundary_cache: Mutex::new(HashMap::new()),
+        }
     }
 
     /// Archives one completed turn (one entry).
@@ -262,5 +331,41 @@ impl L1Memory {
         through: &str,
     ) -> Result<(), MemoryStoreError> {
         self.store.mark_compacted(scope, through)
+    }
+
+    /// The read-phase compression boundary (read-through cached).
+    pub(crate) fn context_boundary(
+        &self,
+        scope: &MemoryScope,
+    ) -> Result<Option<String>, MemoryStoreError> {
+        if let Some(cached) = self
+            .boundary_cache
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .get(scope.as_str())
+        {
+            return Ok(cached.clone());
+        }
+        let boundary = self.store.context_boundary(scope)?;
+        self.boundary_cache
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .insert(scope.to_string(), boundary.clone());
+        Ok(boundary)
+    }
+
+    /// Marks every turn up to and including `through` as compressed out of
+    /// the read phase (refreshes the cache).
+    pub(crate) fn mark_context_boundary(
+        &self,
+        scope: &MemoryScope,
+        through: &str,
+    ) -> Result<(), MemoryStoreError> {
+        self.store.mark_context_boundary(scope, through)?;
+        self.boundary_cache
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .insert(scope.to_string(), Some(through.to_string()));
+        Ok(())
     }
 }

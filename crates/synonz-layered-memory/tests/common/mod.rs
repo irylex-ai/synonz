@@ -400,6 +400,19 @@ impl synonz_layered_memory::L1MemoryStore for InProcessL1MemoryStoreView {
     ) -> Result<(), synonz::MemoryStoreError> {
         self.0.mark_compacted(scope, through)
     }
+    fn context_boundary(
+        &self,
+        scope: &MemoryScope,
+    ) -> Result<Option<String>, synonz::MemoryStoreError> {
+        self.0.context_boundary(scope)
+    }
+    fn mark_context_boundary(
+        &self,
+        scope: &MemoryScope,
+        through: &str,
+    ) -> Result<(), synonz::MemoryStoreError> {
+        self.0.mark_context_boundary(scope, through)
+    }
     fn remove(&self, scope: &MemoryScope, id: &str) -> Result<bool, synonz::MemoryStoreError> {
         self.0.remove(scope, id)
     }

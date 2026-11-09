@@ -174,17 +174,7 @@ impl MemoryContextAssembler for LayeredMemoryContextAssembler {
 
             let mut candidates: Vec<Candidate> = Vec::new();
 
-            // The read-phase window: the recent turns replayed verbatim.
-            // They are excluded from the recall pool so the frame never
-            // repeats a turn; the effective window is bounded by the
-            // configured size, the working-memory window, and the material
-            // the framework provided.
-            let window = params
-                .context_recent_turns
-                .min(params.l1_turns)
-                .min(input.recent.len());
-
-            // L1: the conversation's turns (the replayed window excluded).
+            // L1: the conversation's turns.
             let l1_entries = match self.l1.entries(&partition, params.l1_turns) {
                 Ok(entries) => entries,
                 Err(error) => {
@@ -192,8 +182,43 @@ impl MemoryContextAssembler for LayeredMemoryContextAssembler {
                     Vec::new()
                 }
             };
-            let excluded = window.min(l1_entries.len());
-            for turn in &l1_entries[..l1_entries.len() - excluded] {
+
+            // The read-phase compression boundary: turns up to and
+            // including it left the window and the recall pool. A boundary
+            // whose turn is no longer retained leaves every remaining turn
+            // visible (eviction is oldest-first).
+            let boundary = match self.l1.context_boundary(&partition) {
+                Ok(boundary) => boundary,
+                Err(error) => {
+                    failures.push(MemoryFailure::new("recall", format!("l1: {error}")));
+                    None
+                }
+            };
+            let boundary_index = match &boundary {
+                Some(through) => l1_entries.iter().position(|entry| &entry.id == through),
+                None => None,
+            };
+
+            // The read-phase window: the recent turns replayed verbatim,
+            // never reaching back across the compression boundary. The
+            // effective window is bounded by the configured size, the
+            // working-memory window, the material the framework provided,
+            // and the turns the boundary leaves visible.
+            let visible_after_boundary = boundary_index
+                .map(|index| l1_entries.len() - index - 1)
+                .unwrap_or(l1_entries.len());
+            let window = params
+                .context_recent_turns
+                .min(params.l1_turns)
+                .min(input.recent.len())
+                .min(visible_after_boundary);
+
+            // The L1 recall pool: the turns after the boundary that are not
+            // part of the replayed window (the replayed suffix is excluded
+            // so the frame never repeats a turn).
+            let recall_start = boundary_index.map(|index| index + 1).unwrap_or(0);
+            let recall_end = l1_entries.len() - window;
+            for turn in &l1_entries[recall_start..recall_end] {
                 self.push_l1_candidate(&mut candidates, turn, query_vector.as_deref(), input.topic)
                     .await
                     .unwrap_or_else(|failure| failures.push(failure));

@@ -86,6 +86,15 @@ pub struct LayeredMemoryConfig {
     /// `0` keeps the recall-only frame. The effective window is
     /// `min(this, l1_turns, provided material)`.
     pub context_recent_turns: usize,
+    /// How many recent turns an explicit context compression
+    /// ([`crate::LayeredMemoryActuator::compact_context`]) keeps verbatim
+    /// (application level, applies to every conversation).
+    ///
+    /// `0` clears the visible window. The compressed turns leave both the
+    /// verbatim window and the working-memory recall; the window then grows
+    /// back to `context_recent_turns` with new turns. The effective instant
+    /// window is `min(this, context_recent_turns)`.
+    pub context_compact_keep_turns: usize,
 }
 
 impl Default for LayeredMemoryConfig {
@@ -115,6 +124,7 @@ impl Default for LayeredMemoryConfig {
             recall_default_importance: 0.65,
             topic_shift_similarity: 0.5,
             context_recent_turns: 0,
+            context_compact_keep_turns: 1,
         }
     }
 }
